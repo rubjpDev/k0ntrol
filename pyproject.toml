@@ -1,0 +1,21 @@
+[project]
+name = "k0ntrol"
+version = "0.0.1.dev0"
+description = "Local harness for coding agents: deterministic routing, TDD loop, human gates."
+requires-python = ">=3.11"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+dependencies = ["pyyaml>=6"]
+
+[project.scripts]
+k0 = "k0ntrol.cli:main"
+
+[dependency-groups]
+dev = ["pytest>=8"]
+
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
