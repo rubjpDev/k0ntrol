@@ -5,7 +5,10 @@ description = "Local harness for coding agents: deterministic routing, TDD loop,
 requires-python = ">=3.11"
 license = "Apache-2.0"
 license-files = ["LICENSE"]
-dependencies = ["pyyaml>=6"]
+dependencies = [
+    "pyyaml>=6",
+    "rich>=13",
+]
 
 [project.scripts]
 k0 = "k0ntrol.cli:main"
