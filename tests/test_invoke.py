@@ -74,3 +74,37 @@ def test_is_error_payload_raises_even_on_exit_zero(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     with pytest.raises(BackendError, match="boom"):
         invoke(MODE, "q")
+
+
+def test_successful_invoke_appends_ms_and_chars(tmp_path, monkeypatch):
+    agent = tmp_path / "cursor-agent"
+    write_agent(
+        agent,
+        "import json\n"
+        "print(json.dumps({'type':'result','subtype':'success','is_error':False,"
+        "'result':'hello bullets'}))\n",
+    )
+    monkeypatch.setenv("K0_CURSOR_AGENT", str(agent))
+    monkeypatch.chdir(tmp_path)
+    invoke(MODE, "q")
+    line = json.loads((tmp_path / ".k0-mem" / "events.jsonl").read_text().splitlines()[-1])
+    assert line["chars"] == len("hello bullets")
+    assert isinstance(line["ms"], int) and line["ms"] >= 0
+    assert "tokens" not in line
+
+
+def test_tokens_are_recorded_only_when_usage_is_present(tmp_path, monkeypatch):
+    agent = tmp_path / "cursor-agent"
+    write_agent(
+        agent,
+        "import json\n"
+        "print(json.dumps({'type':'result','subtype':'success','is_error':False,"
+        "'result':'hi','usage':{'input_tokens':3,'output_tokens':4}}))\n",
+    )
+    monkeypatch.setenv("K0_CURSOR_AGENT", str(agent))
+    monkeypatch.chdir(tmp_path)
+    assert invoke(MODE, "q") == "hi"
+    line = json.loads((tmp_path / ".k0-mem" / "events.jsonl").read_text().splitlines()[-1])
+    assert line["tokens"] == 7
+    assert line["chars"] == 2
+
