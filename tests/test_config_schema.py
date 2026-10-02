@@ -66,6 +66,7 @@ def test_load_config_validates_the_merged_result(tmp_path):
 def test_doctor_prints_effective_config(tmp_path, monkeypatch, capsys):
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setattr("k0ntrol.backends.cursor.cursor_problems", lambda cfg: [])
     assert main(["doctor"]) == 0
     assert "threshold_lines: 350" in capsys.readouterr().out
 
