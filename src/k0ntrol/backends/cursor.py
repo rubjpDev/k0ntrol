@@ -26,6 +26,15 @@ def _check_login(exe: str) -> str | None:
     return None
 
 
+def _listed_model_ids(stdout: str) -> set[str]:
+    found: set[str] = set()
+    for line in stdout.splitlines():
+        model_id = line.split(" - ", 1)[0].strip()
+        if model_id:
+            found.add(model_id)
+    return found
+
+
 def _check_models(exe: str, cfg: dict) -> list[str]:
     proc = subprocess.run([exe, "--list-models"], capture_output=True, text=True, check=False)
     if proc.returncode != 0:
@@ -33,13 +42,13 @@ def _check_models(exe: str, cfg: dict) -> list[str]:
         msg = f"cursor-agent: --list-models failed {err}".strip()
         return [msg]
 
-    stdout = proc.stdout
+    listed = _listed_model_ids(proc.stdout)
     problems: list[str] = []
     agents = cfg.get("agents", {})
     for agent_name, agent_cfg in agents.items():
         raw_model = agent_cfg.get("model", "")
         bare_id = raw_model.split("[", 1)[0]
-        if bare_id not in stdout:
+        if bare_id not in listed:
             problems.append(f"{agent_name}: {bare_id}")
     return problems
 

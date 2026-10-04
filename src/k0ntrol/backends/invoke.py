@@ -55,17 +55,24 @@ def _parse_payload(stdout: str) -> dict:
     return data
 
 
+def _token_count(usage: object) -> int | None:
+    if not isinstance(usage, dict):
+        return None
+    incoming = usage.get("input_tokens", usage.get("inputTokens"))
+    outgoing = usage.get("output_tokens", usage.get("outputTokens"))
+    if isinstance(incoming, int) and isinstance(outgoing, int):
+        return incoming + outgoing
+    return None
+
+
 def _record_event(data: dict, elapsed_ms: int) -> None:
     mem_dir = Path.cwd() / ".k0-mem"
     mem_dir.mkdir(parents=True, exist_ok=True)
     result = data["result"]
     event: dict[str, int] = {"ms": elapsed_ms, "chars": len(result)}
-    usage = data.get("usage")
-    if isinstance(usage, dict):
-        in_tok = usage.get("input_tokens")
-        out_tok = usage.get("output_tokens")
-        if isinstance(in_tok, int) and isinstance(out_tok, int):
-            event["tokens"] = in_tok + out_tok
+    tokens = _token_count(data.get("usage"))
+    if tokens is not None:
+        event["tokens"] = tokens
 
     events_file = mem_dir / "events.jsonl"
     with events_file.open("a", encoding="utf-8") as f:

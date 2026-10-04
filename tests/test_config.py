@@ -25,9 +25,9 @@ def test_defaults_only(tmp_path):
 
 def test_default_agent_models_match_selected_cursor_models(tmp_path):
     cfg = load_config(tmp_path, tmp_path / "home")
-    assert cfg["agents"]["spec"]["model"] == "claude-opus-5-5[effort=high,fast=false]"
+    assert cfg["agents"]["spec"]["model"] == "claude-opus-5-5-high"
     for name in ("tester", "coder", "validator", "bulk_reader"):
-        assert cfg["agents"][name]["model"] == "gpt-5.6-luna[effort=high,fast=false]"
+        assert cfg["agents"][name]["model"] == "gpt-5.6-luna-max"
 
 
 def test_home_overrides_defaults(tmp_path):

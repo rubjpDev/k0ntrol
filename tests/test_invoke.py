@@ -108,3 +108,18 @@ def test_tokens_are_recorded_only_when_usage_is_present(tmp_path, monkeypatch):
     assert line["tokens"] == 7
     assert line["chars"] == 2
 
+
+def test_tokens_use_camel_case_usage_from_cursor_agent(tmp_path, monkeypatch):
+    agent = tmp_path / "cursor-agent"
+    write_agent(
+        agent,
+        "import json\n"
+        "print(json.dumps({'type':'result','subtype':'success','is_error':False,"
+        "'result':'pong','usage':{'inputTokens':3,'outputTokens':5}}))\n",
+    )
+    monkeypatch.setenv("K0_CURSOR_AGENT", str(agent))
+    monkeypatch.chdir(tmp_path)
+    assert invoke(MODE, "q") == "pong"
+    line = json.loads((tmp_path / ".k0-mem" / "events.jsonl").read_text().splitlines()[-1])
+    assert line["tokens"] == 8
+

@@ -71,11 +71,41 @@ def test_doctor_passes_when_binary_login_and_models_are_present(project, monkeyp
         "    print('Logged in')\n"
         "    raise SystemExit(0)\n"
         "if sys.argv[1:] == ['--list-models']:\n"
-        "    print('claude-opus-5-5')\n"
-        "    print('gpt-5.6-luna')\n"
+        "    print('claude-opus-5-5-high')\n"
+        "    print('gpt-5.6-luna-max')\n"
         "    raise SystemExit(0)\n"
         "raise SystemExit('unexpected')\n",
     )
     monkeypatch.setenv("K0_CURSOR_AGENT", str(agent))
     assert main(["doctor"]) == 0
     assert "threshold_lines: 350" in capsys.readouterr().out
+
+
+def test_doctor_rejects_a_model_id_that_is_only_a_prefix(project, monkeypatch, capsys):
+    (project / ".k0-mem").mkdir()
+    (project / ".k0-mem" / "config.yaml").write_text(
+        "agents:\n"
+        "  spec: {model: claude-opus-5-5}\n"
+        "  tester: {model: gpt-5.6-luna-high}\n"
+        "  coder: {model: gpt-5.6-luna-high}\n"
+        "  validator: {model: gpt-5.6-luna-high}\n"
+        "  bulk_reader: {model: gpt-5.6-luna-high}\n"
+    )
+    agent = project / "cursor-agent"
+    write_agent(
+        agent,
+        "import sys\n"
+        "if sys.argv[1:] == ['status']:\n"
+        "    print('Logged in')\n"
+        "    raise SystemExit(0)\n"
+        "if sys.argv[1:] == ['--list-models']:\n"
+        "    print('claude-opus-5-5-high - Claude')\n"
+        "    print('gpt-5.6-luna-high - Luna')\n"
+        "    raise SystemExit(0)\n"
+        "raise SystemExit('unexpected')\n",
+    )
+    monkeypatch.setenv("K0_CURSOR_AGENT", str(agent))
+    assert main(["doctor"]) == 1
+    err = capsys.readouterr().err
+    assert "spec: claude-opus-5-5" in err
+    assert "tester:" not in err
