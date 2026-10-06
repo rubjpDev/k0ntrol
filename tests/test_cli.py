@@ -18,6 +18,26 @@ def test_help_flag_shows_k0_usage(capsys):
     assert "usage: k0" in capsys.readouterr().out
 
 
-def test_no_args_prints_help_and_returns_zero(capsys):
+def test_no_args_opens_a_session(capsys, monkeypatch):
+    answers = iter(["/quit"])
+    monkeypatch.setattr("builtins.input", lambda prompt="": next(answers))
     assert main([]) == 0
-    assert "usage: k0" in capsys.readouterr().out
+    captured = capsys.readouterr()
+    assert "usage: k0" not in captured.out
+    assert captured.err == ""
+
+
+def test_no_args_config_error_does_not_open_a_session(capsys, monkeypatch):
+    from k0ntrol.config import ConfigError
+
+    def boom(path):
+        raise ConfigError("backend: must be cursor")
+
+    monkeypatch.setattr("k0ntrol.cli.load_config", boom)
+
+    def refuse_input(prompt=""):
+        raise AssertionError("session opened")
+
+    monkeypatch.setattr("builtins.input", refuse_input)
+    assert main([]) == 1
+    assert capsys.readouterr().err == "config error: backend: must be cursor\n"
