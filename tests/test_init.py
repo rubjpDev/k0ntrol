@@ -36,3 +36,18 @@ def test_cli_init_prints_the_report(tmp_path, capsys):
     out = capsys.readouterr().out
     assert "created .k0-mem/General_mem/Mem.md" in out
     assert (tmp_path / ".k0-mem" / "General_mem" / "Mem.md").is_file()
+
+
+def test_second_init_keeps_existing_files(tmp_path, capsys):
+    assert main(["init", str(tmp_path)]) == 0
+    mem = tmp_path / ".k0-mem" / "General_mem" / "Mem.md"
+    mem.write_text("KEEP\n", encoding="utf-8")
+    note = tmp_path / ".k0-mem" / "Project_context" / "note.md"
+    note.write_text("note\n", encoding="utf-8")
+    assert main(["init", str(tmp_path)]) == 0
+    assert mem.read_text(encoding="utf-8") == "KEEP\n"
+    assert note.read_text(encoding="utf-8") == "note\n"
+    out = capsys.readouterr().out
+    assert "exists .k0-mem/General_mem/Mem.md" in out
+    assert "exists .k0-mem/Project_context" in out
+    assert "created .k0-mem/General_mem/Mem.md" not in out.split("exists .k0-mem/General_mem/Mem.md")[-1]

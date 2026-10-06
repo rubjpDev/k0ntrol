@@ -22,10 +22,14 @@ def init_project(root: Path) -> list[str]:
     )
     lines = []
     for path, content in entries:
-        if content is None:
-            path.mkdir()
+        if path.exists():
+            action = "exists"
         else:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(content, encoding="utf-8")
-        lines.append(f"created {path.relative_to(root).as_posix()}")
+            if content is None:
+                path.mkdir()
+            else:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(content, encoding="utf-8")
+            action = "created"
+        lines.append(f"{action} {path.relative_to(root).as_posix()}")
     return lines
