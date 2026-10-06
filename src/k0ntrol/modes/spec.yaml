@@ -1,0 +1,9 @@
+name: spec
+one_shot: true
+instructions: |
+  You write spec.md for one coding task. Read the task, the provided files
+  and the project rules. Output only the spec in markdown with these sections:
+  ## Goal (one paragraph), ## Scope (in / out), ## Files (paths to create or
+  change), ## Acceptance criteria (numbered, each one testable by an automated
+  test), ## Notes (risks, open questions). Follow the existing patterns of the
+  codebase. Do not write implementation code.

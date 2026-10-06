@@ -1,0 +1,190 @@
+import json
+import re
+import stat
+import sys
+from pathlib import Path
+
+import pytest
+
+from k0ntrol.backends.invoke import (
+    BackendError,
+    current_event_context,
+    invoke,
+    set_event_context,
+)
+from k0ntrol.modespec import ModeSpec
+
+
+MODE = ModeSpec(
+    name="bulk_reader",
+    instructions="You are a precise code analyst.",
+    model="gpt-5.6-luna[effort=high,fast=false]",
+    temperature=0.2,
+    one_shot=True,
+)
+
+
+def write_agent(path: Path, body: str) -> None:
+    path.write_text(f"#!{sys.executable}\n{body}")
+    path.chmod(path.stat().st_mode | stat.S_IEXEC)
+
+
+def test_invoke_returns_result_and_sends_instructions_with_model(tmp_path, monkeypatch):
+    argv_file = tmp_path / "argv.json"
+    agent = tmp_path / "cursor-agent"
+    write_agent(
+        agent,
+        "import json, os, sys\n"
+        "from pathlib import Path\n"
+        "Path(os.environ['K0_ARGV']).write_text(json.dumps(sys.argv[1:]))\n"
+        "print(json.dumps({'type':'result','subtype':'success','is_error':False,"
+        "'result':'hello bullets'}))\n",
+    )
+    monkeypatch.setenv("K0_CURSOR_AGENT", str(agent))
+    monkeypatch.setenv("K0_ARGV", str(argv_file))
+    monkeypatch.chdir(tmp_path)
+    assert invoke(MODE, "what is x?") == "hello bullets"
+    argv = json.loads(argv_file.read_text())
+    assert argv == [
+        "-p",
+        "--output-format",
+        "json",
+        "--model",
+        "gpt-5.6-luna[effort=high,fast=false]",
+        "You are a precise code analyst.\n\nwhat is x?",
+    ]
+
+
+def test_nonzero_exit_raises_backend_error_with_stderr(tmp_path, monkeypatch):
+    agent = tmp_path / "cursor-agent"
+    write_agent(
+        agent,
+        "import sys\n"
+        "sys.stderr.write('Not authenticated\\n')\n"
+        "raise SystemExit(1)\n",
+    )
+    monkeypatch.setenv("K0_CURSOR_AGENT", str(agent))
+    monkeypatch.chdir(tmp_path)
+    with pytest.raises(BackendError, match="Not authenticated"):
+        invoke(MODE, "q")
+
+
+def test_is_error_payload_raises_even_on_exit_zero(tmp_path, monkeypatch):
+    agent = tmp_path / "cursor-agent"
+    write_agent(
+        agent,
+        "import json\n"
+        "print(json.dumps({'type':'result','is_error':True,'result':'boom'}))\n",
+    )
+    monkeypatch.setenv("K0_CURSOR_AGENT", str(agent))
+    monkeypatch.chdir(tmp_path)
+    with pytest.raises(BackendError, match="boom"):
+        invoke(MODE, "q")
+
+
+def test_successful_invoke_appends_ms_and_chars(tmp_path, monkeypatch):
+    agent = tmp_path / "cursor-agent"
+    write_agent(
+        agent,
+        "import json\n"
+        "print(json.dumps({'type':'result','subtype':'success','is_error':False,"
+        "'result':'hello bullets'}))\n",
+    )
+    monkeypatch.setenv("K0_CURSOR_AGENT", str(agent))
+    monkeypatch.chdir(tmp_path)
+    invoke(MODE, "q")
+    line = json.loads((tmp_path / ".k0-mem" / "events.jsonl").read_text().splitlines()[-1])
+    assert line["chars"] == len("hello bullets")
+    assert isinstance(line["ms"], int) and line["ms"] >= 0
+    assert "tokens" not in line
+
+
+def test_tokens_are_recorded_only_when_usage_is_present(tmp_path, monkeypatch):
+    agent = tmp_path / "cursor-agent"
+    write_agent(
+        agent,
+        "import json\n"
+        "print(json.dumps({'type':'result','subtype':'success','is_error':False,"
+        "'result':'hi','usage':{'input_tokens':3,'output_tokens':4}}))\n",
+    )
+    monkeypatch.setenv("K0_CURSOR_AGENT", str(agent))
+    monkeypatch.chdir(tmp_path)
+    assert invoke(MODE, "q") == "hi"
+    line = json.loads((tmp_path / ".k0-mem" / "events.jsonl").read_text().splitlines()[-1])
+    assert line["tokens"] == 7
+    assert line["chars"] == 2
+
+
+def test_tokens_use_camel_case_usage_from_cursor_agent(tmp_path, monkeypatch):
+    agent = tmp_path / "cursor-agent"
+    write_agent(
+        agent,
+        "import json\n"
+        "print(json.dumps({'type':'result','subtype':'success','is_error':False,"
+        "'result':'pong','usage':{'inputTokens':3,'outputTokens':5}}))\n",
+    )
+    monkeypatch.setenv("K0_CURSOR_AGENT", str(agent))
+    monkeypatch.chdir(tmp_path)
+    assert invoke(MODE, "q") == "pong"
+    line = json.loads((tmp_path / ".k0-mem" / "events.jsonl").read_text().splitlines()[-1])
+    assert line["tokens"] == 8
+
+
+def test_success_event_carries_run_step_and_identity(tmp_path, monkeypatch):
+    agent = tmp_path / "cursor-agent"
+    write_agent(
+        agent,
+        "import json\n"
+        "print(json.dumps({'type':'result','subtype':'success','is_error':False,"
+        "'result':'hello bullets'}))\n",
+    )
+    monkeypatch.setenv("K0_CURSOR_AGENT", str(agent))
+    monkeypatch.chdir(tmp_path)
+    set_event_context(run="run-1", step="ask")
+    assert invoke(MODE, "q") == "hello bullets"
+    line = json.loads((tmp_path / ".k0-mem" / "events.jsonl").read_text().splitlines()[-1])
+    assert line["ts"]
+    assert re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z", line["ts"])
+    assert line["run"] == "run-1"
+    assert line["step"] == "ask"
+    assert line["mode"] == "bulk_reader"
+    assert line["model"] == MODE.model
+    assert line["chars"] == len("hello bullets")
+    assert isinstance(line["ms"], int) and line["ms"] >= 0
+    assert line["ok"] is True
+    assert line["err"] == ""
+    assert list(line)[:9] == [
+        "ts",
+        "run",
+        "step",
+        "mode",
+        "model",
+        "ms",
+        "chars",
+        "ok",
+        "err",
+    ]
+
+
+def test_failed_invoke_appends_ok_false(tmp_path, monkeypatch):
+    agent = tmp_path / "cursor-agent"
+    write_agent(
+        agent,
+        "import sys\n"
+        "sys.stderr.write('Not authenticated\\n')\n"
+        "raise SystemExit(1)\n",
+    )
+    monkeypatch.setenv("K0_CURSOR_AGENT", str(agent))
+    monkeypatch.chdir(tmp_path)
+    set_event_context(run="run-2", step="coder")
+    with pytest.raises(BackendError, match="Not authenticated"):
+        invoke(MODE, "q")
+    line = json.loads((tmp_path / ".k0-mem" / "events.jsonl").read_text().splitlines()[-1])
+    assert line["ok"] is False
+    assert line["err"] == "Not authenticated"
+    assert line["chars"] == 0
+    assert line["run"] == "run-2"
+    assert line["step"] == "coder"
+    assert line["mode"] == "bulk_reader"
+    assert isinstance(line["ms"], int) and line["ms"] >= 0
+
