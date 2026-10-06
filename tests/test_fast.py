@@ -177,3 +177,51 @@ def test_configured_suite_returns_the_process_code(tmp_path):
         f'{sys.executable} -c "raise SystemExit(3)"',
     )
     assert code == 3
+
+
+def test_fast_and_validator_steps(tmp_path):
+    from k0ntrol.backends.invoke import current_event_context
+    from k0ntrol.harness.loop import run_fast
+
+    (tmp_path / "a.py").write_text("a\n", encoding="utf-8")
+    seen = []
+
+    def fake_invoke(mode, prompt):
+        seen.append((mode.name, current_event_context()["step"], current_event_context()["run"]))
+        if mode.name == "tester":
+            return "FILE tests/test_fast.py\ndef test_fast():\n    assert False\n"
+        if mode.name == "coder":
+            return "FILE a.py\nBREAK\n"
+        return "- test_old failed\n"
+
+    def suite(root):
+        text = (root / "a.py").read_text(encoding="utf-8")
+        if "BREAK" in text:
+            return 1, "FAILED tests/test_old.py::test_old"
+        return 0, "ok\n"
+
+    cfg = {
+        "backend": "cursor",
+        "threshold_lines": 350,
+        "test_cmd": "pytest -q",
+        "max_retries": 0,
+        "agents": {
+            name: {"model": "m"}
+            for name in ("spec", "tester", "coder", "validator", "bulk_reader")
+        },
+    }
+    status = run_fast(
+        "change @a.py",
+        root=tmp_path,
+        config=cfg,
+        read_line=lambda: "y",
+        write=lambda _line: None,
+        invoke=fake_invoke,
+        bulk_read=lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("bulk")),
+        run_suite=suite,
+    )
+    assert status == "stuck"
+    assert [item[0] for item in seen] == ["tester", "coder", "validator"]
+    assert [item[1] for item in seen] == ["tester", "coder", "validator"]
+    assert len({item[2] for item in seen}) == 1
+    assert seen[0][2]

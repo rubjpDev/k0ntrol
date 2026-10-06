@@ -256,3 +256,27 @@ def test_fast_in_the_session_skips_spec(tmp_path):
     assert "spec" not in names
     assert "tester" in names
     assert "change" in (tmp_path / "spec.md").read_text(encoding="utf-8")
+
+
+def test_ask_sets_one_run_and_the_ask_step(tmp_path):
+    from k0ntrol.backends.invoke import current_event_context
+
+    (tmp_path / "a.py").write_text("a\n", encoding="utf-8")
+    seen = []
+
+    def fake_invoke(mode, prompt):
+        seen.append(dict(current_event_context()))
+        return "ok\n"
+
+    lines = iter(["/ask what @a.py", "/quit"])
+    code = run_session(
+        lambda: next(lines),
+        lambda _line: None,
+        root=tmp_path,
+        config=config(),
+        invoke=fake_invoke,
+        bulk_read=forbid,
+    )
+    assert code == 0
+    assert seen[0]["step"] == "ask"
+    assert seen[0]["run"]

@@ -1,11 +1,17 @@
 import json
+import re
 import stat
 import sys
 from pathlib import Path
 
 import pytest
 
-from k0ntrol.backends.invoke import BackendError, invoke
+from k0ntrol.backends.invoke import (
+    BackendError,
+    current_event_context,
+    invoke,
+    set_event_context,
+)
 from k0ntrol.modespec import ModeSpec
 
 
@@ -122,4 +128,63 @@ def test_tokens_use_camel_case_usage_from_cursor_agent(tmp_path, monkeypatch):
     assert invoke(MODE, "q") == "pong"
     line = json.loads((tmp_path / ".k0-mem" / "events.jsonl").read_text().splitlines()[-1])
     assert line["tokens"] == 8
+
+
+def test_success_event_carries_run_step_and_identity(tmp_path, monkeypatch):
+    agent = tmp_path / "cursor-agent"
+    write_agent(
+        agent,
+        "import json\n"
+        "print(json.dumps({'type':'result','subtype':'success','is_error':False,"
+        "'result':'hello bullets'}))\n",
+    )
+    monkeypatch.setenv("K0_CURSOR_AGENT", str(agent))
+    monkeypatch.chdir(tmp_path)
+    set_event_context(run="run-1", step="ask")
+    assert invoke(MODE, "q") == "hello bullets"
+    line = json.loads((tmp_path / ".k0-mem" / "events.jsonl").read_text().splitlines()[-1])
+    assert line["ts"]
+    assert re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z", line["ts"])
+    assert line["run"] == "run-1"
+    assert line["step"] == "ask"
+    assert line["mode"] == "bulk_reader"
+    assert line["model"] == MODE.model
+    assert line["chars"] == len("hello bullets")
+    assert isinstance(line["ms"], int) and line["ms"] >= 0
+    assert line["ok"] is True
+    assert line["err"] == ""
+    assert list(line)[:9] == [
+        "ts",
+        "run",
+        "step",
+        "mode",
+        "model",
+        "ms",
+        "chars",
+        "ok",
+        "err",
+    ]
+
+
+def test_failed_invoke_appends_ok_false(tmp_path, monkeypatch):
+    agent = tmp_path / "cursor-agent"
+    write_agent(
+        agent,
+        "import sys\n"
+        "sys.stderr.write('Not authenticated\\n')\n"
+        "raise SystemExit(1)\n",
+    )
+    monkeypatch.setenv("K0_CURSOR_AGENT", str(agent))
+    monkeypatch.chdir(tmp_path)
+    set_event_context(run="run-2", step="coder")
+    with pytest.raises(BackendError, match="Not authenticated"):
+        invoke(MODE, "q")
+    line = json.loads((tmp_path / ".k0-mem" / "events.jsonl").read_text().splitlines()[-1])
+    assert line["ok"] is False
+    assert line["err"] == "Not authenticated"
+    assert line["chars"] == 0
+    assert line["run"] == "run-2"
+    assert line["step"] == "coder"
+    assert line["mode"] == "bulk_reader"
+    assert isinstance(line["ms"], int) and line["ms"] >= 0
 

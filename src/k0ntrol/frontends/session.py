@@ -2,7 +2,7 @@ from collections.abc import Callable
 from pathlib import Path
 from uuid import uuid4
 
-from k0ntrol.backends.invoke import BackendError
+from k0ntrol.backends.invoke import BackendError, set_event_context
 from k0ntrol.frontends.ask import answer_ask
 from k0ntrol.frontends.banner import render_banner
 from k0ntrol.frontends.mentions import MentionError
@@ -22,6 +22,8 @@ def run_session(
     color: bool = False,
     echo_input: bool = True,
 ) -> int:
+    session_run = uuid4().hex
+    set_event_context(run=session_run, step="")
     transcript = _new_transcript(root)
     show = _transcript_writer(write, transcript)
     show(
@@ -48,6 +50,7 @@ def run_session(
             line,
             show,
             read_line=read_line,
+            session_run=session_run,
             root=root,
             config=config,
             invoke=invoke,
@@ -88,6 +91,7 @@ def _handle_command(
     write: Callable[[str], None],
     *,
     read_line: Callable[[], str],
+    session_run: str,
     root: Path,
     config: dict,
     invoke: Callable,
@@ -122,6 +126,7 @@ def _handle_command(
             bulk_read=bulk_read,
         )
     elif command == "/ask":
+        set_event_context(run=session_run, step="ask")
         _handle_ask(
             parts[1] if len(parts) == 2 else "",
             write,

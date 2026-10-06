@@ -1,8 +1,10 @@
+import contextvars
 import json
 import os
 import shutil
 import subprocess
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 from k0ntrol.modespec import ModeSpec
@@ -10,6 +12,20 @@ from k0ntrol.modespec import ModeSpec
 
 class BackendError(Exception):
     pass
+
+
+_EVENT_CONTEXT: contextvars.ContextVar[dict[str, str]] = contextvars.ContextVar(
+    "k0ntrol_event_context",
+    default={"run": "", "step": ""},
+)
+
+
+def set_event_context(run: str, step: str) -> None:
+    _EVENT_CONTEXT.set({"run": run, "step": step})
+
+
+def current_event_context() -> dict[str, str]:
+    return dict(_EVENT_CONTEXT.get())
 
 
 def _resolve_agent_binary() -> str:
@@ -65,12 +81,30 @@ def _token_count(usage: object) -> int | None:
     return None
 
 
-def _record_event(data: dict, elapsed_ms: int) -> None:
+def _record_event(
+    mode: ModeSpec,
+    elapsed_ms: int,
+    *,
+    result: str = "",
+    ok: bool,
+    err: str = "",
+    data: dict | None = None,
+) -> None:
     mem_dir = Path.cwd() / ".k0-mem"
     mem_dir.mkdir(parents=True, exist_ok=True)
-    result = data["result"]
-    event: dict[str, int] = {"ms": elapsed_ms, "chars": len(result)}
-    tokens = _token_count(data.get("usage"))
+    context = current_event_context()
+    event: dict[str, object] = {
+        "ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "run": context["run"],
+        "step": context["step"],
+        "mode": mode.name,
+        "model": mode.model,
+        "ms": elapsed_ms,
+        "chars": len(result),
+        "ok": ok,
+        "err": err,
+    }
+    tokens = _token_count(data.get("usage")) if data is not None else None
     if tokens is not None:
         event["tokens"] = tokens
 
@@ -96,8 +130,14 @@ def _run_subprocess(cmd: list[str]) -> tuple[subprocess.CompletedProcess[str], i
 
 
 def invoke(mode: ModeSpec, prompt: str) -> str:
-    cmd = _build_command(mode, prompt)
-    proc, elapsed_ms = _run_subprocess(cmd)
-    data = _parse_payload(proc.stdout)
-    _record_event(data, elapsed_ms)
+    start = time.monotonic()
+    try:
+        cmd = _build_command(mode, prompt)
+        proc, elapsed_ms = _run_subprocess(cmd)
+        data = _parse_payload(proc.stdout)
+    except BackendError as error:
+        elapsed_ms = max(0, int((time.monotonic() - start) * 1000))
+        _record_event(mode, elapsed_ms, ok=False, err=str(error))
+        raise
+    _record_event(mode, elapsed_ms, result=data["result"], ok=True, data=data)
     return data["result"]

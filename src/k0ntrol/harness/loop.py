@@ -4,7 +4,9 @@ import shlex
 import subprocess
 from collections.abc import Callable
 from pathlib import Path
+from uuid import uuid4
 
+from k0ntrol.backends.invoke import current_event_context, set_event_context
 from k0ntrol.frontends.mentions import MentionError, mention_paths
 from k0ntrol.harness.delegate import should_delegate
 from k0ntrol.modespec import ModeSpec, load_mode
@@ -14,6 +16,19 @@ from k0ntrol.stages.code_write import CodeWriteError, code_write
 Invoke = Callable[[ModeSpec, str], str]
 BulkRead = Callable[..., str]
 RunSuite = Callable[[Path], tuple[int, str]]
+
+
+def _begin_event_run() -> None:
+    set_event_context(run=uuid4().hex, step="")
+
+
+def _with_event_step(invoke: Invoke, step: str) -> Invoke:
+    def invoke_with_step(mode: ModeSpec, prompt: str) -> str:
+        run = current_event_context()["run"]
+        set_event_context(run=run, step=step)
+        return invoke(mode, prompt)
+
+    return invoke_with_step
 
 
 def run_fast(
@@ -27,6 +42,7 @@ def run_fast(
     bulk_read: BulkRead,
     run_suite: RunSuite | None = None,
 ) -> str:
+    _begin_event_run()
     if not task.strip():
         write("missing task")
         return "stuck"
@@ -39,20 +55,21 @@ def run_fast(
     spec = _literal_spec(question, paths, root)
     (root / "spec.md").write_text(spec, encoding="utf-8")
     write(spec)
+    tester_invoke = _with_event_step(invoke, "tester")
     try:
         reference_text = _mention_references(
             question,
             paths,
             root,
             config,
-            invoke,
+            tester_invoke,
             bulk_read,
         )
         written = code_write(
             spec,
             root=root,
             mode=load_mode("tester", config),
-            invoke=_test_invoke(invoke),
+            invoke=_test_invoke(tester_invoke),
             target=None,
             reference_text=reference_text,
         )
@@ -71,7 +88,7 @@ def run_fast(
             reference_text,
             root,
             config,
-            invoke,
+            _with_event_step(invoke, "coder"),
         )
     except CodeWriteError as error:
         write(str(error))
@@ -104,16 +121,18 @@ def run_full(
     invoke: Invoke,
     bulk_read: BulkRead,
 ) -> str:
+    _begin_event_run()
     if not task.strip():
         write("missing task")
         return "stuck"
+    spec_invoke = _with_event_step(invoke, "spec")
     try:
-        prompt = _context_prompt(task, root, config, invoke, bulk_read)
+        prompt = _context_prompt(task, root, config, spec_invoke, bulk_read)
     except MentionError as error:
         write(str(error))
         return "stuck"
 
-    spec = _write_and_show_spec(prompt, root, config, invoke, write)
+    spec = _write_and_show_spec(prompt, root, config, spec_invoke, write)
     while True:
         answer = _read_gate(read_line, write)
         if answer == "y":
@@ -123,7 +142,7 @@ def run_full(
                 write(str(error))
                 return "stuck"
         prompt = _rejected_prompt(prompt, spec)
-        spec = _write_and_show_spec(prompt, root, config, invoke, write)
+        spec = _write_and_show_spec(prompt, root, config, spec_invoke, write)
 
 
 def _context_prompt(
@@ -257,6 +276,8 @@ def _validate_fast(
     reference_text: str,
 ) -> str:
     retries = 0
+    validator_invoke = _with_event_step(invoke, "validator")
+    coder_invoke = _with_event_step(invoke, "coder")
     while True:
         code, output = run_suite(root)
         if code == 0:
@@ -265,7 +286,7 @@ def _validate_fast(
                 return "done"
             _append_spec_text(spec, root, "rejected at final gate")
             return "stuck"
-        summary = invoke(
+        summary = validator_invoke(
             load_mode("validator", config),
             _validator_prompt(spec, output),
         )
@@ -283,7 +304,7 @@ def _validate_fast(
                 reference_text,
                 root,
                 config,
-                invoke,
+                coder_invoke,
             )
         except CodeWriteError as error:
             write(str(error))
