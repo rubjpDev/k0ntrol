@@ -10,6 +10,7 @@ from k0ntrol import __version__
 from k0ntrol.config import ConfigError, load_config
 from k0ntrol.frontends.banner import color_enabled
 from k0ntrol.frontends.session import run_session
+from k0ntrol.harness.init import init_project
 from k0ntrol.harness.loop import run_configured_suite
 from k0ntrol.modespec import load_mode
 from k0ntrol.stages.bulk_read import BulkReadError, bulk_read
@@ -27,6 +28,11 @@ def main(argv: list[str] | None = None) -> int:
     )
     subparsers = parser.add_subparsers(dest="command")
     subparsers.add_parser("doctor", help="print the effective configuration")
+    init_parser = subparsers.add_parser(
+        "init",
+        help="create the project memory layout",
+    )
+    init_parser.add_argument("directory")
     bulk_read_parser = subparsers.add_parser(
         "bulk-read",
         help="ask the bulk-reader mode about files",
@@ -37,10 +43,18 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "doctor":
         return _run_doctor()
+    if args.command == "init":
+        return _run_init(args.directory)
     if args.command == "bulk-read":
         return _run_bulk_read(args.question, args.paths)
     if args.command is None:
         return _run_session()
+    return 0
+
+
+def _run_init(directory: str) -> int:
+    for line in init_project(Path(directory)):
+        print(line)
     return 0
 
 
