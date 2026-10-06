@@ -6,6 +6,7 @@ from k0ntrol.backends.invoke import BackendError
 from k0ntrol.frontends.ask import answer_ask
 from k0ntrol.frontends.banner import render_banner
 from k0ntrol.frontends.mentions import MentionError
+from k0ntrol.harness.loop import run_fast, run_full
 from k0ntrol import __version__
 
 
@@ -17,6 +18,7 @@ def run_session(
     config: dict,
     invoke: Callable,
     bulk_read: Callable,
+    run_suite: Callable[[Path], tuple[int, str]] | None = None,
     color: bool = False,
     echo_input: bool = True,
 ) -> int:
@@ -45,10 +47,12 @@ def run_session(
         if _handle_command(
             line,
             show,
+            read_line=read_line,
             root=root,
             config=config,
             invoke=invoke,
             bulk_read=bulk_read,
+            run_suite=run_suite,
         ):
             return 0
 
@@ -83,10 +87,12 @@ def _handle_command(
     line: str,
     write: Callable[[str], None],
     *,
+    read_line: Callable[[], str],
     root: Path,
     config: dict,
     invoke: Callable,
     bulk_read: Callable,
+    run_suite: Callable[[Path], tuple[int, str]] | None,
 ) -> bool:
     parts = line.split(maxsplit=1)
     command = parts[0]
@@ -95,9 +101,26 @@ def _handle_command(
     if command == "/help":
         write("commands: /ask, /fast, /full, /quit")
     elif command == "/fast":
-        write("/fast is not in 0.0.1")
+        run_fast(
+            parts[1] if len(parts) == 2 else "",
+            root=root,
+            config=config,
+            read_line=read_line,
+            write=write,
+            invoke=invoke,
+            bulk_read=bulk_read,
+            run_suite=run_suite,
+        )
     elif command == "/full":
-        write("/full is not in 0.0.1")
+        run_full(
+            parts[1] if len(parts) == 2 else "",
+            root=root,
+            config=config,
+            read_line=read_line,
+            write=write,
+            invoke=invoke,
+            bulk_read=bulk_read,
+        )
     elif command == "/ask":
         _handle_ask(
             parts[1] if len(parts) == 2 else "",

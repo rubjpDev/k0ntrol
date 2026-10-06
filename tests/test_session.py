@@ -19,7 +19,7 @@ def forbid(mode, prompt, **kwargs):
 
 
 def test_help_stays_on_screen_and_quit_exits(tmp_path):
-    lines = iter(["/help", "/fast later", "/quit"])
+    lines = iter(["/help", "/quit"])
     shown = []
     code = run_session(
         lambda: next(lines),
@@ -35,12 +35,11 @@ def test_help_stays_on_screen_and_quit_exits(tmp_path):
     assert "/ask" in text
     assert "/fast" in text
     assert "/full" in text
-    assert text.index("/ask") < text.index("/fast is not in 0.0.1")
     assert "\x1b[?1049h" not in text
 
 
-def test_full_and_unknown_and_blank_do_not_invoke(tmp_path):
-    lines = iter(["", "/full later", "/nope", "/quit"])
+def test_blank_and_unknown_stay_in_session(tmp_path):
+    lines = iter(["", "/nope", "/quit"])
     shown = []
     code = run_session(
         lambda: next(lines),
@@ -52,8 +51,37 @@ def test_full_and_unknown_and_blank_do_not_invoke(tmp_path):
     )
     assert code == 0
     text = "\n".join(shown)
-    assert "/full is not in 0.0.1" in text
     assert "unknown command: /nope" in text
+
+
+def test_full_in_the_session_writes_spec_on_yes(tmp_path):
+    def fake_invoke(mode, prompt):
+        assert mode.name == "spec"
+        return "## Goal\nhello\n## Files\n"
+
+    cfg = {
+        "backend": "cursor",
+        "threshold_lines": 350,
+        "test_cmd": "pytest -q",
+        "max_retries": 2,
+        "agents": {
+            name: {"model": "m"}
+            for name in ("spec", "tester", "coder", "validator", "bulk_reader")
+        },
+    }
+    lines = iter(["/full add checkout", "y", "/quit"])
+    shown = []
+    code = run_session(
+        lambda: next(lines),
+        shown.append,
+        root=tmp_path,
+        config=cfg,
+        invoke=fake_invoke,
+        bulk_read=forbid,
+    )
+    assert code == 0
+    assert (tmp_path / "spec.md").read_text(encoding="utf-8").startswith("## Goal\nhello")
+    assert "## Goal" in "\n".join(shown)
 
 
 def test_ctrl_c_and_eof_exit_zero(tmp_path):
@@ -193,3 +221,38 @@ def test_backend_error_stays_in_session(tmp_path):
     text = "\n".join(shown)
     assert "backend error: Workspace Trust Required" in text
     assert "Traceback" not in text
+
+
+def test_fast_in_the_session_skips_spec(tmp_path):
+    (tmp_path / "a.py").write_text("a\n", encoding="utf-8")
+    names = []
+
+    def fake_invoke(mode, prompt):
+        names.append(mode.name)
+        if mode.name == "coder":
+            return "FILE a.py\na\n"
+        return "FILE tests/test_fast.py\ndef test_fast():\n    assert False\n"
+
+    cfg = {
+        "backend": "cursor",
+        "threshold_lines": 350,
+        "test_cmd": "pytest -q",
+        "max_retries": 2,
+        "agents": {
+            name: {"model": "m"}
+            for name in ("spec", "tester", "coder", "validator", "bulk_reader")
+        },
+    }
+    lines = iter(["/fast change @a.py", "/quit"])
+    code = run_session(
+        lambda: next(lines),
+        lambda _line: None,
+        root=tmp_path,
+        config=cfg,
+        invoke=fake_invoke,
+        bulk_read=forbid,
+    )
+    assert code == 0
+    assert "spec" not in names
+    assert "tester" in names
+    assert "change" in (tmp_path / "spec.md").read_text(encoding="utf-8")

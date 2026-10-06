@@ -10,6 +10,7 @@ from k0ntrol import __version__
 from k0ntrol.config import ConfigError, load_config
 from k0ntrol.frontends.banner import color_enabled
 from k0ntrol.frontends.session import run_session
+from k0ntrol.harness.loop import run_configured_suite
 from k0ntrol.modespec import load_mode
 from k0ntrol.stages.bulk_read import BulkReadError, bulk_read
 
@@ -75,6 +76,10 @@ def _run_session() -> int:
         config=config,
         invoke=k0ntrol.backends.invoke.invoke,
         bulk_read=bulk_read,
+        run_suite=lambda project_root: run_configured_suite(
+            project_root,
+            config["test_cmd"],
+        ),
         color=color_enabled(sys.stdout),
         echo_input=False,
     )
