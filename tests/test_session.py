@@ -2,6 +2,7 @@ from pathlib import Path
 
 import pytest
 
+from k0ntrol.backends.invoke import BackendError
 from k0ntrol.frontends.session import run_session
 
 
@@ -150,3 +151,45 @@ def test_session_prints_the_banner_once(tmp_path):
     assert "cursor" in text
     assert "gpt-secret-model" not in text
     assert "\x1b" not in text
+
+
+def test_terminal_echo_is_not_reprinted_but_is_recorded(tmp_path):
+    lines = iter(["/help", "/quit"])
+    shown = []
+    code = run_session(
+        lambda: next(lines),
+        shown.append,
+        root=tmp_path,
+        config=config(),
+        invoke=forbid,
+        bulk_read=forbid,
+        echo_input=False,
+    )
+    assert code == 0
+    output = "\n".join(shown)
+    assert "› /help" not in output
+    transcript = next((tmp_path / ".k0-mem" / "sessions").glob("*.txt"))
+    assert "› /help" in transcript.read_text(encoding="utf-8")
+
+
+def test_backend_error_stays_in_session(tmp_path):
+    target = tmp_path / "app.py"
+    target.write_text("x\n")
+
+    def fail(mode, prompt):
+        raise BackendError("Workspace Trust Required")
+
+    lines = iter(["/ask what is here? @app.py", "/quit"])
+    shown = []
+    code = run_session(
+        lambda: next(lines),
+        shown.append,
+        root=tmp_path,
+        config=config(),
+        invoke=fail,
+        bulk_read=forbid,
+    )
+    assert code == 0
+    text = "\n".join(shown)
+    assert "backend error: Workspace Trust Required" in text
+    assert "Traceback" not in text

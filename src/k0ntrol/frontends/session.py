@@ -2,6 +2,7 @@ from collections.abc import Callable
 from pathlib import Path
 from uuid import uuid4
 
+from k0ntrol.backends.invoke import BackendError
 from k0ntrol.frontends.ask import answer_ask
 from k0ntrol.frontends.banner import render_banner
 from k0ntrol.frontends.mentions import MentionError
@@ -17,6 +18,7 @@ def run_session(
     invoke: Callable,
     bulk_read: Callable,
     color: bool = False,
+    echo_input: bool = True,
 ) -> int:
     transcript = _new_transcript(root)
     show = _transcript_writer(write, transcript)
@@ -33,7 +35,11 @@ def run_session(
             line = read_line()
         except (KeyboardInterrupt, EOFError):
             return 0
-        show(f"› {line}")
+        input_line = f"› {line}"
+        if echo_input:
+            show(input_line)
+        else:
+            _append_transcript(transcript, input_line)
         if not line:
             continue
         if _handle_command(
@@ -61,12 +67,16 @@ def _transcript_writer(
 ) -> Callable[[str], None]:
     def show(text: str) -> None:
         write(text)
-        with transcript.open("a", encoding="utf-8") as file:
-            file.write(text)
-            if not text.endswith("\n"):
-                file.write("\n")
+        _append_transcript(transcript, text)
 
     return show
+
+
+def _append_transcript(transcript: Path, text: str) -> None:
+    with transcript.open("a", encoding="utf-8") as file:
+        file.write(text)
+        if not text.endswith("\n"):
+            file.write("\n")
 
 
 def _handle_command(
@@ -121,5 +131,7 @@ def _handle_ask(
         )
     except MentionError as error:
         write(str(error))
+    except BackendError as error:
+        write(f"backend error: {error}")
     else:
         write(answer)

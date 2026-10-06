@@ -76,6 +76,7 @@ def _run_session() -> int:
         invoke=k0ntrol.backends.invoke.invoke,
         bulk_read=bulk_read,
         color=color_enabled(sys.stdout),
+        echo_input=False,
     )
 
 
