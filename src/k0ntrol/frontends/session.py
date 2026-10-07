@@ -124,6 +124,7 @@ def _handle_command(
             write=write,
             invoke=invoke,
             bulk_read=bulk_read,
+            run_suite=run_suite,
         )
     elif command == "/ask":
         set_event_context(run=session_run, step="ask")

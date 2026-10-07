@@ -84,6 +84,48 @@ def test_full_in_the_session_writes_spec_on_yes(tmp_path):
     assert "## Goal" in "\n".join(shown)
 
 
+def test_full_in_the_session_runs_the_coder_and_validator_path(tmp_path):
+    target = tmp_path / "app.py"
+    target.write_text("original\n", encoding="utf-8")
+    names = []
+
+    def fake_invoke(mode, prompt):
+        names.append(mode.name)
+        if mode.name == "spec":
+            return "## Goal\ng\n## Files\n- tests/test_app.py\n- app.py\n"
+        if mode.name == "tester":
+            return "FILE tests/test_app.py\ndef test_app():\n    assert True\n"
+        assert mode.name == "coder"
+        return "FILE app.py\nchanged\n"
+
+    cfg = {
+        "backend": "cursor",
+        "threshold_lines": 350,
+        "test_cmd": "pytest -q",
+        "max_retries": 2,
+        "agents": {
+            name: {"model": "m"}
+            for name in ("spec", "tester", "coder", "validator", "bulk_reader")
+        },
+    }
+    lines = iter(["/full change the app", "y", "y", "y", "/quit"])
+    shown = []
+    code = run_session(
+        lambda: next(lines),
+        shown.append,
+        root=tmp_path,
+        config=cfg,
+        invoke=fake_invoke,
+        bulk_read=forbid,
+        run_suite=lambda root: (0, "ok\n"),
+    )
+
+    assert code == 0
+    assert names == ["spec", "tester", "coder"]
+    assert target.read_text(encoding="utf-8") == "changed\n"
+    assert "+changed" in "\n".join(shown)
+
+
 def test_ctrl_c_and_eof_exit_zero(tmp_path):
     def interrupt():
         raise KeyboardInterrupt

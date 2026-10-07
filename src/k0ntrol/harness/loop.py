@@ -120,6 +120,7 @@ def run_full(
     write: Callable[[str], None],
     invoke: Invoke,
     bulk_read: BulkRead,
+    run_suite: RunSuite | None = None,
 ) -> str:
     _begin_event_run()
     if not task.strip():
@@ -137,7 +138,15 @@ def run_full(
         answer = _read_gate(read_line, write)
         if answer == "y":
             try:
-                return _write_tests(spec, root, config, invoke, read_line, write)
+                return _write_tests(
+                    spec,
+                    root,
+                    config,
+                    invoke,
+                    read_line,
+                    write,
+                    run_suite,
+                )
             except CodeWriteError as error:
                 write(str(error))
                 return "stuck"
@@ -188,6 +197,13 @@ def _first_non_test_path(paths: list[Path], root: Path) -> Path | None:
     return None
 
 
+def _first_spec_non_test_path(paths: list[str], root: Path) -> Path | None:
+    for relative in paths:
+        if not _is_test_path(relative):
+            return (root / relative).resolve()
+    return None
+
+
 def _mention_references(
     question: str,
     paths: list[Path],
@@ -233,10 +249,11 @@ def _coder_reference_text(
     target: Path,
     root: Path,
 ) -> str:
-    target_section = _file_section(target, root)
     references = tester_reference
-    if references.startswith(target_section):
-        references = references[len(target_section) :].lstrip("\n")
+    if target.is_file():
+        target_section = _file_section(target, root)
+        if references.startswith(target_section):
+            references = references[len(target_section) :].lstrip("\n")
     test_section = _file_section(test_path, root)
     return "\n".join(section for section in (references, test_section) if section)
 
@@ -364,6 +381,7 @@ def _write_tests(
     invoke: Invoke,
     read_line: Callable[[], str],
     write: Callable[[str], None],
+    run_suite: RunSuite | None,
 ) -> str:
     files = _spec_files(spec)
     test_paths = [path for path in files if _is_test_path(path)]
@@ -371,24 +389,85 @@ def _write_tests(
         return "tested"
     reference_text = _reference_text(files, root)
     mode = load_mode("tester", config)
+    tester_invoke = _with_event_step(invoke, "tester")
     for attempt in range(2):
         for _path in test_paths:
             written = code_write(
                 spec,
                 root=root,
                 mode=mode,
-                invoke=_test_invoke(invoke),
+                invoke=_test_invoke(tester_invoke),
                 target=None,
                 reference_text=reference_text,
             )
             _show_file(written, root, write)
         if _read_gate(read_line, write) == "y":
-            return "done"
+            return _continue_full_after_tests(
+                spec=spec,
+                files=files,
+                test_path=(root / test_paths[0]).resolve(),
+                reference_text=reference_text,
+                root=root,
+                config=config,
+                invoke=invoke,
+                read_line=read_line,
+                write=write,
+                run_suite=run_suite,
+            )
         spec = _append_rejection(spec, root)
         if attempt == 1:
             write("stuck")
             return "stuck"
     return "stuck"
+
+
+def _continue_full_after_tests(
+    *,
+    spec: str,
+    files: list[str],
+    test_path: Path,
+    reference_text: str,
+    root: Path,
+    config: dict,
+    invoke: Invoke,
+    read_line: Callable[[], str],
+    write: Callable[[str], None],
+    run_suite: RunSuite | None,
+) -> str:
+    if run_suite is None:
+        return "done"
+    target = _first_spec_non_test_path(files, root)
+    if target is None:
+        return "done"
+    coder_reference = _coder_reference_text(
+        reference_text,
+        test_path,
+        target,
+        root,
+    )
+    coded, before = _write_coder(
+        spec,
+        target,
+        test_path,
+        coder_reference,
+        root,
+        config,
+        _with_event_step(invoke, "coder"),
+    )
+    _show_file(coded, root, write)
+    return _validate_fast(
+        spec,
+        before,
+        target,
+        root,
+        config,
+        invoke,
+        read_line,
+        write,
+        run_suite,
+        test_path,
+        coder_reference,
+    )
 
 
 def _append_rejection(spec: str, root: Path) -> str:
