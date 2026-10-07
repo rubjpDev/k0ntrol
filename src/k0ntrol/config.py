@@ -6,7 +6,7 @@ from typing import Any
 import yaml
 
 
-AGENTS = ("spec", "tester", "coder", "validator", "bulk_reader")
+AGENTS = ("spec", "tester", "coder", "validator", "reviewer", "bulk_reader")
 BACKENDS = ("cursor",)
 
 

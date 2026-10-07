@@ -12,7 +12,14 @@ def loop_config(**overrides):
         "max_retries": 2,
         "agents": {
             name: {"model": "m"}
-            for name in ("spec", "tester", "coder", "validator", "bulk_reader")
+            for name in (
+                "spec",
+                "tester",
+                "coder",
+                "validator",
+                "reviewer",
+                "bulk_reader",
+            )
         },
     }
     cfg.update(overrides)
@@ -155,6 +162,12 @@ def test_full_continues_through_coder_validator_to_diff_gate(tmp_path):
         if mode.name == "coder":
             assert "original\n" in prompt
             return "FILE src/app.py\nchanged\n"
+        if mode.name == "reviewer":
+            assert "## Goal" in prompt
+            assert "tests/test_app.py" in prompt
+            assert "Implementation diff:" in prompt
+            assert "+changed" in prompt
+            return "FILE review.md\nLooks good.\n"
         raise AssertionError(mode.name)
 
     shown = []
@@ -162,7 +175,7 @@ def test_full_continues_through_coder_validator_to_diff_gate(tmp_path):
         "change the app",
         root=tmp_path,
         config=loop_config(),
-        read_line=iter(["y", "y", "y"]).__next__,
+        read_line=iter(["y", "y", "ok"]).__next__,
         write=shown.append,
         invoke=fake_invoke,
         bulk_read=lambda *args, **kwargs: (_ for _ in ()).throw(
@@ -172,10 +185,292 @@ def test_full_continues_through_coder_validator_to_diff_gate(tmp_path):
     )
 
     assert status == "done"
-    assert [name for name, _step in seen] == ["spec", "tester", "coder"]
-    assert [step for _name, step in seen] == ["spec", "tester", "coder"]
+    assert [name for name, _step in seen] == [
+        "spec",
+        "tester",
+        "coder",
+        "reviewer",
+    ]
+    assert [step for _name, step in seen] == [
+        "spec",
+        "tester",
+        "coder",
+        "reviewer",
+    ]
     assert target.read_text(encoding="utf-8") == "changed\n"
-    assert "+changed" in "\n".join(shown)
+    assert "src/app.py\nchanged" in "\n".join(shown)
+    assert "--- a/src/app.py" in "\n".join(shown)
+    assert (tmp_path / "review.md").read_text(encoding="utf-8") == "Looks good.\n"
+    assert "ok / spec / code" in "\n".join(shown)
+
+
+def test_full_reviewer_bulk_reads_large_test_context(tmp_path):
+    bulk_paths = []
+    large_test = "def test_app():\n    assert True\n" + "# filler\n" * 351
+
+    def fake_bulk(question, paths, **kwargs):
+        bulk_paths.extend(paths)
+        return "TEST SUMMARY\n"
+
+    def fake_invoke(mode, prompt):
+        if mode.name == "spec":
+            return "## Goal\ng\n## Files\n- tests/test_app.py\n- src/app.py\n"
+        if mode.name == "tester":
+            return f"FILE tests/test_app.py\n{large_test}"
+        if mode.name == "coder":
+            return "FILE src/app.py\nchanged\n"
+        assert mode.name == "reviewer"
+        assert "TEST SUMMARY" in prompt
+        assert "# filler" not in prompt
+        return "FILE review.md\nLooks good.\n"
+
+    status = run_full(
+        "change the app",
+        root=tmp_path,
+        config=loop_config(),
+        read_line=iter(["y", "y", "ok"]).__next__,
+        write=lambda _line: None,
+        invoke=fake_invoke,
+        bulk_read=fake_bulk,
+        run_suite=lambda root: (0, "ok\n"),
+    )
+
+    assert status == "done"
+    assert bulk_paths == [tmp_path / "tests" / "test_app.py"]
+
+
+def test_full_reviewer_bulk_reads_an_oversized_diff(tmp_path):
+    target = tmp_path / "src" / "app.py"
+    target.parent.mkdir()
+    target.write_text("original\n" * 351, encoding="utf-8")
+    bulk_paths = []
+
+    def fake_bulk(question, paths, **kwargs):
+        bulk_paths.extend(paths)
+        assert "implementation diff" in question.lower()
+        return "DIFF SUMMARY\n"
+
+    def fake_invoke(mode, prompt):
+        if mode.name == "spec":
+            return "## Goal\ng\n## Files\n- tests/test_app.py\n- src/app.py\n"
+        if mode.name == "tester":
+            return "FILE tests/test_app.py\ndef test_app():\n    assert True\n"
+        if mode.name == "coder":
+            return "FILE src/app.py\nchanged\n"
+        assert mode.name == "reviewer"
+        assert "DIFF SUMMARY" in prompt
+        assert "original\n" not in prompt
+        return "FILE review.md\nLooks good.\n"
+
+    status = run_full(
+        "change the app",
+        root=tmp_path,
+        config=loop_config(),
+        read_line=iter(["y", "y", "ok"]).__next__,
+        write=lambda _line: None,
+        invoke=fake_invoke,
+        bulk_read=fake_bulk,
+        run_suite=lambda root: (0, "ok\n"),
+    )
+
+    assert status == "done"
+    assert bulk_paths == [target]
+
+
+def test_full_reviewer_reads_all_test_paths(tmp_path):
+    test_paths = iter(["tests/test_app.py", "tests/test_other.py"])
+
+    def fake_invoke(mode, prompt):
+        if mode.name == "spec":
+            return (
+                "## Goal\ng\n## Files\n"
+                "- tests/test_app.py\n"
+                "- tests/test_other.py\n"
+                "- src/app.py\n"
+            )
+        if mode.name == "tester":
+            path = next(test_paths)
+            return f"FILE {path}\ndef test_app():\n    assert True\n"
+        if mode.name == "coder":
+            return "FILE src/app.py\nchanged\n"
+        assert mode.name == "reviewer"
+        assert "tests/test_app.py" in prompt
+        assert "tests/test_other.py" in prompt
+        return "FILE review.md\nLooks good.\n"
+
+    status = run_full(
+        "change the app",
+        root=tmp_path,
+        config=loop_config(),
+        read_line=iter(["y", "y", "ok"]).__next__,
+        write=lambda _line: None,
+        invoke=fake_invoke,
+        bulk_read=lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("bulk")
+        ),
+        run_suite=lambda root: (0, "ok\n"),
+    )
+
+    assert status == "done"
+    assert (tmp_path / "tests/test_app.py").is_file()
+    assert (tmp_path / "tests/test_other.py").is_file()
+
+
+def test_full_stops_when_tester_writes_the_wrong_test_path(tmp_path):
+    names = []
+
+    def fake_invoke(mode, prompt):
+        names.append(mode.name)
+        if mode.name == "spec":
+            return (
+                "## Goal\ng\n## Files\n"
+                "- tests/test_app.py\n"
+                "- tests/test_other.py\n"
+                "- src/app.py\n"
+            )
+        if mode.name == "tester":
+            return "FILE tests/test_app.py\ndef test_app():\n    assert True\n"
+        raise AssertionError(f"unexpected mode: {mode.name}")
+
+    shown = []
+    status = run_full(
+        "change the app",
+        root=tmp_path,
+        config=loop_config(),
+        read_line=iter(["y", "y"]).__next__,
+        write=shown.append,
+        invoke=fake_invoke,
+        bulk_read=lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("bulk")
+        ),
+    )
+
+    assert status == "stuck"
+    assert names == ["spec", "tester", "tester"]
+    assert not (tmp_path / "tests/test_other.py").exists()
+    assert "tests/test_other.py" in "\n".join(shown)
+
+
+def test_full_review_code_runs_a_fresh_coder_and_reviewer(tmp_path):
+    target = tmp_path / "src" / "app.py"
+    target.parent.mkdir()
+    target.write_text("original\n", encoding="utf-8")
+    names = []
+    coder_count = 0
+    reviewer_count = 0
+
+    def fake_invoke(mode, prompt):
+        nonlocal coder_count, reviewer_count
+        names.append(mode.name)
+        if mode.name == "spec":
+            return "## Goal\ng\n## Files\n- tests/test_app.py\n- src/app.py\n"
+        if mode.name == "tester":
+            return "FILE tests/test_app.py\ndef test_app():\n    assert True\n"
+        if mode.name == "coder":
+            coder_count += 1
+            if coder_count == 2:
+                assert "Review:\nFix the code." in prompt
+            return f"FILE src/app.py\nchanged {coder_count}\n"
+        reviewer_count += 1
+        if reviewer_count == 1:
+            return "FILE review.md\nFix the code.\n"
+        return "FILE review.md\nLooks good.\n"
+
+    status = run_full(
+        "change the app",
+        root=tmp_path,
+        config=loop_config(),
+        read_line=iter(["y", "y", "code", "ok"]).__next__,
+        write=lambda _line: None,
+        invoke=fake_invoke,
+        bulk_read=lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("bulk")
+        ),
+        run_suite=lambda root: (0, "ok\n"),
+    )
+
+    assert status == "done"
+    assert names == ["spec", "tester", "coder", "reviewer", "coder", "reviewer"]
+    assert target.read_text(encoding="utf-8") == "changed 2\n"
+    assert "Fix the code." in (tmp_path / "spec.md").read_text(encoding="utf-8")
+
+
+def test_full_review_code_has_no_automatic_loop_limit(tmp_path):
+    counts = {"coder": 0, "reviewer": 0}
+
+    def fake_invoke(mode, prompt):
+        if mode.name == "spec":
+            return "## Goal\ng\n## Files\n- tests/test_app.py\n- src/app.py\n"
+        if mode.name == "tester":
+            return "FILE tests/test_app.py\ndef test_app():\n    assert True\n"
+        if mode.name == "coder":
+            counts["coder"] += 1
+            return "FILE src/app.py\nchanged\n"
+        counts["reviewer"] += 1
+        return f"FILE review.md\nreview {counts['reviewer']}\n"
+
+    status = run_full(
+        "change the app",
+        root=tmp_path,
+        config=loop_config(max_retries=0),
+        read_line=iter(["y", "y", "code", "code", "ok"]).__next__,
+        write=lambda _line: None,
+        invoke=fake_invoke,
+        bulk_read=lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("bulk")
+        ),
+        run_suite=lambda root: (0, "ok\n"),
+    )
+
+    assert status == "done"
+    assert counts == {"coder": 3, "reviewer": 3}
+
+
+def test_full_review_spec_returns_to_spec_before_repeating_the_loop(tmp_path):
+    names = []
+    spec_prompts = []
+    reviewer_count = 0
+
+    def fake_invoke(mode, prompt):
+        nonlocal reviewer_count
+        names.append(mode.name)
+        if mode.name == "spec":
+            spec_prompts.append(prompt)
+            return "## Goal\ng\n## Files\n- tests/test_app.py\n- src/app.py\n"
+        if mode.name == "tester":
+            return "FILE tests/test_app.py\ndef test_app():\n    assert True\n"
+        if mode.name == "coder":
+            return "FILE src/app.py\nchanged\n"
+        reviewer_count += 1
+        if reviewer_count == 1:
+            return "FILE review.md\nThe spec is wrong.\n"
+        return "FILE review.md\nLooks good.\n"
+
+    status = run_full(
+        "change the app",
+        root=tmp_path,
+        config=loop_config(),
+        read_line=iter(["y", "y", "spec", "y", "y", "ok"]).__next__,
+        write=lambda _line: None,
+        invoke=fake_invoke,
+        bulk_read=lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("bulk")
+        ),
+        run_suite=lambda root: (0, "ok\n"),
+    )
+
+    assert status == "done"
+    assert names == [
+        "spec",
+        "tester",
+        "coder",
+        "reviewer",
+        "spec",
+        "tester",
+        "coder",
+        "reviewer",
+    ]
+    assert "The spec is wrong." in spec_prompts[1]
 
 
 def test_full_red_suite_retries_coder_then_stuck(tmp_path):
@@ -253,6 +548,8 @@ def test_full_coder_can_create_a_new_product_file(tmp_path):
             return "## Goal\ng\n## Files\n- tests/test_app.py\n- src/new.py\n"
         if mode.name == "tester":
             return "FILE tests/test_app.py\ndef test_app():\n    assert True\n"
+        if mode.name == "reviewer":
+            return "FILE review.md\nLooks good.\n"
         assert mode.name == "coder"
         assert "Target:\n<new file>" in prompt
         return "FILE src/new.py\ncreated\n"
@@ -261,7 +558,7 @@ def test_full_coder_can_create_a_new_product_file(tmp_path):
         "create the app",
         root=tmp_path,
         config=loop_config(),
-        read_line=iter(["y", "y", "y"]).__next__,
+        read_line=iter(["y", "y", "ok"]).__next__,
         write=lambda _line: None,
         invoke=fake_invoke,
         bulk_read=lambda *args, **kwargs: (_ for _ in ()).throw(
@@ -271,5 +568,5 @@ def test_full_coder_can_create_a_new_product_file(tmp_path):
     )
 
     assert status == "done"
-    assert [name for name, _prompt in seen] == ["spec", "tester", "coder"]
+    assert [name for name, _prompt in seen] == ["spec", "tester", "coder", "reviewer"]
     assert (tmp_path / "src" / "new.py").read_text(encoding="utf-8") == "created\n"

@@ -105,7 +105,7 @@ def _handle_command(
     if command == "/help":
         write("commands: /ask, /fast, /full, /quit")
     elif command == "/fast":
-        run_fast(
+        status = run_fast(
             parts[1] if len(parts) == 2 else "",
             root=root,
             config=config,
@@ -115,8 +115,9 @@ def _handle_command(
             bulk_read=bulk_read,
             run_suite=run_suite,
         )
+        write(_terminal_status(status))
     elif command == "/full":
-        run_full(
+        status = run_full(
             parts[1] if len(parts) == 2 else "",
             root=root,
             config=config,
@@ -126,6 +127,7 @@ def _handle_command(
             bulk_read=bulk_read,
             run_suite=run_suite,
         )
+        write(_terminal_status(status))
     elif command == "/ask":
         set_event_context(run=session_run, step="ask")
         _handle_ask(
@@ -139,6 +141,10 @@ def _handle_command(
     else:
         write(f"unknown command: {command}")
     return False
+
+
+def _terminal_status(status: str) -> str:
+    return "done" if status == "tested" else status
 
 
 def _handle_ask(

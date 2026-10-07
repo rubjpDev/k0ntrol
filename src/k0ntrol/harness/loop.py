@@ -127,31 +127,110 @@ def run_full(
         write("missing task")
         return "stuck"
     spec_invoke = _with_event_step(invoke, "spec")
-    try:
-        prompt = _context_prompt(task, root, config, spec_invoke, bulk_read)
-    except MentionError as error:
-        write(str(error))
+    prompt = _full_context_prompt(
+        task,
+        root,
+        config,
+        spec_invoke,
+        bulk_read,
+        write,
+    )
+    if prompt is None:
         return "stuck"
 
     spec = _write_and_show_spec(prompt, root, config, spec_invoke, write)
     while True:
-        answer = _read_gate(read_line, write)
-        if answer == "y":
-            try:
-                return _write_tests(
-                    spec,
-                    root,
-                    config,
-                    invoke,
-                    read_line,
-                    write,
-                    run_suite,
-                )
-            except CodeWriteError as error:
-                write(str(error))
-                return "stuck"
+        status, prompt, spec = _run_full_iteration(
+            spec,
+            prompt,
+            root,
+            config,
+            invoke,
+            bulk_read,
+            read_line,
+            write,
+            run_suite,
+            spec_invoke,
+        )
+        if status != "continue":
+            return status
+
+
+def _run_full_iteration(
+    spec: str,
+    prompt: str,
+    root: Path,
+    config: dict,
+    invoke: Invoke,
+    bulk_read: BulkRead,
+    read_line: Callable[[], str],
+    write: Callable[[str], None],
+    run_suite: RunSuite | None,
+    spec_invoke: Invoke,
+) -> tuple[str, str, str]:
+    if _read_gate(read_line, write) != "y":
         prompt = _rejected_prompt(prompt, spec)
         spec = _write_and_show_spec(prompt, root, config, spec_invoke, write)
+        return "continue", prompt, spec
+    status = _run_full_pipeline(
+        spec,
+        root,
+        config,
+        invoke,
+        bulk_read,
+        read_line,
+        write,
+        run_suite,
+    )
+    if status != "spec":
+        return status, prompt, spec
+    prompt = _rejected_prompt(
+        prompt,
+        (root / "spec.md").read_text(encoding="utf-8"),
+    )
+    spec = _write_and_show_spec(prompt, root, config, spec_invoke, write)
+    return "continue", prompt, spec
+
+
+def _full_context_prompt(
+    task: str,
+    root: Path,
+    config: dict,
+    invoke: Invoke,
+    bulk_read: BulkRead,
+    write: Callable[[str], None],
+) -> str | None:
+    try:
+        return _context_prompt(task, root, config, invoke, bulk_read)
+    except MentionError as error:
+        write(str(error))
+        return None
+
+
+def _run_full_pipeline(
+    spec: str,
+    root: Path,
+    config: dict,
+    invoke: Invoke,
+    bulk_read: BulkRead,
+    read_line: Callable[[], str],
+    write: Callable[[str], None],
+    run_suite: RunSuite | None,
+) -> str:
+    try:
+        return _write_tests(
+            spec,
+            root,
+            config,
+            invoke,
+            bulk_read,
+            read_line,
+            write,
+            run_suite,
+        )
+    except CodeWriteError as error:
+        write(str(error))
+        return "stuck"
 
 
 def _context_prompt(
@@ -292,41 +371,123 @@ def _validate_fast(
     test_path: Path,
     reference_text: str,
 ) -> str:
+    result = _validate_attempt(
+        spec,
+        before,
+        target,
+        root,
+        config,
+        invoke,
+        write,
+        run_suite,
+        test_path,
+        reference_text,
+    )
+    if result is None:
+        return "stuck"
+    current_spec, current_before = result
+    write(_unified_diff(target, current_before, root))
+    if _read_gate(read_line, write) == "y":
+        return "done"
+    _append_spec_text(current_spec, root, "rejected at final gate")
+    return "stuck"
+
+
+def _validate_attempt(
+    spec: str,
+    before: str,
+    target: Path,
+    root: Path,
+    config: dict,
+    invoke: Invoke,
+    write: Callable[[str], None],
+    run_suite: RunSuite,
+    test_path: Path,
+    reference_text: str,
+) -> tuple[str, str] | None:
     retries = 0
-    validator_invoke = _with_event_step(invoke, "validator")
-    coder_invoke = _with_event_step(invoke, "coder")
     while True:
         code, output = run_suite(root)
         if code == 0:
-            write(_unified_diff(target, before, root))
-            if _read_gate(read_line, write) == "y":
-                return "done"
-            _append_spec_text(spec, root, "rejected at final gate")
-            return "stuck"
-        summary = validator_invoke(
-            load_mode("validator", config),
-            _validator_prompt(spec, output),
+            return spec, before
+        result = _validation_retry(
+            spec,
+            target,
+            test_path,
+            reference_text,
+            root,
+            config,
+            invoke,
+            write,
+            output,
+            retries,
         )
-        spec = _append_spec_text(spec, root, summary)
-        if retries >= config["max_retries"]:
-            _append_spec_text(spec, root, "stuck")
-            write("stuck")
-            return "stuck"
-        retries += 1
-        try:
-            coded, before = _write_coder(
-                spec,
-                target,
-                test_path,
-                reference_text,
-                root,
-                config,
-                coder_invoke,
-            )
-        except CodeWriteError as error:
-            write(str(error))
-            return "stuck"
-        _show_file(coded, root, write)
+        if result is None:
+            return None
+        spec, before, retries = result
+
+
+def _validation_retry(
+    spec: str,
+    target: Path,
+    test_path: Path,
+    reference_text: str,
+    root: Path,
+    config: dict,
+    invoke: Invoke,
+    write: Callable[[str], None],
+    output: str,
+    retries: int,
+) -> tuple[str, str, int] | None:
+    summary = _with_event_step(invoke, "validator")(
+        load_mode("validator", config),
+        _validator_prompt(spec, output),
+    )
+    updated_spec = _append_spec_text(spec, root, summary)
+    if retries >= config["max_retries"]:
+        _append_spec_text(updated_spec, root, "stuck")
+        write("stuck")
+        return None
+    updated_before = _retry_coder(
+        updated_spec,
+        target,
+        test_path,
+        reference_text,
+        root,
+        config,
+        _with_event_step(invoke, "coder"),
+        write,
+    )
+    if updated_before is None:
+        return None
+    return updated_spec, updated_before, retries + 1
+
+
+def _retry_coder(
+    spec: str,
+    target: Path,
+    test_path: Path,
+    reference_text: str,
+    root: Path,
+    config: dict,
+    invoke: Invoke,
+    write: Callable[[str], None],
+) -> str | None:
+    try:
+        coded, before = _write_coder(
+            spec,
+            target,
+            test_path,
+            reference_text,
+            root,
+            config,
+            invoke,
+        )
+    except CodeWriteError as error:
+        write(str(error))
+        return None
+    _show_file(coded, root, write)
+    return before
 
 
 def _validator_prompt(spec: str, output: str) -> str:
@@ -379,6 +540,7 @@ def _write_tests(
     root: Path,
     config: dict,
     invoke: Invoke,
+    bulk_read: BulkRead,
     read_line: Callable[[], str],
     write: Callable[[str], None],
     run_suite: RunSuite | None,
@@ -388,28 +550,56 @@ def _write_tests(
     if not test_paths:
         return "tested"
     reference_text = _reference_text(files, root)
+    return _test_gate_loop(
+        spec,
+        files,
+        test_paths,
+        reference_text,
+        root,
+        config,
+        invoke,
+        bulk_read,
+        read_line,
+        write,
+        run_suite,
+    )
+
+
+def _test_gate_loop(
+    spec: str,
+    files: list[str],
+    test_paths: list[str],
+    reference_text: str,
+    root: Path,
+    config: dict,
+    invoke: Invoke,
+    bulk_read: BulkRead,
+    read_line: Callable[[], str],
+    write: Callable[[str], None],
+    run_suite: RunSuite | None,
+) -> str:
     mode = load_mode("tester", config)
     tester_invoke = _with_event_step(invoke, "tester")
     for attempt in range(2):
-        for _path in test_paths:
-            written = code_write(
-                spec,
-                root=root,
-                mode=mode,
-                invoke=_test_invoke(tester_invoke),
-                target=None,
-                reference_text=reference_text,
-            )
-            _show_file(written, root, write)
+        _write_test_files(
+            spec,
+            test_paths,
+            reference_text,
+            root,
+            mode,
+            tester_invoke,
+            write,
+        )
         if _read_gate(read_line, write) == "y":
             return _continue_full_after_tests(
                 spec=spec,
                 files=files,
-                test_path=(root / test_paths[0]).resolve(),
+                test_paths=[(root / path).resolve() for path in test_paths],
                 reference_text=reference_text,
                 root=root,
                 config=config,
                 invoke=invoke,
+                bulk_read=bulk_read,
                 read_line=read_line,
                 write=write,
                 run_suite=run_suite,
@@ -421,21 +611,45 @@ def _write_tests(
     return "stuck"
 
 
+def _write_test_files(
+    spec: str,
+    test_paths: list[str],
+    reference_text: str,
+    root: Path,
+    mode: ModeSpec,
+    invoke: Invoke,
+    write: Callable[[str], None],
+) -> None:
+    for relative in test_paths:
+        expected = (root / relative).resolve()
+        written = code_write(
+            spec,
+            root=root,
+            mode=mode,
+            invoke=_test_invoke(invoke, expected, root),
+            target=None,
+            reference_text=reference_text,
+        )
+        _show_file(written, root, write)
+
+
 def _continue_full_after_tests(
     *,
     spec: str,
     files: list[str],
-    test_path: Path,
+    test_paths: list[Path],
     reference_text: str,
     root: Path,
     config: dict,
     invoke: Invoke,
+    bulk_read: BulkRead,
     read_line: Callable[[], str],
     write: Callable[[str], None],
     run_suite: RunSuite | None,
 ) -> str:
     if run_suite is None:
         return "done"
+    test_path = test_paths[0]
     target = _first_spec_non_test_path(files, root)
     if target is None:
         return "done"
@@ -455,19 +669,211 @@ def _continue_full_after_tests(
         _with_event_step(invoke, "coder"),
     )
     _show_file(coded, root, write)
-    return _validate_fast(
+    return _validate_full(
         spec,
         before,
         target,
         root,
         config,
         invoke,
+        bulk_read,
         read_line,
         write,
         run_suite,
-        test_path,
+        test_paths,
         coder_reference,
     )
+
+
+def _validate_full(
+    spec: str,
+    before: str,
+    target: Path,
+    root: Path,
+    config: dict,
+    invoke: Invoke,
+    bulk_read: BulkRead,
+    read_line: Callable[[], str],
+    write: Callable[[str], None],
+    run_suite: RunSuite,
+    test_paths: list[Path],
+    reference_text: str,
+) -> str:
+    while True:
+        result = _validate_attempt(
+            spec,
+            before,
+            target,
+            root,
+            config,
+            invoke,
+            write,
+            run_suite,
+            test_paths[0],
+            reference_text,
+        )
+        if result is None:
+            return "stuck"
+        spec, before = result
+        write(_unified_diff(target, before, root))
+        decision = _review_decision(
+            spec,
+            before,
+            target,
+            reference_text,
+            test_paths,
+            root,
+            config,
+            _with_event_step(invoke, "coder"),
+            invoke,
+            bulk_read,
+            read_line,
+            write,
+        )
+        if isinstance(decision, str):
+            return decision
+        spec, before = decision
+
+
+def _review_decision(
+    spec: str,
+    before: str,
+    target: Path,
+    reference_text: str,
+    test_paths: list[Path],
+    root: Path,
+    config: dict,
+    coder_invoke: Invoke,
+    invoke: Invoke,
+    bulk_read: BulkRead,
+    read_line: Callable[[], str],
+    write: Callable[[str], None],
+) -> str | tuple[str, str]:
+    review_path = _write_review(
+        spec,
+        before,
+        target,
+        test_paths,
+        root,
+        config,
+        invoke,
+        bulk_read,
+        write,
+    )
+    review = review_path.read_text(encoding="utf-8")
+    choice = _read_review_gate(read_line, write)
+    if choice == "ok":
+        return "done"
+    updated_spec = _append_review(spec, root, review)
+    if choice == "spec":
+        return "spec"
+    coded, updated_before = _write_coder(
+        updated_spec,
+        target,
+        test_paths[0],
+        reference_text,
+        root,
+        config,
+        coder_invoke,
+    )
+    _show_file(coded, root, write)
+    return updated_spec, updated_before
+
+
+def _write_review(
+    spec: str,
+    before: str,
+    target: Path,
+    test_paths: list[Path],
+    root: Path,
+    config: dict,
+    invoke: Invoke,
+    bulk_read: BulkRead,
+    write: Callable[[str], None],
+) -> Path:
+    review_path = root / "review.md"
+    written = code_write(
+        spec,
+        root=root,
+        mode=load_mode("reviewer", config),
+        invoke=_with_event_step(invoke, "reviewer"),
+        target=review_path,
+        reference_text=_review_reference(
+            before,
+            target,
+            test_paths,
+            root,
+            config,
+            bulk_read,
+            invoke,
+        ),
+    )
+    _show_file(written, root, write)
+    write("Final review: ok / spec / code")
+    return written
+
+
+def _review_reference(
+    before: str,
+    target: Path,
+    test_paths: list[Path],
+    root: Path,
+    config: dict,
+    bulk_read: BulkRead,
+    invoke: Invoke,
+) -> str:
+    paths = [*test_paths, target]
+    paths = list(dict.fromkeys(paths))
+    delegated = [
+        path for path in paths if should_delegate(path, config["threshold_lines"])
+    ]
+    summary = ""
+    if delegated:
+        summary = bulk_read(
+            "Review the completed implementation against spec.md.",
+            delegated,
+            root=root,
+            repo=root.name,
+            mode=load_mode("bulk_reader", config),
+            invoke=_with_event_step(invoke, "reviewer"),
+        )
+    diff = _unified_diff(target, before, root)
+    if len(diff.splitlines()) > config["threshold_lines"]:
+        diff = bulk_read(
+            "Summarize this implementation diff for review:\n" + diff,
+            [target],
+            root=root,
+            repo=root.name,
+            mode=load_mode("bulk_reader", config),
+            invoke=_with_event_step(invoke, "reviewer"),
+        )
+    test_context = "\n\n".join(
+        _review_path_context(path, root, delegated, summary)
+        for path in test_paths
+    )
+    return "\n\n".join(
+        (
+            "Tests:\n" + test_context,
+            "Implementation:\n"
+            + _review_path_context(target, root, delegated, summary),
+            "Implementation diff:\n" + diff,
+        )
+    )
+
+
+def _review_path_context(
+    path: Path,
+    root: Path,
+    delegated: list[Path],
+    summary: str,
+) -> str:
+    if path in delegated:
+        return summary
+    return _file_section(path, root)
+
+
+def _append_review(spec: str, root: Path, review: str) -> str:
+    return _append_spec_text(spec, root, f"Review:\n{review}")
 
 
 def _append_rejection(spec: str, root: Path) -> str:
@@ -513,11 +919,25 @@ def _reference_text(files: list[str], root: Path) -> str:
     return "\n".join(sections)
 
 
-def _test_invoke(invoke: Invoke) -> Invoke:
+def _test_invoke(
+    invoke: Invoke,
+    expected: Path | None = None,
+    root: Path | None = None,
+) -> Invoke:
     def guarded(mode: ModeSpec, prompt: str) -> str:
         response = invoke(mode, prompt)
         relative = response.partition("\n")[0].removeprefix("FILE ").strip()
-        if not response.startswith("FILE ") or not _is_test_path(relative):
+        candidate = Path(relative)
+        matches_expected = (
+            expected is None
+            or not candidate.is_absolute()
+            and ((root or Path.cwd()) / candidate).resolve() == expected
+        )
+        if (
+            not response.startswith("FILE ")
+            or not _is_test_path(relative)
+            or not matches_expected
+        ):
             raise CodeWriteError(f"FILE path is not a test path: {relative}")
         return response
 
@@ -552,6 +972,17 @@ def _read_gate(read_line: Callable[[], str], write: Callable[[str], None]) -> st
         if answer in {"y", "n"}:
             return answer
         write("y or n")
+
+
+def _read_review_gate(
+    read_line: Callable[[], str],
+    write: Callable[[str], None],
+) -> str:
+    while True:
+        answer = read_line().strip().lower()
+        if answer in {"ok", "spec", "code"}:
+            return answer
+        write("ok / spec / code")
 
 
 def run_configured_suite(root: Path, test_cmd: str) -> tuple[int, str]:

@@ -9,10 +9,16 @@ def cfg(tmp_path):
     return load_config(tmp_path, tmp_path / "home")
 
 
-def test_all_five_modes_load(cfg):
+def test_all_six_modes_load(cfg):
     modes = load_all_modes(cfg)
     assert set(modes) == set(AGENTS)
     assert all(isinstance(m, ModeSpec) and m.instructions.strip() for m in modes.values())
+
+
+def test_reviewer_mode_loads(cfg):
+    mode = load_mode("reviewer", cfg)
+    assert mode.name == "reviewer"
+    assert "review" in mode.instructions.lower()
 
 
 def test_model_and_temperature_come_from_config(cfg):
@@ -41,5 +47,5 @@ def test_all_modes_are_one_shot(cfg):
 
 
 def test_unknown_mode_raises_and_names_it(cfg):
-    with pytest.raises(ModeError, match="reviewer"):
-        load_mode("reviewer", cfg)
+    with pytest.raises(ModeError, match="unknown"):
+        load_mode("unknown", cfg)
