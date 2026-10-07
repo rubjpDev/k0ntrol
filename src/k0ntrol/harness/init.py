@@ -3,6 +3,7 @@ from pathlib import Path
 
 MEM = "# Mem\n\nProject facts. One fact per bullet.\n"
 RULES = "# Rules\n\nGlobal rules for every agent.\n"
+MEMORY_GITIGNORE = "sessions/\nevents.jsonl\n*.sqlite\n"
 PROJECT_CONFIG = (
     "# Project overrides. An empty mapping inherits the package defaults.\n{}\n"
 )
@@ -15,6 +16,7 @@ def init_project(root: Path) -> list[str]:
     entries = (
         (memory_root / "Project_context", None),
         (memory_root / "Project_topology", None),
+        (memory_root / ".gitignore", MEMORY_GITIGNORE),
         (memory_root / "General_mem" / "Mem.md", MEM),
         (memory_root / "General_mem" / "Rules.md", RULES),
         (memory_root / "config.yaml", PROJECT_CONFIG),

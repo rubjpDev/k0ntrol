@@ -9,6 +9,21 @@ dist/
 .ruff_cache/
 .coverage
 htmlcov/
+.k0-mem/
+!.k0-mem/
+.k0-mem/*
+!.k0-mem/.gitignore
+!.k0-mem/config.yaml
+!.k0-mem/Project_context/
+!.k0-mem/Project_context/**
+!.k0-mem/Project_topology/
+!.k0-mem/Project_topology/**
+!.k0-mem/General_mem/
+!.k0-mem/General_mem/**
+.k0-mem/sessions/
+.k0-mem/events.jsonl
+.k0-mem/*.sqlite
+.k0-mem/**/*.sqlite
 
 # env / OS
 .env
