@@ -14,7 +14,10 @@ def config():
         "backend": "cursor",
         "threshold_lines": 350,
         "scan_confirm_over": 50,
-        "agents": {"bulk_reader": {"model": "gpt-secret-model"}},
+        "agents": {
+            "bulk_reader": {"model": "gpt-secret-model"},
+            "retrieval_gate": {"model": "gpt-secret-model"},
+        },
     }
 
 
