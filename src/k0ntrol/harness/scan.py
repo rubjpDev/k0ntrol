@@ -26,6 +26,28 @@ class ScanError(Exception):
     """Raised when scan cannot list git-tracked files."""
 
 
+def rescan_changed(
+    *,
+    root: Path,
+    config: dict,
+    bulk_read: BulkRead,
+    invoke: Invoke,
+    read_line: Callable[[], str],
+    write: Callable[[str], None],
+) -> str:
+    """Re-scan changed files when code memory already exists."""
+    if not _graph_path(root, root.name).is_file():
+        return "missing"
+    return run_scan(
+        root=root,
+        config=config,
+        bulk_read=bulk_read,
+        invoke=invoke,
+        read_line=read_line,
+        write=write,
+    )
+
+
 def run_scan(
     *,
     root: Path,
@@ -250,6 +272,12 @@ def _write_memory(
     nodes: list[dict],
 ) -> None:
     files_dir = root / ".k0-mem" / "Project_context" / repo / "files"
+    keep = {
+        node["path"]
+        for node in nodes
+        if node.get("kind") == "File" and isinstance(node.get("path"), str)
+    }
+    _remove_stale_file_markdown(files_dir, keep)
     for path in described:
         relative = _relative(path, root)
         note = notes.get(relative, EMPTY_NOTE)
@@ -262,6 +290,16 @@ def _write_memory(
         json.dumps({"nodes": nodes}, indent=2) + "\n",
         encoding="utf-8",
     )
+
+
+def _remove_stale_file_markdown(files_dir: Path, keep: set[str]) -> None:
+    if not files_dir.is_dir():
+        return
+    for md_path in files_dir.rglob("*.md"):
+        relative = md_path.relative_to(files_dir).as_posix()
+        source = relative.removesuffix(".md")
+        if source not in keep:
+            md_path.unlink()
 
 
 def _file_markdown(relative: str, note: dict[str, str]) -> str:
