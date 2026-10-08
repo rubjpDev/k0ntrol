@@ -217,7 +217,150 @@ def test_scan_cli_writes_memory(tmp_path, monkeypatch):
     assert "prints 1" in md
 
 
+def _rel(path: Path, root: Path) -> str:
+    return path.relative_to(root).as_posix()
+
+
+def _file_notes(root: Path, paths: list[Path]) -> str:
+    return "\n".join(
+        f"- FILE {_rel(path, root)}\n"
+        f"  - desc: {_rel(path, root)}\n"
+        f"  - hace: {_rel(path, root)}\n"
+        f"  - gotchas: none"
+        for path in paths
+    )
+
+
+def test_scan_python_package_extracts_nodes_and_edges(tmp_path):
+    git_tracked(
+        tmp_path,
+        {
+            "pkg/__init__.py": "",
+            "pkg/util.py": "def helper():\n    return 1\n",
+            "pkg/app.py": (
+                "from pkg.util import helper\n"
+                "\n"
+                "def run():\n"
+                "    helper()\n"
+                "    missing()\n"
+            ),
+            "pkg/model.py": (
+                "class Item:\n"
+                "    def value(self):\n"
+                "        return 2\n"
+            ),
+            "notes.txt": "plain text\n",
+        },
+    )
+
+    status = run_scan(
+        root=tmp_path,
+        config=scan_config(),
+        bulk_read=lambda question, paths, **kwargs: _file_notes(tmp_path, paths),
+        invoke=lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("invoke")),
+        read_line=lambda: (_ for _ in ()).throw(AssertionError("confirm")),
+        write=lambda _line: None,
+    )
+
+    assert status == "scanned"
+    repo = tmp_path.name
+    memory = tmp_path / ".k0-mem" / "Project_context" / repo
+    graph = json.loads((memory / "graph.json").read_text(encoding="utf-8"))
+    nodes = {node["id"]: node for node in graph["nodes"]}
+    edges = {(edge["from"], edge["kind"], edge["to"]) for edge in graph["edges"]}
+
+    assert nodes[f"{repo}:fn:pkg.util.helper"]["kind"] == "Function"
+    assert nodes[f"{repo}:fn:pkg.app.run"]["kind"] == "Function"
+    assert nodes[f"{repo}:class:pkg.model.Item"]["kind"] == "Class"
+    assert nodes[f"{repo}:fn:pkg.model.Item.value"]["kind"] == "Function"
+    assert nodes[f"{repo}:file:notes.txt"]["kind"] == "File"
+    assert not any("missing" in node_id for node_id in nodes)
+
+    assert (f"{repo}:file:pkg/util.py", "defines", f"{repo}:fn:pkg.util.helper") in edges
+    assert (f"{repo}:file:pkg/app.py", "defines", f"{repo}:fn:pkg.app.run") in edges
+    assert (f"{repo}:file:pkg/model.py", "defines", f"{repo}:class:pkg.model.Item") in edges
+    assert (f"{repo}:file:pkg/model.py", "defines", f"{repo}:fn:pkg.model.Item.value") in edges
+    assert (f"{repo}:file:pkg/app.py", "imports", f"{repo}:file:pkg/util.py") in edges
+    assert (f"{repo}:fn:pkg.app.run", "calls", f"{repo}:fn:pkg.util.helper") in edges
+    assert all("missing" not in edge[2] for edge in edges)
+
+    helper_md = (memory / "functions" / "pkg.util.helper.md").read_text(encoding="utf-8")
+    assert helper_md.startswith("# pkg.util.helper\n")
+    assert "## hace" in helper_md
+    item_md = (memory / "classes" / "pkg.model.Item.md").read_text(encoding="utf-8")
+    assert item_md.startswith("# pkg.model.Item\n")
+    assert (memory / "files" / "notes.txt.md").is_file()
+
+
+def test_scan_syntax_error_keeps_file_node(tmp_path):
+    git_tracked(tmp_path, {"broken.py": "def broken(\n"})
+
+    status = run_scan(
+        root=tmp_path,
+        config=scan_config(),
+        bulk_read=lambda question, paths, **kwargs: _file_notes(tmp_path, paths),
+        invoke=lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("invoke")),
+        read_line=lambda: (_ for _ in ()).throw(AssertionError("confirm")),
+        write=lambda _line: None,
+    )
+
+    assert status == "scanned"
+    repo = tmp_path.name
+    memory = tmp_path / ".k0-mem" / "Project_context" / repo
+    graph = json.loads((memory / "graph.json").read_text(encoding="utf-8"))
+    assert [node["kind"] for node in graph["nodes"]] == ["File"]
+    assert graph["nodes"][0]["id"] == f"{repo}:file:broken.py"
+    assert graph["edges"] == []
+    assert not (memory / "functions").exists()
+    assert not (memory / "classes").exists()
+    assert (memory / "files" / "broken.py.md").is_file()
+
+
+def test_scan_describes_functions_from_bulk_read(tmp_path):
+    git_tracked(tmp_path, {"src/app.py": "def checkout():\n    return 1\n"})
+    calls = []
+
+    def fake_bulk(question, paths, **kwargs):
+        calls.append(paths)
+        return (
+            "- FILE src/app.py\n"
+            "  - desc: checkout helper\n"
+            "  - hace: returns 1 from checkout\n"
+            "  - gotchas: none\n"
+            "- FUNCTION src.app.checkout\n"
+            "  - desc: returns one\n"
+            "  - hace: returns 1\n"
+            "  - gotchas: none\n"
+        )
+
+    kwargs = dict(
+        root=tmp_path,
+        config=scan_config(),
+        bulk_read=fake_bulk,
+        invoke=lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("invoke")),
+        read_line=lambda: (_ for _ in ()).throw(AssertionError("confirm")),
+        write=lambda _line: None,
+    )
+    assert run_scan(**kwargs) == "scanned"
+    assert len(calls) == 1
+    repo = tmp_path.name
+    memory = tmp_path / ".k0-mem" / "Project_context" / repo
+    graph = json.loads((memory / "graph.json").read_text(encoding="utf-8"))
+    nodes = {node["id"]: node for node in graph["nodes"]}
+    assert nodes[f"{repo}:file:src/app.py"]["desc"] == "checkout helper"
+    assert nodes[f"{repo}:fn:src.app.checkout"]["desc"] == "returns one"
+    md = (memory / "functions" / "src.app.checkout.md").read_text(encoding="utf-8")
+    assert "returns 1" in md
+
+    assert run_scan(**kwargs) == "scanned"
+    assert len(calls) == 1
+    graph = json.loads((memory / "graph.json").read_text(encoding="utf-8"))
+    nodes = {node["id"]: node for node in graph["nodes"]}
+    assert nodes[f"{repo}:fn:src.app.checkout"]["desc"] == "returns one"
+
+
 def test_scan_cli_emits_one_jsonl_event(tmp_path, monkeypatch):
+
     git_tracked(tmp_path, {"a.py": "print(1)\n"})
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("HOME", str(tmp_path / "home"))

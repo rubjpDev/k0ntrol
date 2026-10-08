@@ -6,6 +6,12 @@ from pathlib import Path
 from uuid import uuid4
 
 from k0ntrol.backends.invoke import set_event_context
+from k0ntrol.harness.python_extract import (
+    extract_python,
+    module_name,
+    resolve_calls,
+    resolve_imports,
+)
 from k0ntrol.modespec import ModeSpec, load_mode
 
 
@@ -18,7 +24,21 @@ SCAN_QUESTION = (
     "- FILE <path>\n"
     "  - desc: <one sentence>\n"
     "  - hace: <what the file does>\n"
+    "  - gotchas: <gotchas, or none>\n"
+    "- FUNCTION <module.qualname>\n"
+    "  - desc: <one sentence>\n"
+    "  - hace: <what the function does>\n"
+    "  - gotchas: <gotchas, or none>\n"
+    "- CLASS <module.qualname>\n"
+    "  - desc: <one sentence>\n"
+    "  - hace: <what the class does>\n"
     "  - gotchas: <gotchas, or none>"
+)
+
+_NOTE_HEADERS = (
+    ("- FILE ", ""),
+    ("- FUNCTION ", "fn:"),
+    ("- CLASS ", "class:"),
 )
 
 
@@ -39,13 +59,18 @@ def run_scan(
     set_event_context(run=uuid4().hex, step="scan")
     repo = root.name
     tracked = _git_tracked_files(root)
-    cached = _nodes_by_path(_graph_path(root, repo))
+    previous = _read_graph(_graph_path(root, repo))
+    cached = _files_by_path(previous["nodes"])
+    cached_ids = _nodes_by_id(previous["nodes"])
     fresh, reused = _partition_by_hash(tracked, root, cached)
     batches = _batch_paths(fresh, config["threshold_lines"])
     if not _confirm_scan(len(batches), config["scan_confirm_over"], read_line, write):
         return "cancelled"
     notes = _describe_batches(batches, root, repo, config, bulk_read, invoke)
-    _write_memory(root, repo, fresh, notes, _merge_nodes(repo, root, tracked, notes, reused))
+    extracts = _python_extracts(root, tracked)
+    file_nodes = _merge_nodes(repo, root, tracked, notes, reused)
+    symbol_nodes, edges = _python_graph(repo, extracts, notes, reused, cached_ids)
+    _write_memory(root, repo, fresh, notes, file_nodes + symbol_nodes, edges, extracts)
     return "scanned"
 
 
@@ -104,20 +129,37 @@ def _graph_path(root: Path, repo: str) -> Path:
     return root / ".k0-mem" / "Project_context" / repo / "graph.json"
 
 
-def _nodes_by_path(graph_path: Path) -> dict[str, dict]:
+def _read_graph(graph_path: Path) -> dict:
+    empty: dict = {"nodes": [], "edges": []}
     if not graph_path.is_file():
-        return {}
+        return empty
     try:
         data = json.loads(graph_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
-        return {}
+        return empty
+    if not isinstance(data, dict):
+        return empty
     nodes = data.get("nodes")
-    if not isinstance(nodes, list):
-        return {}
+    edges = data.get("edges")
+    return {
+        "nodes": nodes if isinstance(nodes, list) else [],
+        "edges": edges if isinstance(edges, list) else [],
+    }
+
+
+def _files_by_path(nodes: list) -> dict[str, dict]:
     return {
         node["path"]: node
         for node in nodes
         if isinstance(node, dict) and isinstance(node.get("path"), str)
+    }
+
+
+def _nodes_by_id(nodes: list) -> dict[str, dict]:
+    return {
+        node["id"]: node
+        for node in nodes
+        if isinstance(node, dict) and isinstance(node.get("id"), str)
     }
 
 
@@ -166,6 +208,113 @@ def _merge_nodes(
             }
         )
     return nodes
+
+
+def _python_extracts(root: Path, paths: list[Path]) -> dict[str, dict | None]:
+    extracts: dict[str, dict | None] = {}
+    for path in paths:
+        relative = _relative(path, root)
+        if not relative.endswith(".py"):
+            continue
+        extracts[relative] = extract_python(
+            path.read_text(encoding="utf-8"),
+            module_name(relative),
+        )
+    return extracts
+
+
+def _python_graph(
+    repo: str,
+    extracts: dict[str, dict | None],
+    notes: dict[str, dict[str, str]],
+    reused: dict[str, dict],
+    cached_ids: dict[str, dict],
+) -> tuple[list[dict], list[dict]]:
+    ok = {relative: data for relative, data in extracts.items() if data is not None}
+    modules = {module_name(relative): relative for relative in extracts}
+    nodes, edges, names = _defined_symbols(repo, ok, notes, reused, cached_ids)
+    edges.extend(_reference_edges(repo, ok, modules, names))
+    return nodes, edges
+
+
+def _defined_symbols(
+    repo: str,
+    extracts: dict[str, dict],
+    notes: dict[str, dict[str, str]],
+    reused: dict[str, dict],
+    cached_ids: dict[str, dict],
+) -> tuple[list[dict], list[dict], dict[str, list[str]]]:
+    nodes: list[dict] = []
+    edges: list[dict] = []
+    names: dict[str, list[str]] = {}
+    for relative, data in extracts.items():
+        file_id = f"{repo}:file:{relative}"
+        for qualname in data["functions"]:
+            node_id = f"{repo}:fn:{qualname}"
+            nodes.append(
+                _symbol_node(
+                    node_id, "Function", relative, f"fn:{qualname}", notes, reused, cached_ids
+                )
+            )
+            edges.append({"from": file_id, "to": node_id, "kind": "defines"})
+            names.setdefault(qualname.rsplit(".", 1)[-1], []).append(node_id)
+        for qualname in data["classes"]:
+            node_id = f"{repo}:class:{qualname}"
+            nodes.append(
+                _symbol_node(
+                    node_id, "Class", relative, f"class:{qualname}", notes, reused, cached_ids
+                )
+            )
+            edges.append({"from": file_id, "to": node_id, "kind": "defines"})
+    return nodes, edges, names
+
+
+def _reference_edges(
+    repo: str,
+    extracts: dict[str, dict],
+    modules: dict[str, str],
+    names: dict[str, list[str]],
+) -> list[dict]:
+    edges: list[dict] = []
+    for relative, data in extracts.items():
+        file_id = f"{repo}:file:{relative}"
+        for imported in resolve_imports(module_name(relative), data["imports"], modules):
+            edges.append({"from": file_id, "to": f"{repo}:file:{imported}", "kind": "imports"})
+        for caller, callee in resolve_calls(data["calls"], names):
+            edges.append({"from": f"{repo}:fn:{caller}", "to": callee, "kind": "calls"})
+    return edges
+
+
+def _symbol_node(
+    node_id: str,
+    kind: str,
+    relative: str,
+    note_key: str,
+    notes: dict[str, dict[str, str]],
+    reused: dict[str, dict],
+    cached_ids: dict[str, dict],
+) -> dict:
+    return {
+        "id": node_id,
+        "kind": kind,
+        "desc": _symbol_desc(node_id, note_key, relative, notes, reused, cached_ids),
+    }
+
+
+def _symbol_desc(
+    node_id: str,
+    note_key: str,
+    relative: str,
+    notes: dict[str, dict[str, str]],
+    reused: dict[str, dict],
+    cached_ids: dict[str, dict],
+) -> str:
+    if relative in reused:
+        cached = cached_ids.get(node_id, {})
+        if isinstance(cached.get("desc"), str):
+            return cached["desc"]
+        return ""
+    return notes.get(note_key, EMPTY_NOTE)["desc"]
 
 
 def _line_count(path: Path) -> int:
@@ -225,13 +374,20 @@ def _parse_notes(text: str) -> dict[str, dict[str, str]]:
 
 
 def _note_line(notes: dict[str, dict[str, str]], current: str, line: str) -> str:
-    if line.startswith("- FILE "):
-        current = line[len("- FILE ") :].strip()
-        notes[current] = dict(EMPTY_NOTE)
-        return current
+    header = _note_header(line)
+    if header is not None:
+        notes[header] = dict(EMPTY_NOTE)
+        return header
     if current:
         _note_field(notes[current], line)
     return current
+
+
+def _note_header(line: str) -> str | None:
+    for prefix, key_prefix in _NOTE_HEADERS:
+        if line.startswith(prefix):
+            return key_prefix + line[len(prefix) :].strip()
+    return None
 
 
 def _note_field(note: dict[str, str], line: str) -> None:
@@ -248,6 +404,8 @@ def _write_memory(
     described: list[Path],
     notes: dict[str, dict[str, str]],
     nodes: list[dict],
+    edges: list[dict],
+    extracts: dict[str, dict | None],
 ) -> None:
     files_dir = root / ".k0-mem" / "Project_context" / repo / "files"
     for path in described:
@@ -256,12 +414,47 @@ def _write_memory(
         md_path = files_dir / f"{relative}.md"
         md_path.parent.mkdir(parents=True, exist_ok=True)
         md_path.write_text(_file_markdown(relative, note), encoding="utf-8")
+    _write_symbol_markdown(root, repo, described, notes, extracts)
     graph_path = _graph_path(root, repo)
     graph_path.parent.mkdir(parents=True, exist_ok=True)
     graph_path.write_text(
-        json.dumps({"nodes": nodes}, indent=2) + "\n",
+        json.dumps({"nodes": nodes, "edges": edges}, indent=2) + "\n",
         encoding="utf-8",
     )
+
+
+def _write_symbol_markdown(
+    root: Path,
+    repo: str,
+    described: list[Path],
+    notes: dict[str, dict[str, str]],
+    extracts: dict[str, dict | None],
+) -> None:
+    base = root / ".k0-mem" / "Project_context" / repo
+    for path in described:
+        relative = _relative(path, root)
+        extract = extracts.get(relative)
+        if not extract:
+            continue
+        _write_kind_markdown(base / "functions", extract["functions"], "fn:", notes)
+        _write_kind_markdown(base / "classes", extract["classes"], "class:", notes)
+
+
+def _write_kind_markdown(
+    directory: Path,
+    qualnames: list[str],
+    prefix: str,
+    notes: dict[str, dict[str, str]],
+) -> None:
+    if not qualnames:
+        return
+    directory.mkdir(parents=True, exist_ok=True)
+    for qualname in qualnames:
+        note = notes.get(f"{prefix}{qualname}", EMPTY_NOTE)
+        (directory / f"{qualname}.md").write_text(
+            _file_markdown(qualname, note),
+            encoding="utf-8",
+        )
 
 
 def _file_markdown(relative: str, note: dict[str, str]) -> str:
