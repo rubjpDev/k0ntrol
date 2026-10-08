@@ -42,6 +42,13 @@ def test_bulk_reader_prompt_is_the_freeform_desc(cfg):
     assert "Output structured bullets only." in load_mode("bulk_reader", cfg).instructions
 
 
+def test_retrieval_gate_mode_loads(cfg):
+    mode = load_mode("retrieval_gate", cfg)
+    assert mode.name == "retrieval_gate"
+    assert "retrieve" in mode.instructions.lower()
+    assert mode.model == "gpt-5.6-luna-max"
+
+
 def test_all_modes_are_one_shot(cfg):
     assert all(m.one_shot for m in load_all_modes(cfg).values())
 
