@@ -1,6 +1,7 @@
 # k0ntrol defaults. Override in ~/.k0ntrol/config.yaml, then .k0-mem/config.yaml.
 backend: cursor
 threshold_lines: 350
+scan_confirm_over: 50
 test_cmd: "pytest -q"   # full suite, never only the new tests (D24)
 max_retries: 2
 agents:

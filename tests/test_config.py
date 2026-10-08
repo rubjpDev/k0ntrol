@@ -21,6 +21,7 @@ def test_deep_merge_nested_override_keeps_siblings_and_does_not_mutate():
 def test_defaults_only(tmp_path):
     cfg = load_config(tmp_path, tmp_path / "home")
     assert cfg["threshold_lines"] == 350
+    assert cfg["scan_confirm_over"] == 50
 
 
 def test_default_agent_models_match_selected_cursor_models(tmp_path):

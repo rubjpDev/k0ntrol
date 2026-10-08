@@ -22,6 +22,8 @@ def test_defaults_are_valid(cfg):
         ("threshold_lines", True),
         ("test_cmd", ""),
         ("max_retries", -1),
+        ("scan_confirm_over", -1),
+        ("scan_confirm_over", True),
     ],
 )
 def test_invalid_top_level_value_names_the_key(cfg, key, value):

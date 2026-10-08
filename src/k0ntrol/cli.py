@@ -12,6 +12,7 @@ from k0ntrol.frontends.banner import color_enabled
 from k0ntrol.frontends.session import run_session
 from k0ntrol.harness.init import init_project
 from k0ntrol.harness.loop import run_configured_suite
+from k0ntrol.harness.scan import ScanError, run_scan
 from k0ntrol.modespec import load_mode
 from k0ntrol.stages.bulk_read import BulkReadError, bulk_read
 
@@ -39,6 +40,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     bulk_read_parser.add_argument("--question", required=True)
     bulk_read_parser.add_argument("--paths", nargs="+", required=True)
+    subparsers.add_parser("scan", help="write file-level code memory")
     args = parser.parse_args(argv)
 
     if args.command == "doctor":
@@ -47,6 +49,8 @@ def main(argv: list[str] | None = None) -> int:
         return _run_init(args.directory)
     if args.command == "bulk-read":
         return _run_bulk_read(args.question, args.paths)
+    if args.command == "scan":
+        return _run_scan()
     if args.command is None:
         return _run_session()
     return 0
@@ -97,6 +101,30 @@ def _run_session() -> int:
         color=color_enabled(sys.stdout),
         echo_input=False,
     )
+
+
+def _run_scan() -> int:
+    root = Path.cwd()
+    try:
+        config = load_config(root)
+        status = run_scan(
+            root=root,
+            config=config,
+            bulk_read=bulk_read,
+            invoke=k0ntrol.backends.invoke.invoke,
+            read_line=input,
+            write=print,
+        )
+    except ConfigError as error:
+        print(f"config error: {error}", file=sys.stderr)
+        return 1
+    except (BulkReadError, ScanError) as error:
+        print(f"scan error: {error}", file=sys.stderr)
+        return 1
+    except k0ntrol.backends.invoke.BackendError as error:
+        print(f"backend error: {error}", file=sys.stderr)
+        return 1
+    return 0 if status == "scanned" else 1
 
 
 def _run_bulk_read(question: str, paths: list[str]) -> int:
