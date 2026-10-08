@@ -85,6 +85,8 @@ def run_scan(
     cached = _files_by_path(previous["nodes"])
     cached_ids = _nodes_by_id(previous["nodes"])
     fresh, reused = _partition_by_hash(tracked, root, cached)
+    if _unchanged_tracked_files(fresh, tracked, root, cached):
+        return "scanned"
     batches = _batch_paths(fresh, config["threshold_lines"])
     if not _confirm_scan(len(batches), config["scan_confirm_over"], read_line, write):
         return "cancelled"
@@ -204,6 +206,17 @@ def _partition_by_hash(
         else:
             fresh.append(path)
     return fresh, reused
+
+
+def _unchanged_tracked_files(
+    fresh: list[Path],
+    tracked: list[Path],
+    root: Path,
+    cached: dict[str, dict],
+) -> bool:
+    if fresh:
+        return False
+    return {_relative(path, root) for path in tracked} == set(cached)
 
 
 def _merge_nodes(
@@ -429,13 +442,8 @@ def _write_memory(
     edges: list[dict],
     extracts: dict[str, dict | None],
 ) -> None:
-    files_dir = root / ".k0-mem" / "Project_context" / repo / "files"
-    keep = {
-        node["path"]
-        for node in nodes
-        if node.get("kind") == "File" and isinstance(node.get("path"), str)
-    }
-    _remove_stale_file_markdown(files_dir, keep)
+    base = root / ".k0-mem" / "Project_context" / repo
+    files_dir = base / "files"
     for path in described:
         relative = _relative(path, root)
         note = notes.get(relative, EMPTY_NOTE)
@@ -443,12 +451,40 @@ def _write_memory(
         md_path.parent.mkdir(parents=True, exist_ok=True)
         md_path.write_text(_file_markdown(relative, note), encoding="utf-8")
     _write_symbol_markdown(root, repo, described, notes, extracts)
+    _prune_stale_markdown(base, repo, nodes)
     graph_path = _graph_path(root, repo)
     graph_path.parent.mkdir(parents=True, exist_ok=True)
     graph_path.write_text(
         json.dumps({"nodes": nodes, "edges": edges}, indent=2) + "\n",
         encoding="utf-8",
     )
+
+
+def _prune_stale_markdown(base: Path, repo: str, nodes: list[dict]) -> None:
+    _remove_stale_file_markdown(
+        base / "files",
+        {
+            node["path"]
+            for node in nodes
+            if node.get("kind") == "File" and isinstance(node.get("path"), str)
+        },
+    )
+    _remove_stale_file_markdown(
+        base / "functions",
+        _symbol_names(nodes, "Function", f"{repo}:fn:"),
+    )
+    _remove_stale_file_markdown(
+        base / "classes",
+        _symbol_names(nodes, "Class", f"{repo}:class:"),
+    )
+
+
+def _symbol_names(nodes: list[dict], kind: str, prefix: str) -> set[str]:
+    return {
+        node["id"].removeprefix(prefix)
+        for node in nodes
+        if node.get("kind") == kind and isinstance(node.get("id"), str)
+    }
 
 
 def _write_symbol_markdown(

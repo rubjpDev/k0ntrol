@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from k0ntrol.cli import main
-from k0ntrol.harness.scan import ScanError, run_scan
+from k0ntrol.harness.scan import ScanError, rescan_changed, run_scan
 
 
 def scan_config(**overrides):
@@ -103,6 +103,43 @@ def test_unchanged_scan_makes_zero_model_calls(tmp_path):
     memory = tmp_path / ".k0-mem" / "Project_context" / tmp_path.name
     node = json.loads((memory / "graph.json").read_text(encoding="utf-8"))["nodes"][0]
     assert node["desc"] == "checkout helper"
+
+
+def test_unchanged_scan_skips_extract_and_graph_rewrite(tmp_path, monkeypatch):
+    git_tracked(tmp_path, {"src/app.py": "def checkout():\n    return 1\n"})
+    calls = []
+
+    def fake_bulk(question, paths, **kwargs):
+        calls.append(paths)
+        return (
+            "- FILE src/app.py\n"
+            "  - desc: checkout helper\n"
+            "  - hace: returns 1 from checkout\n"
+            "  - gotchas: none\n"
+        )
+
+    kwargs = dict(
+        root=tmp_path,
+        config=scan_config(),
+        bulk_read=fake_bulk,
+        invoke=lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("invoke")),
+        read_line=lambda: (_ for _ in ()).throw(AssertionError("confirm")),
+        write=lambda _line: None,
+    )
+    assert run_scan(**kwargs) == "scanned"
+    assert len(calls) == 1
+    graph_path = tmp_path / ".k0-mem" / "Project_context" / tmp_path.name / "graph.json"
+    before = graph_path.read_bytes()
+    mtime = graph_path.stat().st_mtime_ns
+
+    monkeypatch.setattr(
+        "k0ntrol.harness.scan.extract_python",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("extract_python")),
+    )
+    assert rescan_changed(**kwargs) == "scanned"
+    assert len(calls) == 1
+    assert graph_path.read_bytes() == before
+    assert graph_path.stat().st_mtime_ns == mtime
 
 
 def test_scan_batches_files_up_to_threshold_lines(tmp_path):
@@ -231,6 +268,45 @@ def _file_notes(root: Path, paths: list[Path]) -> str:
     )
 
 
+def _run_scan(root: Path) -> str:
+    return run_scan(
+        root=root,
+        config=scan_config(),
+        bulk_read=lambda question, paths, **kwargs: _file_notes(root, paths),
+        invoke=lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("invoke")),
+        read_line=lambda: (_ for _ in ()).throw(AssertionError("confirm")),
+        write=lambda _line: None,
+    )
+
+
+def _memory(root: Path) -> Path:
+    return root / ".k0-mem" / "Project_context" / root.name
+
+
+def _write_leftover_symbol_markdown(memory: Path) -> None:
+    for folder, name in (("functions", "pkg.gone"), ("classes", "pkg.Gone")):
+        path = memory / folder / f"{name}.md"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            f"# {name}\n\n## hace\nleftover\n\n## gotchas\nnone\n",
+            encoding="utf-8",
+        )
+
+
+def _seed_pkg_gone(root: Path) -> Path:
+    git_tracked(
+        root,
+        {
+            "pkg.py": "def gone():\n    return 1\n\nclass Gone:\n    pass\n",
+            "keep.py": "def keep():\n    return 1\n",
+        },
+    )
+    assert _run_scan(root) == "scanned"
+    memory = _memory(root)
+    _write_leftover_symbol_markdown(memory)
+    return memory
+
+
 def test_scan_python_package_extracts_nodes_and_edges(tmp_path):
     git_tracked(
         tmp_path,
@@ -314,6 +390,89 @@ def test_scan_syntax_error_keeps_file_node(tmp_path):
     assert not (memory / "functions").exists()
     assert not (memory / "classes").exists()
     assert (memory / "files" / "broken.py.md").is_file()
+
+
+def test_deleted_python_file_drops_stale_symbol_markdown_and_nodes(tmp_path):
+    memory = _seed_pkg_gone(tmp_path)
+    subprocess.run(
+        ["git", "rm", "-f", "--", "pkg.py"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+    )
+
+    assert _run_scan(tmp_path) == "scanned"
+
+    graph = json.loads((memory / "graph.json").read_text(encoding="utf-8"))
+    ids = {node["id"] for node in graph["nodes"]}
+    repo = tmp_path.name
+    assert f"{repo}:file:pkg.py" not in ids
+    assert f"{repo}:fn:pkg.gone" not in ids
+    assert f"{repo}:class:pkg.Gone" not in ids
+    assert f"{repo}:file:keep.py" in ids
+    assert f"{repo}:fn:keep.keep" in ids
+    assert not (memory / "functions" / "pkg.gone.md").exists()
+    assert not (memory / "classes" / "pkg.Gone.md").exists()
+    assert (memory / "functions" / "keep.keep.md").is_file()
+    assert not any(
+        edge["from"] == f"{repo}:file:pkg.py" or edge["to"] in {
+            f"{repo}:fn:pkg.gone",
+            f"{repo}:class:pkg.Gone",
+        }
+        for edge in graph["edges"]
+    )
+
+
+def test_renamed_symbols_drop_stale_markdown_and_nodes(tmp_path):
+    memory = _seed_pkg_gone(tmp_path)
+    (tmp_path / "pkg.py").write_text("def kept():\n    return 1\n", encoding="utf-8")
+    subprocess.run(
+        ["git", "add", "--", "pkg.py"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+    )
+
+    assert _run_scan(tmp_path) == "scanned"
+
+    graph = json.loads((memory / "graph.json").read_text(encoding="utf-8"))
+    ids = {node["id"] for node in graph["nodes"]}
+    repo = tmp_path.name
+    assert f"{repo}:fn:pkg.gone" not in ids
+    assert f"{repo}:class:pkg.Gone" not in ids
+    assert f"{repo}:fn:pkg.kept" in ids
+    assert f"{repo}:file:pkg.py" in ids
+    assert not (memory / "functions" / "pkg.gone.md").exists()
+    assert not (memory / "classes" / "pkg.Gone.md").exists()
+    assert (memory / "functions" / "pkg.kept.md").is_file()
+
+
+def test_syntax_error_file_drops_stale_symbol_markdown_and_nodes(tmp_path):
+    memory = _seed_pkg_gone(tmp_path)
+    (tmp_path / "pkg.py").write_text("def gone(\n", encoding="utf-8")
+    subprocess.run(
+        ["git", "add", "--", "pkg.py"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+    )
+
+    assert _run_scan(tmp_path) == "scanned"
+
+    graph = json.loads((memory / "graph.json").read_text(encoding="utf-8"))
+    nodes = {node["id"]: node for node in graph["nodes"]}
+    repo = tmp_path.name
+    assert nodes[f"{repo}:file:pkg.py"]["kind"] == "File"
+    assert f"{repo}:fn:pkg.gone" not in nodes
+    assert f"{repo}:class:pkg.Gone" not in nodes
+    assert not any(
+        edge["from"] in {f"{repo}:fn:pkg.gone", f"{repo}:class:pkg.Gone"}
+        or edge["to"] in {f"{repo}:fn:pkg.gone", f"{repo}:class:pkg.Gone"}
+        for edge in graph["edges"]
+    )
+    assert not (memory / "functions" / "pkg.gone.md").exists()
+    assert not (memory / "classes" / "pkg.Gone.md").exists()
+    assert (memory / "files" / "pkg.py.md").is_file()
 
 
 def test_scan_describes_functions_from_bulk_read(tmp_path):
