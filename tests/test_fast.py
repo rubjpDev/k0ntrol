@@ -225,3 +225,43 @@ def test_fast_and_validator_steps(tmp_path):
     assert [item[1] for item in seen] == ["tester", "coder", "validator"]
     assert len({item[2] for item in seen}) == 1
     assert seen[0][2]
+
+
+def test_fast_tester_and_coder_inject_memory_validator_does_not(tmp_path):
+    memory_body = "# a.py\n\n## hace\nreturns 1 from checkout\n\n## gotchas\nnone\n"
+    path = tmp_path / ".k0-mem" / "Project_context" / tmp_path.name / "files" / "a.py.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(memory_body, encoding="utf-8")
+    (tmp_path / "a.py").write_text("original\n", encoding="utf-8")
+    prompts = {}
+    node_id = f"{tmp_path.name}:file:a.py"
+    cfg = loop_config()
+    cfg["retrieval_top_k"] = 5
+    cfg["agents"] = dict(cfg["agents"])
+    cfg["agents"]["retrieval_gate"] = {"model": "m"}
+
+    def fake_invoke(mode, prompt):
+        if mode.name == "retrieval_gate":
+            return f"retrieve: yes\n- {node_id}\n"
+        prompts[mode.name] = prompt
+        if mode.name == "tester":
+            return "FILE tests/test_fast.py\ndef test_fast():\n    assert False\n"
+        if mode.name == "coder":
+            return "FILE a.py\nBREAK\n"
+        assert mode.name == "validator"
+        return "- test_old failed\n"
+
+    status = run_fast(
+        "change @a.py",
+        root=tmp_path,
+        config=cfg,
+        read_line=lambda: "y",
+        write=lambda _line: None,
+        invoke=fake_invoke,
+        bulk_read=lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("bulk")),
+        run_suite=lambda root: (1, "FAILED tests/test_old.py::test_old\n"),
+    )
+    assert status == "stuck"
+    assert "returns 1 from checkout" in prompts["tester"]
+    assert "returns 1 from checkout" in prompts["coder"]
+    assert "returns 1 from checkout" not in prompts["validator"]

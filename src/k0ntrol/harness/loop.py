@@ -9,6 +9,7 @@ from uuid import uuid4
 from k0ntrol.backends.invoke import current_event_context, set_event_context
 from k0ntrol.frontends.mentions import MentionError, mention_paths
 from k0ntrol.harness.delegate import should_delegate
+from k0ntrol.harness.retrieve import agent_memory
 from k0ntrol.modespec import ModeSpec, load_mode
 from k0ntrol.stages.code_write import CodeWriteError, code_write
 
@@ -69,7 +70,7 @@ def run_fast(
             spec,
             root=root,
             mode=load_mode("tester", config),
-            invoke=_test_invoke(tester_invoke),
+            invoke=_test_invoke(_memory_invoke(tester_invoke, spec, root, config)),
             target=None,
             reference_text=reference_text,
         )
@@ -351,7 +352,7 @@ def _write_coder(
         spec,
         root=root,
         mode=load_mode("coder", config),
-        invoke=_coder_invoke(invoke, target, root),
+        invoke=_coder_invoke(_memory_invoke(invoke, spec, root, config), target, root),
         target=target,
         reference_text=reference_text,
     )
@@ -525,10 +526,26 @@ def _write_and_show_spec(
     invoke: Invoke,
     write: Callable[[str], None],
 ) -> str:
-    spec = invoke(load_mode("spec", config), prompt)
+    spec_invoke = _memory_invoke(invoke, prompt, root, config)
+    spec = spec_invoke(load_mode("spec", config), prompt)
     (root / "spec.md").write_text(spec, encoding="utf-8")
     write(spec)
     return spec
+
+
+def _memory_invoke(invoke: Invoke, query: str, root: Path, config: dict) -> Invoke:
+    extra = agent_memory(query, root=root, config=config, invoke=invoke)
+
+    def wrapped(mode: ModeSpec, prompt: str) -> str:
+        return invoke(mode, _join_memory(prompt, extra))
+
+    return wrapped
+
+
+def _join_memory(prompt: str, extra: str) -> str:
+    if not extra:
+        return prompt
+    return f"{prompt}\n\n{extra}"
 
 
 def _rejected_prompt(prompt: str, spec: str) -> str:
@@ -587,7 +604,7 @@ def _test_gate_loop(
             reference_text,
             root,
             mode,
-            tester_invoke,
+            _memory_invoke(tester_invoke, spec, root, config),
             write,
         )
         if _read_gate(read_line, write) == "y":
@@ -792,11 +809,12 @@ def _write_review(
     write: Callable[[str], None],
 ) -> Path:
     review_path = root / "review.md"
+    reviewer_invoke = _with_event_step(invoke, "reviewer")
     written = code_write(
         spec,
         root=root,
         mode=load_mode("reviewer", config),
-        invoke=_with_event_step(invoke, "reviewer"),
+        invoke=_memory_invoke(reviewer_invoke, spec, root, config),
         target=review_path,
         reference_text=_review_reference(
             before,

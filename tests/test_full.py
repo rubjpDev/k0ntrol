@@ -1,6 +1,11 @@
+import json
+import stat
+import sys
+
 import pytest
 
-from k0ntrol.backends.invoke import current_event_context
+from k0ntrol.backends.invoke import current_event_context, invoke
+from k0ntrol.harness.init import RULES
 from k0ntrol.harness.loop import run_full
 
 
@@ -24,6 +29,29 @@ def loop_config(**overrides):
     }
     cfg.update(overrides)
     return cfg
+
+
+def memory_loop_config(**overrides):
+    cfg = loop_config()
+    cfg["retrieval_top_k"] = 5
+    cfg["agents"] = dict(cfg["agents"])
+    cfg["agents"]["retrieval_gate"] = {"model": "m"}
+    cfg.update(overrides)
+    return cfg
+
+
+def write_file_memory(root, relative, body):
+    path = (
+        root
+        / ".k0-mem"
+        / "Project_context"
+        / root.name
+        / "files"
+        / f"{relative}.md"
+    )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(body, encoding="utf-8")
+    return f"{root.name}:file:{relative}"
 
 
 def test_full_rewrites_spec_until_yes(tmp_path):
@@ -570,3 +598,292 @@ def test_full_coder_can_create_a_new_product_file(tmp_path):
     assert status == "done"
     assert [name for name, _prompt in seen] == ["spec", "tester", "coder", "reviewer"]
     assert (tmp_path / "src" / "new.py").read_text(encoding="utf-8") == "created\n"
+
+
+def test_full_spec_injects_memory_when_gate_says_yes(tmp_path):
+    node_id = write_file_memory(
+        tmp_path,
+        "src/app.py",
+        "# src/app.py\n\n## hace\nreturns 1 from checkout\n\n## gotchas\nnone\n",
+    )
+    seen = {}
+
+    def fake_invoke(mode, prompt):
+        if mode.name == "retrieval_gate":
+            seen["gate_prompt"] = prompt
+            return f"retrieve: yes\n- {node_id}\n"
+        assert mode.name == "spec"
+        seen["prompt"] = prompt
+        return "## Goal\ng\n## Files\n"
+
+    status = run_full(
+        "what does checkout return?",
+        root=tmp_path,
+        config=memory_loop_config(),
+        read_line=lambda: "y",
+        write=lambda _line: None,
+        invoke=fake_invoke,
+        bulk_read=lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("bulk")
+        ),
+    )
+    assert status == "tested"
+    assert node_id in seen["gate_prompt"]
+    assert "returns 1 from checkout" in seen["prompt"]
+    assert "what does checkout return?" in seen["prompt"]
+
+
+def test_full_loop_agents_inject_memory_and_validator_does_not(tmp_path):
+    node_id = write_file_memory(
+        tmp_path,
+        "src/app.py",
+        "# src/app.py\n\n## hace\nreturns 1 from checkout\n\n## gotchas\nnone\n",
+    )
+    rules = tmp_path / ".k0-mem" / "General_mem" / "Rules.md"
+    rules.parent.mkdir(parents=True, exist_ok=True)
+    rules.write_text("# Rules\n\nNever log secrets.\n", encoding="utf-8")
+    target = tmp_path / "src" / "app.py"
+    target.parent.mkdir()
+    target.write_text("original\n", encoding="utf-8")
+    prompts = {}
+
+    def fake_invoke(mode, prompt):
+        if mode.name == "retrieval_gate":
+            return f"retrieve: yes\n- {node_id}\n"
+        prompts[mode.name] = prompt
+        if mode.name == "spec":
+            return "## Goal\ng\n## Files\n- tests/test_app.py\n- src/app.py\n"
+        if mode.name == "tester":
+            return "FILE tests/test_app.py\ndef test_app():\n    assert True\n"
+        if mode.name == "coder":
+            return "FILE src/app.py\nbroken\n"
+        assert mode.name == "validator"
+        return "- test_app failed\n"
+
+    status = run_full(
+        "change the app",
+        root=tmp_path,
+        config=memory_loop_config(max_retries=0),
+        read_line=iter(["y", "y"]).__next__,
+        write=lambda _line: None,
+        invoke=fake_invoke,
+        bulk_read=lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("bulk")
+        ),
+        run_suite=lambda root: (1, "FAILED tests/test_app.py::test_app\n"),
+    )
+    assert status == "stuck"
+    memory = "returns 1 from checkout"
+    assert memory in prompts["spec"]
+    assert memory in prompts["tester"]
+    assert memory in prompts["coder"]
+    assert "# Rules\n\nNever log secrets.\n" in prompts["coder"]
+    assert memory not in prompts["validator"]
+    assert "Never log secrets" not in prompts["validator"]
+    assert "reviewer" not in prompts
+
+
+def test_full_reviewer_injects_memory(tmp_path):
+    node_id = write_file_memory(
+        tmp_path,
+        "src/app.py",
+        "# src/app.py\n\n## hace\nreturns 1 from checkout\n\n## gotchas\nnone\n",
+    )
+    target = tmp_path / "src" / "app.py"
+    target.parent.mkdir()
+    target.write_text("original\n", encoding="utf-8")
+    seen = {}
+
+    def fake_invoke(mode, prompt):
+        if mode.name == "retrieval_gate":
+            return f"retrieve: yes\n- {node_id}\n"
+        if mode.name == "spec":
+            return "## Goal\ng\n## Files\n- tests/test_app.py\n- src/app.py\n"
+        if mode.name == "tester":
+            return "FILE tests/test_app.py\ndef test_app():\n    assert True\n"
+        if mode.name == "coder":
+            return "FILE src/app.py\nchanged\n"
+        assert mode.name == "reviewer"
+        seen["prompt"] = prompt
+        return "FILE review.md\nLooks good.\n"
+
+    status = run_full(
+        "change the app",
+        root=tmp_path,
+        config=memory_loop_config(),
+        read_line=iter(["y", "y", "ok"]).__next__,
+        write=lambda _line: None,
+        invoke=fake_invoke,
+        bulk_read=lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("bulk")
+        ),
+        run_suite=lambda root: (0, "ok\n"),
+    )
+    assert status == "done"
+    assert "returns 1 from checkout" in seen["prompt"]
+
+
+def test_full_injects_custom_rules_outside_the_gate(tmp_path):
+    write_file_memory(
+        tmp_path,
+        "src/app.py",
+        "# src/app.py\n\n## hace\nreturns 1 from checkout\n\n## gotchas\nnone\n",
+    )
+    rules = tmp_path / ".k0-mem" / "General_mem" / "Rules.md"
+    rules.parent.mkdir(parents=True, exist_ok=True)
+    rules.write_text("# Rules\n\nNever log secrets.\n", encoding="utf-8")
+    target = tmp_path / "src" / "app.py"
+    target.parent.mkdir()
+    target.write_text("original\n", encoding="utf-8")
+    prompts = {}
+
+    def fake_invoke(mode, prompt):
+        if mode.name == "retrieval_gate":
+            return "retrieve: no\n"
+        prompts[mode.name] = prompt
+        if mode.name == "spec":
+            return "## Goal\ng\n## Files\n- tests/test_app.py\n- src/app.py\n"
+        if mode.name == "tester":
+            return "FILE tests/test_app.py\ndef test_app():\n    assert True\n"
+        if mode.name == "coder":
+            return "FILE src/app.py\nchanged\n"
+        assert mode.name == "reviewer"
+        return "FILE review.md\nLooks good.\n"
+
+    status = run_full(
+        "change the app",
+        root=tmp_path,
+        config=memory_loop_config(),
+        read_line=iter(["y", "y", "ok"]).__next__,
+        write=lambda _line: None,
+        invoke=fake_invoke,
+        bulk_read=lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("bulk")
+        ),
+        run_suite=lambda root: (0, "ok\n"),
+    )
+    assert status == "done"
+    for name in ("spec", "tester", "coder", "reviewer"):
+        assert "# Rules\n\nNever log secrets.\n" in prompts[name]
+        assert "returns 1 from checkout" not in prompts[name]
+
+
+def test_full_skips_template_rules(tmp_path):
+    write_file_memory(
+        tmp_path,
+        "src/app.py",
+        "# src/app.py\n\n## hace\nreturns 1 from checkout\n\n## gotchas\nnone\n",
+    )
+    rules = tmp_path / ".k0-mem" / "General_mem" / "Rules.md"
+    rules.parent.mkdir(parents=True, exist_ok=True)
+    rules.write_text(RULES, encoding="utf-8")
+    seen = {}
+
+    def fake_invoke(mode, prompt):
+        if mode.name == "retrieval_gate":
+            return "retrieve: no\n"
+        seen["prompt"] = prompt
+        return "## Goal\ng\n## Files\n"
+
+    status = run_full(
+        "what does checkout return?",
+        root=tmp_path,
+        config=memory_loop_config(),
+        read_line=lambda: "y",
+        write=lambda _line: None,
+        invoke=fake_invoke,
+        bulk_read=lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("bulk")
+        ),
+    )
+    assert status == "tested"
+    assert seen["prompt"] == "what does checkout return?"
+    assert "Global rules for every agent" not in seen["prompt"]
+
+
+def test_full_coder_keeps_whole_target_when_memory_is_injected(tmp_path):
+    write_file_memory(
+        tmp_path,
+        "src/app.py",
+        "# src/app.py\n\n## hace\nreturns 1 from checkout\n\n## gotchas\nnone\n",
+    )
+    target = tmp_path / "src" / "app.py"
+    target.parent.mkdir()
+    target_body = "x\n" * 400
+    target.write_text(target_body, encoding="utf-8")
+    seen = {}
+
+    def fake_invoke(mode, prompt):
+        if mode.name == "retrieval_gate":
+            return f"retrieve: yes\n- {tmp_path.name}:file:src/app.py\n"
+        if mode.name == "spec":
+            return "## Goal\ng\n## Files\n- tests/test_app.py\n- src/app.py\n"
+        if mode.name == "tester":
+            return "FILE tests/test_app.py\ndef test_app():\n    assert True\n"
+        if mode.name == "coder":
+            seen["prompt"] = prompt
+            return "FILE src/app.py\nchanged\n"
+        return "FILE review.md\nLooks good.\n"
+
+    status = run_full(
+        "change the app",
+        root=tmp_path,
+        config=memory_loop_config(),
+        read_line=iter(["y", "y", "ok"]).__next__,
+        write=lambda _line: None,
+        invoke=fake_invoke,
+        bulk_read=lambda *args, **kwargs: "SUMMARY\n",
+        run_suite=lambda root: (0, "ok\n"),
+    )
+    assert status == "done"
+    assert f"Target:\n{target_body}" in seen["prompt"]
+    assert "returns 1 from checkout" in seen["prompt"]
+    assert seen["prompt"].index(f"Target:\n{target_body}") < seen["prompt"].index(
+        "returns 1 from checkout"
+    )
+
+
+def write_agent(path, body):
+    path.write_text(f"#!{sys.executable}\n{body}")
+    path.chmod(path.stat().st_mode | stat.S_IEXEC)
+
+
+def test_full_each_gate_decision_emits_one_jsonl_event(tmp_path, monkeypatch):
+    write_file_memory(
+        tmp_path,
+        "src/app.py",
+        "# src/app.py\n\n## hace\nreturns 1 from checkout\n\n## gotchas\nnone\n",
+    )
+    monkeypatch.chdir(tmp_path)
+    agent = tmp_path / "cursor-agent"
+    write_agent(
+        agent,
+        "import json, sys\n"
+        "prompt = sys.argv[-1]\n"
+        "if 'Pick at most' in prompt:\n"
+        "    result = 'retrieve: no\\n'\n"
+        "else:\n"
+        "    result = '## Goal\\ng\\n## Files\\n'\n"
+        "print(json.dumps({'type':'result','subtype':'success','is_error':False,"
+        "'result': result}))\n",
+    )
+    monkeypatch.setenv("K0_CURSOR_AGENT", str(agent))
+    status = run_full(
+        "what does checkout return?",
+        root=tmp_path,
+        config=memory_loop_config(),
+        read_line=lambda: "y",
+        write=lambda _line: None,
+        invoke=invoke,
+        bulk_read=lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("bulk")
+        ),
+    )
+    assert status == "tested"
+    events = [
+        json.loads(line)
+        for line in (tmp_path / ".k0-mem" / "events.jsonl").read_text().splitlines()
+    ]
+    gate_events = [event for event in events if event["mode"] == "retrieval_gate"]
+    assert len(gate_events) == 1
+    assert gate_events[0]["ok"] is True

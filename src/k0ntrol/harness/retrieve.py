@@ -7,6 +7,7 @@ import sqlite3
 from collections.abc import Callable
 from pathlib import Path
 
+from k0ntrol.harness.init import RULES
 from k0ntrol.modespec import ModeSpec, load_mode
 
 Invoke = Callable[[ModeSpec, str], str]
@@ -25,6 +26,32 @@ def rules_text(root: Path) -> str:
     if not path.is_file():
         return ""
     return path.read_text(encoding="utf-8")
+
+
+def custom_rules_text(root: Path) -> str:
+    text = rules_text(root)
+    if not text or text == RULES:
+        return ""
+    return text
+
+
+def agent_memory(
+    query: str,
+    *,
+    root: Path,
+    config: dict,
+    invoke: Invoke,
+) -> str:
+    """Rules (if customized) plus gated retrieval, for injection into a prompt."""
+    sections: list[str] = []
+    rules = custom_rules_text(root)
+    if rules:
+        sections.append(rules)
+    if has_code_memory(root):
+        retrieved = memory_context(query, root=root, config=config, invoke=invoke)
+        if retrieved:
+            sections.append(retrieved)
+    return "\n\n".join(sections)
 
 
 def memory_context(

@@ -417,6 +417,8 @@ def test_fast_rescan_drops_deleted_file_markdown(tmp_path):
     subprocess.run(["git", "rm", "-f", "gone.py"], cwd=tmp_path, check=True, capture_output=True)
 
     def fake_invoke(mode, prompt):
+        if mode.name == "retrieval_gate":
+            return "retrieve: no\n"
         if mode.name == "tester":
             return "FILE tests/test_keep.py\ndef test_keep():\n    assert True\n"
         assert mode.name == "coder"
@@ -429,7 +431,14 @@ def test_fast_rescan_drops_deleted_file_markdown(tmp_path):
             "max_retries": 2,
             "agents": {
                 name: {"model": "m"}
-                for name in ("spec", "tester", "coder", "validator", "bulk_reader")
+                for name in (
+                    "spec",
+                    "tester",
+                    "coder",
+                    "validator",
+                    "bulk_reader",
+                    "retrieval_gate",
+                )
             },
         }
     )
@@ -455,6 +464,8 @@ def test_full_rescan_drops_deleted_file_markdown(tmp_path):
     subprocess.run(["git", "rm", "-f", "gone.py"], cwd=tmp_path, check=True, capture_output=True)
 
     def fake_invoke(mode, prompt):
+        if mode.name == "retrieval_gate":
+            return "retrieve: no\n"
         assert mode.name == "spec"
         return "## Goal\nhello\n## Files\n"
 
@@ -465,7 +476,14 @@ def test_full_rescan_drops_deleted_file_markdown(tmp_path):
             "max_retries": 2,
             "agents": {
                 name: {"model": "m"}
-                for name in ("spec", "tester", "coder", "validator", "bulk_reader")
+                for name in (
+                    "spec",
+                    "tester",
+                    "coder",
+                    "validator",
+                    "bulk_reader",
+                    "retrieval_gate",
+                )
             },
         }
     )

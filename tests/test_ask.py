@@ -8,6 +8,7 @@ import pytest
 from k0ntrol.backends.invoke import invoke
 from k0ntrol.frontends.ask import answer_ask
 from k0ntrol.frontends.mentions import MentionError
+from k0ntrol.harness.init import RULES
 
 
 def config(threshold=350):
@@ -247,6 +248,34 @@ def test_ask_injects_rules_outside_the_gate(tmp_path):
         "# Rules\n\nNever log secrets.\n"
     )
     assert "returns 1 from checkout" not in seen["prompt"]
+
+
+def test_ask_skips_template_rules(tmp_path):
+    write_file_memory(
+        tmp_path,
+        "src/app.py",
+        "# src/app.py\n\n## hace\nreturns 1 from checkout\n\n## gotchas\nnone\n",
+    )
+    rules = tmp_path / ".k0-mem" / "General_mem" / "Rules.md"
+    rules.parent.mkdir(parents=True, exist_ok=True)
+    rules.write_text(RULES, encoding="utf-8")
+    seen = {}
+
+    def fake_invoke(mode, prompt):
+        if mode.name == "retrieval_gate":
+            return "retrieve: no\n"
+        seen["prompt"] = prompt
+        return "ok\n"
+
+    answer_ask(
+        "what does checkout return?",
+        root=tmp_path,
+        config=memory_config(),
+        invoke=fake_invoke,
+        bulk_read=lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("bulk")),
+    )
+    assert seen["prompt"] == "what does checkout return?"
+    assert "Global rules for every agent" not in seen["prompt"]
 
 
 def test_ask_with_file_injects_rules_and_skips_retrieval(tmp_path):

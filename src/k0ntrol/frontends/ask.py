@@ -3,7 +3,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 from k0ntrol.harness.delegate import should_delegate
-from k0ntrol.harness.retrieve import has_code_memory, memory_context, rules_text
+from k0ntrol.harness.retrieve import agent_memory, has_code_memory
 from k0ntrol.modespec import ModeSpec, load_mode
 from k0ntrol.frontends.mentions import MentionError, mention_paths
 
@@ -32,16 +32,10 @@ def _question_with_memory(
     config: dict,
     invoke: Callable[[ModeSpec, str], str],
 ) -> str:
-    sections = [question]
-    rules = rules_text(root)
-    if rules:
-        sections.extend(["", rules])
-    if not has_code_memory(root):
-        return "\n".join(sections)
-    retrieved = memory_context(question, root=root, config=config, invoke=invoke)
-    if retrieved:
-        sections.extend(["", retrieved])
-    return "\n".join(sections)
+    extra = agent_memory(question, root=root, config=config, invoke=invoke)
+    if not extra:
+        return question
+    return f"{question}\n\n{extra}"
 
 
 def _ask_with_files(
