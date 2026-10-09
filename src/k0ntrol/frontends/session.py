@@ -8,7 +8,7 @@ from k0ntrol.frontends.ask import answer_ask
 from k0ntrol.frontends.banner import render_banner
 from k0ntrol.frontends.mentions import MentionError
 from k0ntrol.harness.loop import run_fast, run_full
-from k0ntrol.harness.reflect import run_reflect
+from k0ntrol.harness.reflect import offer_mem_proposals, run_reflect
 from k0ntrol.harness.scan import rescan_changed
 from k0ntrol import __version__
 
@@ -47,6 +47,7 @@ def run_session(
     )
     while True:
         try:
+            offer_mem_proposals(root, read_line, show)
             line = read_line()
         except (KeyboardInterrupt, EOFError):
             return 0

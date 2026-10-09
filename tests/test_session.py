@@ -1,14 +1,20 @@
 import json
 import subprocess
 import threading
+import time
 from pathlib import Path
 
 import pytest
 
 from k0ntrol.backends.invoke import BackendError
 from k0ntrol.frontends.session import run_session
+from k0ntrol.harness.init import MEM, RULES
 from k0ntrol.harness.scan import run_scan
-from k0ntrol.harness.session_memory import list_facts
+from k0ntrol.harness.session_memory import (
+    add_mem_proposal,
+    list_facts,
+    list_pending_mem_proposals,
+)
 
 
 def config():
@@ -986,4 +992,106 @@ def test_quit_waits_for_in_flight_reflect(tmp_path):
     assert not worker.is_alive()
     assert finished == [0]
     assert [item["body"] for item in list_facts(tmp_path)] == ["flushed"]
+
+
+def _pending_mem_arrives(root: Path, timeout: float = 1.0) -> bool:
+    end = time.monotonic() + timeout
+    while time.monotonic() < end:
+        if list_pending_mem_proposals(root):
+            return True
+        time.sleep(0.01)
+    return bool(list_pending_mem_proposals(root))
+
+
+def _seed_mem_files(root: Path) -> tuple[Path, Path, Path]:
+    mem = root / ".k0-mem" / "General_mem" / "Mem.md"
+    rules = root / ".k0-mem" / "General_mem" / "Rules.md"
+    topology = root / ".k0-mem" / "Project_topology" / root.name / "strategy.md"
+    mem.parent.mkdir(parents=True, exist_ok=True)
+    topology.parent.mkdir(parents=True, exist_ok=True)
+    mem.write_text(MEM, encoding="utf-8")
+    rules.write_text(RULES, encoding="utf-8")
+    topology.write_text("human owned\n", encoding="utf-8")
+    return mem, rules, topology
+
+
+def test_session_y_at_prompt_appends_mem_proposal(tmp_path):
+    mem, rules, topology = _seed_mem_files(tmp_path)
+    add_mem_proposal(tmp_path, "Prefer sqlite for checkout state")
+    lines = iter(["y", "/quit"])
+    shown = []
+    code = run_session(
+        lambda: next(lines),
+        shown.append,
+        root=tmp_path,
+        config=config(),
+        invoke=forbid,
+        bulk_read=forbid,
+    )
+    assert code == 0
+    assert "Mem.md += Prefer sqlite for checkout state? y/n" in shown
+    assert mem.read_text(encoding="utf-8") == MEM + "- Prefer sqlite for checkout state\n"
+    assert rules.read_text(encoding="utf-8") == RULES
+    assert topology.read_text(encoding="utf-8") == "human owned\n"
+    assert list_pending_mem_proposals(tmp_path) == []
+
+
+def test_session_n_at_prompt_drops_mem_proposal(tmp_path):
+    mem, rules, topology = _seed_mem_files(tmp_path)
+    add_mem_proposal(tmp_path, "Prefer sqlite for checkout state")
+    lines = iter(["n", "/quit"])
+    shown = []
+    code = run_session(
+        lambda: next(lines),
+        shown.append,
+        root=tmp_path,
+        config=config(),
+        invoke=forbid,
+        bulk_read=forbid,
+    )
+    assert code == 0
+    assert "Mem.md += Prefer sqlite for checkout state? y/n" in shown
+    assert mem.read_text(encoding="utf-8") == MEM
+    assert rules.read_text(encoding="utf-8") == RULES
+    assert topology.read_text(encoding="utf-8") == "human owned\n"
+    assert list_pending_mem_proposals(tmp_path) == []
+
+
+def test_mem_proposal_is_shown_at_next_prompt_not_mid_turn(tmp_path):
+    (tmp_path / "app.py").write_text("x\n", encoding="utf-8")
+    mem, rules, topology = _seed_mem_files(tmp_path)
+    spec_started = threading.Event()
+
+    def fake_invoke(mode, prompt):
+        if mode.name == "reflect":
+            assert spec_started.wait(1.0)
+            return "mem: Prefer sqlite for checkout state\n"
+        if mode.name == "spec":
+            spec_started.set()
+            assert _pending_mem_arrives(tmp_path)
+            return "## Goal\nhello\n## Files\n"
+        return "ok\n"
+
+    cfg = reflect_cfg(reflect_every=1)
+    cfg["agents"]["spec"] = {"model": "m"}
+    lines = iter(["/ask what is line 1? @app.py", "/full add checkout", "y", "n", "/quit"])
+    shown = []
+    code = run_session(
+        lambda: next(lines),
+        shown.append,
+        root=tmp_path,
+        config=cfg,
+        invoke=fake_invoke,
+        bulk_read=forbid,
+    )
+    assert code == 0
+    text = "\n".join(shown)
+    assert (tmp_path / "spec.md").read_text(encoding="utf-8").startswith("## Goal\nhello")
+    assert "Mem.md += Prefer sqlite for checkout state? y/n" in shown
+    assert text.index("## Goal\nhello") < text.index(
+        "Mem.md += Prefer sqlite for checkout state? y/n"
+    )
+    assert mem.read_text(encoding="utf-8") == MEM
+    assert rules.read_text(encoding="utf-8") == RULES
+    assert topology.read_text(encoding="utf-8") == "human owned\n"
 
