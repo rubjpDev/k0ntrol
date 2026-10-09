@@ -7,7 +7,8 @@ import sqlite3
 from collections.abc import Callable
 from pathlib import Path
 
-from k0ntrol.harness.init import RULES
+from k0ntrol.harness.init import ARCHITECTURE, CODE_RULES, RULES, STRATEGY
+from k0ntrol.harness.session_memory import fact_entry_id, has_facts, list_facts
 from k0ntrol.modespec import ModeSpec, load_mode
 
 Invoke = Callable[[ModeSpec, str], str]
@@ -35,6 +36,28 @@ def custom_rules_text(root: Path) -> str:
     return text
 
 
+def custom_topology_text(root: Path) -> str:
+    topo = root / ".k0-mem" / "Project_topology" / root.name
+    sections = [
+        _custom_file_text(topo / name, template)
+        for name, template in (
+            ("architecture.md", ARCHITECTURE),
+            ("strategy.md", STRATEGY),
+            ("code_rules.md", CODE_RULES),
+        )
+    ]
+    return "\n\n".join(section for section in sections if section)
+
+
+def _custom_file_text(path: Path, template: str) -> str:
+    if not path.is_file():
+        return ""
+    text = path.read_text(encoding="utf-8")
+    if not text or text == template:
+        return ""
+    return text
+
+
 def agent_memory(
     query: str,
     *,
@@ -47,7 +70,7 @@ def agent_memory(
     rules = custom_rules_text(root)
     if rules:
         sections.append(rules)
-    if has_code_memory(root):
+    if has_code_memory(root) or has_facts(root):
         retrieved = memory_context(query, root=root, config=config, invoke=invoke)
         if retrieved:
             sections.append(retrieved)
@@ -75,7 +98,7 @@ def rebuild_index(root: Path) -> Path:
     index_path = mem_dir / INDEX_NAME
     conn = sqlite3.connect(index_path)
     try:
-        _replace_index(conn, mem_dir / "Project_context")
+        _replace_index(conn, mem_dir / "Project_context", list_facts(root))
     finally:
         conn.close()
     return index_path
@@ -89,12 +112,24 @@ def query_index(root: Path, question: str, limit: int) -> list[dict[str, str]]:
         conn.close()
 
 
-def _replace_index(conn: sqlite3.Connection, context_root: Path) -> None:
+def _replace_index(
+    conn: sqlite3.Connection,
+    context_root: Path,
+    facts: list[dict[str, object]],
+) -> None:
     conn.execute("DROP TABLE IF EXISTS memory")
     conn.execute("CREATE VIRTUAL TABLE memory USING fts5(id, path, body)")
     rows = [_entry_row(path, context_root) for path in _markdown_files(context_root)]
+    rows.extend(_fact_rows(facts))
     conn.executemany("INSERT INTO memory (id, path, body) VALUES (?, ?, ?)", rows)
     conn.commit()
+
+
+def _fact_rows(facts: list[dict[str, object]]) -> list[tuple[str, str, str]]:
+    return [
+        (fact_entry_id(int(item["id"])), "session.sqlite", str(item["body"]))
+        for item in facts
+    ]
 
 
 def _markdown_files(context_root: Path) -> list[Path]:
@@ -162,7 +197,7 @@ def _run_gate(
 
 def _gate_prompt(question: str, candidates: list[dict[str, str]], top_k: int) -> str:
     lines = [
-        f"Pick at most {top_k} candidate ids if the question needs code memory.",
+        f"Pick at most {top_k} candidate ids if the question needs retrieved memory (code or session facts).",
         "",
         "Question:",
         question,

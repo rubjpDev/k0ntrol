@@ -49,6 +49,21 @@ def test_retrieval_gate_mode_loads(cfg):
     assert mode.model == "gpt-5.6-luna-max"
 
 
+def test_reflect_mode_loads(cfg):
+    mode = load_mode("reflect", cfg)
+    assert mode.name == "reflect"
+    assert "fact:" in mode.instructions
+    assert "episode:" in mode.instructions
+    assert mode.model == "gpt-5.6-luna-max"
+
+
+def test_reflect_mode_never_writes_rules_or_topology(cfg):
+    instructions = load_mode("reflect", cfg).instructions
+    assert "Mem.md" not in instructions
+    assert "Rules.md" in instructions
+    assert "Project_topology" in instructions
+
+
 def test_all_modes_are_one_shot(cfg):
     assert all(m.one_shot for m in load_all_modes(cfg).values())
 

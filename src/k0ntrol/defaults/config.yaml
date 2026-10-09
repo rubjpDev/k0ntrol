@@ -3,6 +3,7 @@ backend: cursor
 threshold_lines: 350
 scan_confirm_over: 50
 retrieval_top_k: 5
+reflect_every: 10
 test_cmd: "pytest -q"   # full suite, never only the new tests (D24)
 max_retries: 2
 agents:
@@ -14,3 +15,4 @@ agents:
   reviewer:    {model: "claude-opus-5-5-high"}
   bulk_reader: {model: "gpt-5.6-luna-max", temperature: 0.2}
   retrieval_gate: {model: "gpt-5.6-luna-max", temperature: 0.2}
+  reflect: {model: "gpt-5.6-luna-max", temperature: 0.2}

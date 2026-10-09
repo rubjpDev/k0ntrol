@@ -26,6 +26,8 @@ def test_defaults_are_valid(cfg):
         ("scan_confirm_over", True),
         ("retrieval_top_k", 0),
         ("retrieval_top_k", True),
+        ("reflect_every", 0),
+        ("reflect_every", True),
     ],
 )
 def test_invalid_top_level_value_names_the_key(cfg, key, value):

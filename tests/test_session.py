@@ -1,5 +1,6 @@
 import json
 import subprocess
+import threading
 from pathlib import Path
 
 import pytest
@@ -7,6 +8,7 @@ import pytest
 from k0ntrol.backends.invoke import BackendError
 from k0ntrol.frontends.session import run_session
 from k0ntrol.harness.scan import run_scan
+from k0ntrol.harness.session_memory import list_facts
 
 
 def config():
@@ -14,11 +16,19 @@ def config():
         "backend": "cursor",
         "threshold_lines": 350,
         "scan_confirm_over": 50,
+        "reflect_every": 10,
         "agents": {
             "bulk_reader": {"model": "gpt-secret-model"},
             "retrieval_gate": {"model": "gpt-secret-model"},
+            "reflect": {"model": "gpt-secret-model"},
         },
     }
+
+
+def reflect_cfg(**overrides):
+    cfg = config()
+    cfg.update(overrides)
+    return cfg
 
 
 def git_tracked(root: Path, files: dict[str, str]) -> None:
@@ -56,6 +66,15 @@ def memory_dir(root: Path) -> Path:
 
 def forbid(mode, prompt, **kwargs):
     raise AssertionError("model called")
+
+
+def allow_reflect(fn):
+    def invoke(mode, prompt, **kwargs):
+        if getattr(mode, "name", None) == "reflect":
+            return ""
+        return fn(mode, prompt, **kwargs)
+
+    return invoke
 
 
 def test_help_stays_on_screen_and_quit_exits(tmp_path):
@@ -106,7 +125,14 @@ def test_full_in_the_session_writes_spec_on_yes(tmp_path):
         "max_retries": 2,
         "agents": {
             name: {"model": "m"}
-            for name in ("spec", "tester", "coder", "validator", "bulk_reader")
+            for name in (
+                "spec",
+                "tester",
+                "coder",
+                "validator",
+                "bulk_reader",
+                "reflect",
+            )
         },
     }
     lines = iter(["/full add checkout", "y", "/quit"])
@@ -116,7 +142,7 @@ def test_full_in_the_session_writes_spec_on_yes(tmp_path):
         shown.append,
         root=tmp_path,
         config=cfg,
-        invoke=fake_invoke,
+        invoke=allow_reflect(fake_invoke),
         bulk_read=forbid,
     )
     assert code == 0
@@ -154,6 +180,7 @@ def test_full_in_the_session_runs_the_coder_and_validator_path(tmp_path):
                 "validator",
                 "reviewer",
                 "bulk_reader",
+                "reflect",
             )
         },
     }
@@ -164,7 +191,7 @@ def test_full_in_the_session_runs_the_coder_and_validator_path(tmp_path):
         shown.append,
         root=tmp_path,
         config=cfg,
-        invoke=fake_invoke,
+        invoke=allow_reflect(fake_invoke),
         bulk_read=forbid,
         run_suite=lambda root: (0, "ok\n"),
     )
@@ -206,6 +233,7 @@ def test_full_in_the_session_prints_stuck_after_validation_limit(tmp_path):
                 "validator",
                 "reviewer",
                 "bulk_reader",
+                "reflect",
             )
         },
     }
@@ -216,7 +244,7 @@ def test_full_in_the_session_prints_stuck_after_validation_limit(tmp_path):
         shown.append,
         root=tmp_path,
         config=cfg,
-        invoke=fake_invoke,
+        invoke=allow_reflect(fake_invoke),
         bulk_read=forbid,
         run_suite=lambda root: (1, "FAILED tests/test_app.py::test_app\n"),
     )
@@ -438,6 +466,7 @@ def test_fast_rescan_drops_deleted_file_markdown(tmp_path):
                     "validator",
                     "bulk_reader",
                     "retrieval_gate",
+                    "reflect",
                 )
             },
         }
@@ -448,7 +477,7 @@ def test_fast_rescan_drops_deleted_file_markdown(tmp_path):
         lambda _line: None,
         root=tmp_path,
         config=cfg,
-        invoke=fake_invoke,
+        invoke=allow_reflect(fake_invoke),
         bulk_read=forbid,
         run_suite=lambda root: (0, "ok\n"),
     )
@@ -483,6 +512,7 @@ def test_full_rescan_drops_deleted_file_markdown(tmp_path):
                     "validator",
                     "bulk_reader",
                     "retrieval_gate",
+                    "reflect",
                 )
             },
         }
@@ -494,7 +524,7 @@ def test_full_rescan_drops_deleted_file_markdown(tmp_path):
         shown.append,
         root=tmp_path,
         config=cfg,
-        invoke=fake_invoke,
+        invoke=allow_reflect(fake_invoke),
         bulk_read=forbid,
     )
     assert code == 0
@@ -601,7 +631,7 @@ def test_backend_error_stays_in_session(tmp_path):
         shown.append,
         root=tmp_path,
         config=config(),
-        invoke=fail,
+        invoke=allow_reflect(fail),
         bulk_read=forbid,
     )
     assert code == 0
@@ -627,7 +657,14 @@ def test_fast_in_the_session_skips_spec(tmp_path):
         "max_retries": 2,
         "agents": {
             name: {"model": "m"}
-            for name in ("spec", "tester", "coder", "validator", "bulk_reader")
+            for name in (
+                "spec",
+                "tester",
+                "coder",
+                "validator",
+                "bulk_reader",
+                "reflect",
+            )
         },
     }
     lines = iter(["/fast change @a.py", "/quit"])
@@ -636,7 +673,7 @@ def test_fast_in_the_session_skips_spec(tmp_path):
         lambda _line: None,
         root=tmp_path,
         config=cfg,
-        invoke=fake_invoke,
+        invoke=allow_reflect(fake_invoke),
         bulk_read=forbid,
     )
     assert code == 0
@@ -670,6 +707,7 @@ def test_fast_in_the_session_prints_done_without_reviewer(tmp_path):
                 "validator",
                 "reviewer",
                 "bulk_reader",
+                "reflect",
             )
         },
     }
@@ -680,7 +718,7 @@ def test_fast_in_the_session_prints_done_without_reviewer(tmp_path):
         shown.append,
         root=tmp_path,
         config=cfg,
-        invoke=fake_invoke,
+        invoke=allow_reflect(fake_invoke),
         bulk_read=forbid,
         run_suite=lambda root: (0, "ok\n"),
     )
@@ -707,9 +745,245 @@ def test_ask_sets_one_run_and_the_ask_step(tmp_path):
         lambda _line: None,
         root=tmp_path,
         config=config(),
-        invoke=fake_invoke,
+        invoke=allow_reflect(fake_invoke),
         bulk_read=forbid,
     )
     assert code == 0
     assert seen[0]["step"] == "ask"
     assert seen[0]["run"]
+
+
+def test_quit_reflects_pending_ask_turns(tmp_path):
+    (tmp_path / "app.py").write_text("x\n", encoding="utf-8")
+    names = []
+
+    def fake_invoke(mode, prompt):
+        names.append(mode.name)
+        if mode.name == "reflect":
+            return "fact: line 1 is x\n"
+        return "line 1 is x\n"
+
+    lines = iter(["/ask what is line 1? @app.py", "/quit"])
+    code = run_session(
+        lambda: next(lines),
+        lambda _line: None,
+        root=tmp_path,
+        config=reflect_cfg(),
+        invoke=fake_invoke,
+        bulk_read=forbid,
+    )
+    assert code == 0
+    assert names[-1] == "reflect"
+    assert [item["body"] for item in list_facts(tmp_path)] == ["line 1 is x"]
+
+
+def test_help_and_unknown_are_not_turns(tmp_path):
+    names = []
+
+    def fake_invoke(mode, prompt):
+        names.append(mode.name)
+        return "fact: should not run\n"
+
+    lines = iter(["/help", "/nope", "/quit"])
+    code = run_session(
+        lambda: next(lines),
+        lambda _line: None,
+        root=tmp_path,
+        config=reflect_cfg(),
+        invoke=fake_invoke,
+        bulk_read=forbid,
+    )
+    assert code == 0
+    assert names == []
+    assert list_facts(tmp_path) == []
+
+
+def test_reflect_every_turns_include_ask(tmp_path):
+    (tmp_path / "app.py").write_text("x\n", encoding="utf-8")
+    names = []
+
+    def fake_invoke(mode, prompt):
+        names.append(mode.name)
+        if mode.name == "reflect":
+            return "fact: asked twice\n"
+        return "ok\n"
+
+    lines = iter(
+        [
+            "/ask what is line 1? @app.py",
+            "/ask what is line 1? @app.py",
+            "/quit",
+        ]
+    )
+    code = run_session(
+        lambda: next(lines),
+        lambda _line: None,
+        root=tmp_path,
+        config=reflect_cfg(reflect_every=2),
+        invoke=fake_invoke,
+        bulk_read=forbid,
+    )
+    assert code == 0
+    assert names.count("reflect") == 1
+    assert [item["body"] for item in list_facts(tmp_path)] == ["asked twice"]
+
+
+def test_done_fast_reflects_once_and_quit_does_not_double_fire(tmp_path):
+    (tmp_path / "a.py").write_text("a\n", encoding="utf-8")
+    names = []
+
+    def fake_invoke(mode, prompt):
+        names.append(mode.name)
+        if mode.name == "reflect":
+            return "fact: fast finished\n"
+        if mode.name == "tester":
+            return "FILE tests/test_fast.py\ndef test_fast():\n    assert True\n"
+        if mode.name == "coder":
+            return "FILE a.py\nchanged\n"
+        raise AssertionError(mode.name)
+
+    cfg = reflect_cfg(test_cmd="pytest -q", max_retries=2, reflect_every=1)
+    cfg["agents"] = {
+        name: {"model": "m"}
+        for name in (
+            "spec",
+            "tester",
+            "coder",
+            "validator",
+            "reviewer",
+            "bulk_reader",
+            "retrieval_gate",
+            "reflect",
+        )
+    }
+    lines = iter(["/fast change @a.py", "y", "/quit"])
+    shown = []
+    code = run_session(
+        lambda: next(lines),
+        shown.append,
+        root=tmp_path,
+        config=cfg,
+        invoke=fake_invoke,
+        bulk_read=forbid,
+        run_suite=lambda root: (0, "ok\n"),
+    )
+    assert code == 0
+    assert "done" in shown
+    assert names.count("reflect") == 1
+    assert [item["body"] for item in list_facts(tmp_path)] == ["fast finished"]
+
+
+def test_tested_fast_is_not_done_reflect(tmp_path):
+    (tmp_path / "a.py").write_text("a\n", encoding="utf-8")
+    reflected = threading.Event()
+
+    def fake_invoke(mode, prompt):
+        if mode.name == "reflect":
+            reflected.set()
+            return "fact: too early\n"
+        if mode.name == "tester":
+            return "FILE tests/test_fast.py\ndef test_fast():\n    assert True\n"
+        if mode.name == "coder":
+            return "FILE a.py\nchanged\n"
+        raise AssertionError(mode.name)
+
+    cfg = reflect_cfg(test_cmd="pytest -q", max_retries=2, reflect_every=10)
+    cfg["agents"] = {
+        name: {"model": "m"}
+        for name in (
+            "spec",
+            "tester",
+            "coder",
+            "validator",
+            "bulk_reader",
+            "reflect",
+        )
+    }
+    lines = iter(["/fast change @a.py", "/help", "/quit"])
+
+    def read_line():
+        line = next(lines)
+        if line == "/help":
+            assert not reflected.wait(0.05)
+        return line
+
+    code = run_session(
+        read_line,
+        lambda _line: None,
+        root=tmp_path,
+        config=cfg,
+        invoke=fake_invoke,
+        bulk_read=forbid,
+    )
+    assert code == 0
+    assert reflected.is_set()
+    assert [item["body"] for item in list_facts(tmp_path)] == ["too early"]
+
+
+def test_prompt_does_not_wait_for_reflect(tmp_path):
+    (tmp_path / "app.py").write_text("x\n", encoding="utf-8")
+    continued = threading.Event()
+
+    def fake_invoke(mode, prompt):
+        if mode.name == "reflect":
+            assert continued.wait(1.0)
+            return "fact: async\n"
+        return "ok\n"
+
+    lines = iter(["/ask what is line 1? @app.py", "/help", "/quit"])
+
+    def read_line():
+        line = next(lines)
+        if line == "/help":
+            continued.set()
+        return line
+
+    code = run_session(
+        read_line,
+        lambda _line: None,
+        root=tmp_path,
+        config=reflect_cfg(reflect_every=1),
+        invoke=fake_invoke,
+        bulk_read=forbid,
+    )
+    assert code == 0
+    assert [item["body"] for item in list_facts(tmp_path)] == ["async"]
+
+
+def test_quit_waits_for_in_flight_reflect(tmp_path):
+    (tmp_path / "app.py").write_text("x\n", encoding="utf-8")
+    started = threading.Event()
+    release = threading.Event()
+
+    def fake_invoke(mode, prompt):
+        if mode.name == "reflect":
+            started.set()
+            assert release.wait(1.0)
+            return "fact: flushed\n"
+        return "ok\n"
+
+    lines = iter(["/ask what is line 1? @app.py", "/quit"])
+    finished = []
+
+    def run():
+        code = run_session(
+            lambda: next(lines),
+            lambda _line: None,
+            root=tmp_path,
+            config=reflect_cfg(reflect_every=1),
+            invoke=fake_invoke,
+            bulk_read=forbid,
+        )
+        finished.append(code)
+
+    worker = threading.Thread(target=run)
+    worker.start()
+    assert started.wait(1.0)
+    assert worker.is_alive()
+    assert list_facts(tmp_path) == []
+    release.set()
+    worker.join(1.0)
+    assert not worker.is_alive()
+    assert finished == [0]
+    assert [item["body"] for item in list_facts(tmp_path)] == ["flushed"]
+

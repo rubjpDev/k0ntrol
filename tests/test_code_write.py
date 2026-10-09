@@ -95,3 +95,30 @@ def test_file_line_outside_root_writes_nothing(tmp_path):
             reference_text="",
         )
     assert not (tmp_path.parent / "secret.py").exists()
+
+
+def test_code_write_rejects_project_topology(tmp_path):
+    dest = (
+        tmp_path
+        / ".k0-mem"
+        / "Project_topology"
+        / tmp_path.name
+        / "architecture.md"
+    )
+    dest.parent.mkdir(parents=True)
+    dest.write_text("human\n", encoding="utf-8")
+    relative = f".k0-mem/Project_topology/{tmp_path.name}/architecture.md"
+
+    def fake_invoke(mode, prompt):
+        return f"FILE {relative}\noverwrite\n"
+
+    with pytest.raises(CodeWriteError, match="Project_topology"):
+        code_write(
+            "spec",
+            root=tmp_path,
+            mode=MODE,
+            invoke=fake_invoke,
+            target=None,
+            reference_text="",
+        )
+    assert dest.read_text(encoding="utf-8") == "human\n"

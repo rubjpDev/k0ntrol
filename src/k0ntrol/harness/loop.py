@@ -9,7 +9,7 @@ from uuid import uuid4
 from k0ntrol.backends.invoke import current_event_context, set_event_context
 from k0ntrol.frontends.mentions import MentionError, mention_paths
 from k0ntrol.harness.delegate import should_delegate
-from k0ntrol.harness.retrieve import agent_memory
+from k0ntrol.harness.retrieve import agent_memory, custom_topology_text
 from k0ntrol.modespec import ModeSpec, load_mode
 from k0ntrol.stages.code_write import CodeWriteError, code_write
 
@@ -534,7 +534,14 @@ def _write_and_show_spec(
 
 
 def _memory_invoke(invoke: Invoke, query: str, root: Path, config: dict) -> Invoke:
-    extra = agent_memory(query, root=root, config=config, invoke=invoke)
+    extra = "\n\n".join(
+        part
+        for part in (
+            custom_topology_text(root),
+            agent_memory(query, root=root, config=config, invoke=invoke),
+        )
+        if part
+    )
 
     def wrapped(mode: ModeSpec, prompt: str) -> str:
         return invoke(mode, _join_memory(prompt, extra))

@@ -278,6 +278,37 @@ def test_ask_skips_template_rules(tmp_path):
     assert "Global rules for every agent" not in seen["prompt"]
 
 
+def test_ask_skips_custom_topology(tmp_path):
+    write_file_memory(
+        tmp_path,
+        "src/app.py",
+        "# src/app.py\n\n## hace\nreturns 1 from checkout\n\n## gotchas\nnone\n",
+    )
+    topo = tmp_path / ".k0-mem" / "Project_topology" / tmp_path.name
+    topo.mkdir(parents=True, exist_ok=True)
+    (topo / "architecture.md").write_text(
+        "# Architecture\n\nHexagonal core.\n",
+        encoding="utf-8",
+    )
+    seen = {}
+
+    def fake_invoke(mode, prompt):
+        if mode.name == "retrieval_gate":
+            return "retrieve: no\n"
+        seen["prompt"] = prompt
+        return "ok\n"
+
+    answer_ask(
+        "what does checkout return?",
+        root=tmp_path,
+        config=memory_config(),
+        invoke=fake_invoke,
+        bulk_read=lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("bulk")),
+    )
+    assert seen["prompt"] == "what does checkout return?"
+    assert "Hexagonal core" not in seen["prompt"]
+
+
 def test_ask_with_file_injects_rules_and_skips_retrieval(tmp_path):
     (tmp_path / "app.py").write_text("def checkout():\n    return 1\n")
     rules = tmp_path / ".k0-mem" / "General_mem" / "Rules.md"

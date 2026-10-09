@@ -65,7 +65,17 @@ def _resolve_output(relative: str, root: Path) -> Path:
         resolved.relative_to(root)
     except ValueError as error:
         raise CodeWriteError(f"FILE path outside root: {relative}") from error
+    _reject_topology_write(resolved, root, relative)
     return resolved
+
+
+def _reject_topology_write(resolved: Path, root: Path, relative: str) -> None:
+    topology = (root / ".k0-mem" / "Project_topology").resolve()
+    try:
+        resolved.relative_to(topology)
+    except ValueError:
+        return
+    raise CodeWriteError(f"FILE path is Project_topology: {relative}")
 
 
 def _resolve_target(target: Path, root: Path) -> Path:

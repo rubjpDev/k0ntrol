@@ -23,13 +23,21 @@ def test_defaults_only(tmp_path):
     assert cfg["threshold_lines"] == 350
     assert cfg["scan_confirm_over"] == 50
     assert cfg["retrieval_top_k"] == 5
+    assert cfg["reflect_every"] == 10
 
 
 def test_default_agent_models_match_selected_cursor_models(tmp_path):
     cfg = load_config(tmp_path, tmp_path / "home")
     assert cfg["agents"]["spec"]["model"] == "claude-opus-5-5-high"
     assert cfg["agents"]["reviewer"]["model"] == "claude-opus-5-5-high"
-    for name in ("tester", "coder", "validator", "bulk_reader", "retrieval_gate"):
+    for name in (
+        "tester",
+        "coder",
+        "validator",
+        "bulk_reader",
+        "retrieval_gate",
+        "reflect",
+    ):
         assert cfg["agents"][name]["model"] == "gpt-5.6-luna-max"
 
 

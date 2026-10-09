@@ -1,3 +1,4 @@
+import threading
 from collections.abc import Callable
 from pathlib import Path
 from uuid import uuid4
@@ -7,6 +8,7 @@ from k0ntrol.frontends.ask import answer_ask
 from k0ntrol.frontends.banner import render_banner
 from k0ntrol.frontends.mentions import MentionError
 from k0ntrol.harness.loop import run_fast, run_full
+from k0ntrol.harness.reflect import run_reflect
 from k0ntrol.harness.scan import rescan_changed
 from k0ntrol import __version__
 
@@ -28,6 +30,13 @@ def run_session(
     transcript = _new_transcript(root)
     show = _transcript_writer(write, transcript)
     hinted = {"scan": False}
+    reflect = _ReflectScheduler(
+        root=root,
+        config=config,
+        invoke=invoke,
+        transcript=transcript,
+        run=session_run,
+    )
     show(
         render_banner(
             version=__version__,
@@ -59,6 +68,7 @@ def run_session(
             bulk_read=bulk_read,
             run_suite=run_suite,
             hinted=hinted,
+            reflect=reflect,
         ):
             return 0
 
@@ -101,11 +111,13 @@ def _handle_command(
     bulk_read: Callable,
     run_suite: Callable[[Path], tuple[int, str]] | None,
     hinted: dict[str, bool],
+    reflect: "_ReflectScheduler",
 ) -> bool:
     parts = line.split(maxsplit=1)
     command = parts[0]
     rest = parts[1] if len(parts) == 2 else ""
     if command == "/quit":
+        reflect.flush()
         return True
     if command == "/help":
         write("commands: /ask, /fast, /full, /quit")
@@ -120,7 +132,7 @@ def _handle_command(
             bulk_read=bulk_read,
             hinted=hinted,
         )
-        _run_work_command(
+        status = _run_work_command(
             command,
             rest,
             write,
@@ -132,6 +144,7 @@ def _handle_command(
             bulk_read=bulk_read,
             run_suite=run_suite,
         )
+        reflect.note_turn(status)
         return False
     write(f"unknown command: {command}")
     return False
@@ -173,7 +186,7 @@ def _run_work_command(
     invoke: Callable,
     bulk_read: Callable,
     run_suite: Callable[[Path], tuple[int, str]] | None,
-) -> None:
+) -> str | None:
     if command == "/fast":
         status = run_fast(
             rest,
@@ -186,7 +199,7 @@ def _run_work_command(
             run_suite=run_suite,
         )
         write(_terminal_status(status))
-        return
+        return status
     if command == "/full":
         status = run_full(
             rest,
@@ -199,7 +212,7 @@ def _run_work_command(
             run_suite=run_suite,
         )
         write(_terminal_status(status))
-        return
+        return status
     set_event_context(run=session_run, step="ask")
     _handle_ask(
         rest,
@@ -209,6 +222,7 @@ def _run_work_command(
         invoke=invoke,
         bulk_read=bulk_read,
     )
+    return None
 
 
 def _terminal_status(status: str) -> str:
@@ -238,3 +252,50 @@ def _handle_ask(
         write(f"backend error: {error}")
     else:
         write(answer)
+
+
+class _ReflectScheduler:
+    def __init__(
+        self,
+        *,
+        root: Path,
+        config: dict,
+        invoke: Callable,
+        transcript: Path,
+        run: str,
+    ) -> None:
+        self._root = root
+        self._config = config
+        self._invoke = invoke
+        self._transcript = transcript
+        self._run = run
+        self._every = config.get("reflect_every", 10)
+        self._pending = 0
+        self._threads: list[threading.Thread] = []
+
+    def note_turn(self, status: str | None) -> None:
+        self._pending += 1
+        if status == "done" or self._pending >= self._every:
+            self._pending = 0
+            self._spawn()
+
+    def flush(self) -> None:
+        if self._pending:
+            self._pending = 0
+            self._spawn()
+        for thread in self._threads:
+            thread.join()
+
+    def _spawn(self) -> None:
+        thread = threading.Thread(target=self._run_reflect, daemon=True)
+        self._threads.append(thread)
+        thread.start()
+
+    def _run_reflect(self) -> None:
+        run_reflect(
+            root=self._root,
+            config=self._config,
+            invoke=self._invoke,
+            transcript=self._transcript,
+            run=self._run,
+        )

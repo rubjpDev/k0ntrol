@@ -14,6 +14,7 @@ AGENTS = (
     "reviewer",
     "bulk_reader",
     "retrieval_gate",
+    "reflect",
 )
 BACKENDS = ("cursor",)
 
@@ -56,6 +57,7 @@ def _validate_top_level(cfg: dict) -> list[str]:
     errors.extend(_validate_integer("threshold_lines", cfg.get("threshold_lines"), 1))
     errors.extend(_validate_integer("scan_confirm_over", cfg.get("scan_confirm_over"), 0))
     errors.extend(_validate_integer("retrieval_top_k", cfg.get("retrieval_top_k"), 1))
+    errors.extend(_validate_integer("reflect_every", cfg.get("reflect_every"), 1))
     errors.extend(_validate_text("test_cmd", cfg.get("test_cmd")))
     errors.extend(_validate_integer("max_retries", cfg.get("max_retries"), 0))
     return errors

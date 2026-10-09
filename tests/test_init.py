@@ -6,6 +6,9 @@ from k0ntrol.harness.init import init_project
 
 MEM = "# Mem\n\nProject facts. One fact per bullet.\n"
 RULES = "# Rules\n\nGlobal rules for every agent.\n"
+ARCHITECTURE = "# Architecture\n\nSystem shape. Layers, boundaries, key modules.\n"
+STRATEGY = "# Strategy\n\nHow we change this codebase.\n"
+CODE_RULES = "# Code rules\n\nLocal coding constraints.\n"
 PROJECT_CONFIG = (
     "# Project overrides. An empty mapping inherits the package defaults.\n{}\n"
 )
@@ -19,16 +22,24 @@ def test_version_is_0_0_2_dev0():
 def test_init_creates_the_soul_layout(tmp_path):
     lines = init_project(tmp_path)
     root = tmp_path / ".k0-mem"
+    topo = root / "Project_topology" / tmp_path.name
     assert (root / "Project_context").is_dir()
     assert (root / "Project_topology").is_dir()
     assert (root / "modes").is_dir()
+    assert (topo / "architecture.md").read_text(encoding="utf-8") == ARCHITECTURE
+    assert (topo / "strategy.md").read_text(encoding="utf-8") == STRATEGY
+    assert (topo / "code_rules.md").read_text(encoding="utf-8") == CODE_RULES
     assert (root / ".gitignore").read_text(encoding="utf-8") == MEMORY_GITIGNORE
     assert (root / "General_mem" / "Mem.md").read_text(encoding="utf-8") == MEM
     assert (root / "General_mem" / "Rules.md").read_text(encoding="utf-8") == RULES
     assert (root / "config.yaml").read_text(encoding="utf-8") == PROJECT_CONFIG
+    repo = tmp_path.name
     assert lines == [
         "created .k0-mem/Project_context",
         "created .k0-mem/Project_topology",
+        f"created .k0-mem/Project_topology/{repo}/architecture.md",
+        f"created .k0-mem/Project_topology/{repo}/strategy.md",
+        f"created .k0-mem/Project_topology/{repo}/code_rules.md",
         "created .k0-mem/.gitignore",
         "created .k0-mem/General_mem/Mem.md",
         "created .k0-mem/General_mem/Rules.md",
@@ -52,9 +63,18 @@ def test_second_init_keeps_existing_files(tmp_path, capsys):
     mem.write_text("KEEP\n", encoding="utf-8")
     note = tmp_path / ".k0-mem" / "Project_context" / "note.md"
     note.write_text("note\n", encoding="utf-8")
+    arch = (
+        tmp_path
+        / ".k0-mem"
+        / "Project_topology"
+        / tmp_path.name
+        / "architecture.md"
+    )
+    arch.write_text("KEEP ARCH\n", encoding="utf-8")
     assert main(["init", str(tmp_path)]) == 0
     assert mem.read_text(encoding="utf-8") == "KEEP\n"
     assert note.read_text(encoding="utf-8") == "note\n"
+    assert arch.read_text(encoding="utf-8") == "KEEP ARCH\n"
     assert (tmp_path / ".k0-mem" / ".gitignore").read_text(encoding="utf-8") == (
         MEMORY_GITIGNORE
     )
@@ -62,4 +82,5 @@ def test_second_init_keeps_existing_files(tmp_path, capsys):
     assert "exists .k0-mem/General_mem/Mem.md" in out
     assert "exists .k0-mem/.gitignore" in out
     assert "exists .k0-mem/Project_context" in out
+    assert f"exists .k0-mem/Project_topology/{tmp_path.name}/architecture.md" in out
     assert "created .k0-mem/General_mem/Mem.md" not in out.split("exists .k0-mem/General_mem/Mem.md")[-1]

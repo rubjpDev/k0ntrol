@@ -5,7 +5,7 @@ import sys
 import pytest
 
 from k0ntrol.backends.invoke import current_event_context, invoke
-from k0ntrol.harness.init import RULES
+from k0ntrol.harness.init import ARCHITECTURE, CODE_RULES, RULES, STRATEGY
 from k0ntrol.harness.loop import run_full
 
 
@@ -766,6 +766,99 @@ def test_full_injects_custom_rules_outside_the_gate(tmp_path):
     for name in ("spec", "tester", "coder", "reviewer"):
         assert "# Rules\n\nNever log secrets.\n" in prompts[name]
         assert "returns 1 from checkout" not in prompts[name]
+
+
+def test_full_injects_custom_topology_outside_the_gate(tmp_path):
+    write_file_memory(
+        tmp_path,
+        "src/app.py",
+        "# src/app.py\n\n## hace\nreturns 1 from checkout\n\n## gotchas\nnone\n",
+    )
+    topo = tmp_path / ".k0-mem" / "Project_topology" / tmp_path.name
+    topo.mkdir(parents=True, exist_ok=True)
+    (topo / "architecture.md").write_text(
+        "# Architecture\n\nHexagonal core.\n",
+        encoding="utf-8",
+    )
+    (topo / "strategy.md").write_text(
+        "# Strategy\n\nSmall PRs.\n",
+        encoding="utf-8",
+    )
+    (topo / "code_rules.md").write_text(CODE_RULES, encoding="utf-8")
+    target = tmp_path / "src" / "app.py"
+    target.parent.mkdir()
+    target.write_text("original\n", encoding="utf-8")
+    prompts = {}
+
+    def fake_invoke(mode, prompt):
+        if mode.name == "retrieval_gate":
+            return "retrieve: no\n"
+        prompts[mode.name] = prompt
+        if mode.name == "spec":
+            return "## Goal\ng\n## Files\n- tests/test_app.py\n- src/app.py\n"
+        if mode.name == "tester":
+            return "FILE tests/test_app.py\ndef test_app():\n    assert True\n"
+        if mode.name == "coder":
+            return "FILE src/app.py\nchanged\n"
+        assert mode.name == "reviewer"
+        return "FILE review.md\nLooks good.\n"
+
+    status = run_full(
+        "change the app",
+        root=tmp_path,
+        config=memory_loop_config(),
+        read_line=iter(["y", "y", "ok"]).__next__,
+        write=lambda _line: None,
+        invoke=fake_invoke,
+        bulk_read=lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("bulk")
+        ),
+        run_suite=lambda root: (0, "ok\n"),
+    )
+    assert status == "done"
+    for name in ("spec", "tester", "coder", "reviewer"):
+        assert "# Architecture\n\nHexagonal core.\n" in prompts[name]
+        assert "# Strategy\n\nSmall PRs.\n" in prompts[name]
+        assert "Local coding constraints" not in prompts[name]
+        assert "returns 1 from checkout" not in prompts[name]
+    assert "validator" not in prompts or "Hexagonal core" not in prompts["validator"]
+
+
+def test_full_skips_template_topology(tmp_path):
+    write_file_memory(
+        tmp_path,
+        "src/app.py",
+        "# src/app.py\n\n## hace\nreturns 1 from checkout\n\n## gotchas\nnone\n",
+    )
+    topo = tmp_path / ".k0-mem" / "Project_topology" / tmp_path.name
+    topo.mkdir(parents=True, exist_ok=True)
+    (topo / "architecture.md").write_text(ARCHITECTURE, encoding="utf-8")
+    (topo / "strategy.md").write_text(STRATEGY, encoding="utf-8")
+    (topo / "code_rules.md").write_text(CODE_RULES, encoding="utf-8")
+    seen = {}
+
+    def fake_invoke(mode, prompt):
+        if mode.name == "retrieval_gate":
+            return "retrieve: no\n"
+        seen["prompt"] = prompt
+        return "## Goal\ng\n## Files\n"
+
+    status = run_full(
+        "what does checkout return?",
+        root=tmp_path,
+        config=memory_loop_config(),
+        read_line=lambda: "y",
+        write=lambda _line: None,
+        invoke=fake_invoke,
+        bulk_read=lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("bulk")
+        ),
+    )
+    assert status == "tested"
+    assert seen["prompt"] == "what does checkout return?"
+    assert "System shape" not in seen["prompt"]
+    assert "How we change this codebase" not in seen["prompt"]
+    assert "Local coding constraints" not in seen["prompt"]
 
 
 def test_full_skips_template_rules(tmp_path):
