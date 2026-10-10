@@ -55,6 +55,34 @@ def test_invoke_returns_result_and_sends_instructions_with_model(tmp_path, monke
     ]
 
 
+def test_invoke_passes_trust_when_k0_mem_exists(tmp_path, monkeypatch):
+    argv_file = tmp_path / "argv.json"
+    agent = tmp_path / "cursor-agent"
+    write_agent(
+        agent,
+        "import json, os, sys\n"
+        "from pathlib import Path\n"
+        "Path(os.environ['K0_ARGV']).write_text(json.dumps(sys.argv[1:]))\n"
+        "print(json.dumps({'type':'result','subtype':'success','is_error':False,"
+        "'result':'hello bullets'}))\n",
+    )
+    (tmp_path / ".k0-mem").mkdir()
+    monkeypatch.setenv("K0_CURSOR_AGENT", str(agent))
+    monkeypatch.setenv("K0_ARGV", str(argv_file))
+    monkeypatch.chdir(tmp_path)
+    assert invoke(MODE, "what is x?") == "hello bullets"
+    argv = json.loads(argv_file.read_text())
+    assert argv == [
+        "-p",
+        "--output-format",
+        "json",
+        "--model",
+        "gpt-5.6-luna[effort=high,fast=false]",
+        "--trust",
+        "You are a precise code analyst.\n\nwhat is x?",
+    ]
+
+
 def test_nonzero_exit_raises_backend_error_with_stderr(tmp_path, monkeypatch):
     agent = tmp_path / "cursor-agent"
     write_agent(

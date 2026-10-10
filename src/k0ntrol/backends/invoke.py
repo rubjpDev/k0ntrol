@@ -48,7 +48,11 @@ def _build_prompt(mode: ModeSpec, prompt: str) -> str:
 def _build_command(mode: ModeSpec, prompt: str) -> list[str]:
     agent_bin = _resolve_agent_binary()
     cli_prompt = _build_prompt(mode, prompt)
-    return [agent_bin, "-p", "--output-format", "json", "--model", mode.model, cli_prompt]
+    command = [agent_bin, "-p", "--output-format", "json", "--model", mode.model]
+    if (Path.cwd() / ".k0-mem").is_dir():
+        command.append("--trust")
+    command.append(cli_prompt)
+    return command
 
 
 def _parse_payload(stdout: str) -> dict:
