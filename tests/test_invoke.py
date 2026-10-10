@@ -55,6 +55,61 @@ def test_invoke_returns_result_and_sends_instructions_with_model(tmp_path, monke
     ]
 
 
+def test_invoke_omits_trust_when_k0_mem_is_empty_dir(tmp_path, monkeypatch):
+    argv_file = tmp_path / "argv.json"
+    agent = tmp_path / "cursor-agent"
+    write_agent(
+        agent,
+        "import json, os, sys\n"
+        "from pathlib import Path\n"
+        "Path(os.environ['K0_ARGV']).write_text(json.dumps(sys.argv[1:]))\n"
+        "print(json.dumps({'type':'result','subtype':'success','is_error':False,"
+        "'result':'hello bullets'}))\n",
+    )
+    (tmp_path / ".k0-mem" / "sessions").mkdir(parents=True)
+    monkeypatch.setenv("K0_CURSOR_AGENT", str(agent))
+    monkeypatch.setenv("K0_ARGV", str(argv_file))
+    monkeypatch.chdir(tmp_path)
+    assert invoke(MODE, "what is x?") == "hello bullets"
+    argv = json.loads(argv_file.read_text())
+    assert argv == [
+        "-p",
+        "--output-format",
+        "json",
+        "--model",
+        "gpt-5.6-luna[effort=high,fast=false]",
+        "You are a precise code analyst.\n\nwhat is x?",
+    ]
+
+
+def test_invoke_omits_trust_on_second_call_after_events_file(tmp_path, monkeypatch):
+    argv_file = tmp_path / "argv.json"
+    agent = tmp_path / "cursor-agent"
+    write_agent(
+        agent,
+        "import json, os, sys\n"
+        "from pathlib import Path\n"
+        "Path(os.environ['K0_ARGV']).write_text(json.dumps(sys.argv[1:]))\n"
+        "print(json.dumps({'type':'result','subtype':'success','is_error':False,"
+        "'result':'hello bullets'}))\n",
+    )
+    monkeypatch.setenv("K0_CURSOR_AGENT", str(agent))
+    monkeypatch.setenv("K0_ARGV", str(argv_file))
+    monkeypatch.chdir(tmp_path)
+    assert invoke(MODE, "first") == "hello bullets"
+    assert (tmp_path / ".k0-mem" / "events.jsonl").is_file()
+    assert invoke(MODE, "second") == "hello bullets"
+    argv = json.loads(argv_file.read_text())
+    assert argv == [
+        "-p",
+        "--output-format",
+        "json",
+        "--model",
+        "gpt-5.6-luna[effort=high,fast=false]",
+        "You are a precise code analyst.\n\nsecond",
+    ]
+
+
 def test_invoke_passes_trust_when_k0_mem_exists(tmp_path, monkeypatch):
     argv_file = tmp_path / "argv.json"
     agent = tmp_path / "cursor-agent"
@@ -66,7 +121,9 @@ def test_invoke_passes_trust_when_k0_mem_exists(tmp_path, monkeypatch):
         "print(json.dumps({'type':'result','subtype':'success','is_error':False,"
         "'result':'hello bullets'}))\n",
     )
-    (tmp_path / ".k0-mem").mkdir()
+    mem = tmp_path / ".k0-mem"
+    mem.mkdir()
+    (mem / "config.yaml").write_text("{}\n")
     monkeypatch.setenv("K0_CURSOR_AGENT", str(agent))
     monkeypatch.setenv("K0_ARGV", str(argv_file))
     monkeypatch.chdir(tmp_path)

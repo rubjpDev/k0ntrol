@@ -49,7 +49,7 @@ def _build_command(mode: ModeSpec, prompt: str) -> list[str]:
     agent_bin = _resolve_agent_binary()
     cli_prompt = _build_prompt(mode, prompt)
     command = [agent_bin, "-p", "--output-format", "json", "--model", mode.model]
-    if (Path.cwd() / ".k0-mem").is_dir():
+    if (Path.cwd() / ".k0-mem" / "config.yaml").is_file():
         command.append("--trust")
     command.append(cli_prompt)
     return command
