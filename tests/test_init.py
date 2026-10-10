@@ -57,6 +57,21 @@ def test_cli_init_prints_the_report(tmp_path, capsys):
     assert (tmp_path / ".k0-mem" / "General_mem" / "Mem.md").is_file()
 
 
+def test_cli_init_dot_writes_topology_under_resolved_folder_name(
+    tmp_path, monkeypatch, capsys
+):
+    monkeypatch.chdir(tmp_path)
+    assert main(["init", "."]) == 0
+    repo = tmp_path.name
+    topo = tmp_path / ".k0-mem" / "Project_topology" / repo
+    assert (topo / "architecture.md").read_text(encoding="utf-8") == ARCHITECTURE
+    assert (topo / "strategy.md").read_text(encoding="utf-8") == STRATEGY
+    assert (topo / "code_rules.md").read_text(encoding="utf-8") == CODE_RULES
+    out = capsys.readouterr().out
+    assert f"created .k0-mem/Project_topology/{repo}/architecture.md" in out
+    assert not (tmp_path / ".k0-mem" / "Project_topology" / "architecture.md").exists()
+
+
 def test_second_init_keeps_existing_files(tmp_path, capsys):
     assert main(["init", str(tmp_path)]) == 0
     mem = tmp_path / ".k0-mem" / "General_mem" / "Mem.md"

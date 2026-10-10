@@ -14,6 +14,7 @@ PROJECT_CONFIG = (
 
 def init_project(root: Path) -> list[str]:
     """Create the initial project memory layout."""
+    root = root.resolve()
     memory_root = root / ".k0-mem"
     memory_root.mkdir(parents=True, exist_ok=True)
     topology = memory_root / "Project_topology" / root.name
