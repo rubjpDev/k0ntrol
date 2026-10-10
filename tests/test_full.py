@@ -77,6 +77,7 @@ def test_full_rewrites_spec_until_yes(tmp_path):
     assert "rejected" in calls[1][1]
     assert (tmp_path / "spec.md").read_text(encoding="utf-8") == "## Goal\nv2\n## Files\n"
     assert "## Goal" in "\n".join(shown)
+    assert "y/n" in "\n".join(shown)
 
 
 def test_full_delegates_a_large_file_before_spec(tmp_path):
@@ -130,15 +131,17 @@ def test_full_yes_writes_tests_and_not_product_code(tmp_path):
         assert mode.name == "tester"
         return "FILE tests/test_app.py\ndef test_app():\n    assert False\n"
 
+    shown = []
     status = run_full(
         "add a test",
         root=tmp_path,
         config=loop_config(),
         read_line=iter(["y", "y"]).__next__,
-        write=lambda _line: None,
+        write=shown.append,
         invoke=fake_invoke,
         bulk_read=lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("bulk")),
     )
+    assert "y/n" in "\n".join(shown)
     assert (tmp_path / "tests" / "test_app.py").read_text(encoding="utf-8").startswith(
         "def test_app"
     )
@@ -229,6 +232,7 @@ def test_full_continues_through_coder_validator_to_diff_gate(tmp_path):
     assert "src/app.py\nchanged" in "\n".join(shown)
     assert "--- a/src/app.py" in "\n".join(shown)
     assert (tmp_path / "review.md").read_text(encoding="utf-8") == "Looks good.\n"
+    assert "y/n" in "\n".join(shown)
     assert "ok / spec / code" in "\n".join(shown)
 
 

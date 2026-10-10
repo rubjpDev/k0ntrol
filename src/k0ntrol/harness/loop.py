@@ -992,6 +992,7 @@ def _show_file(path: Path, root: Path, write: Callable[[str], None]) -> None:
 
 
 def _read_gate(read_line: Callable[[], str], write: Callable[[str], None]) -> str:
+    write("y/n")
     while True:
         answer = read_line().strip().lower()
         if answer in {"y", "n"}:
