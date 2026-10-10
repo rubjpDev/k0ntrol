@@ -28,6 +28,8 @@ def code_write(
     if target is not None and path != _resolve_target(target, root_path):
         raise CodeWriteError(f"FILE path does not match target: {relative}")
     path.parent.mkdir(parents=True, exist_ok=True)
+    if not body.endswith("\n"):
+        body += "\n"
     path.write_text(body, encoding="utf-8")
     return path
 

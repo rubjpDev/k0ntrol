@@ -57,6 +57,21 @@ def test_code_write_strips_fences_and_writes_inside_root(tmp_path):
     )
 
 
+def test_code_write_keeps_trailing_newline_when_unfenced_body_lacks_one(tmp_path):
+    def fake_invoke(mode, prompt):
+        return "FILE src/app.py\nprint(1)"
+
+    written = code_write(
+        "spec",
+        root=tmp_path,
+        mode=MODE,
+        invoke=fake_invoke,
+        target=None,
+        reference_text="",
+    )
+    assert written.read_text(encoding="utf-8") == "print(1)\n"
+
+
 def test_existing_target_is_inlined_whole(tmp_path):
     target = tmp_path / "src" / "app.py"
     target.parent.mkdir()
