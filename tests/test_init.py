@@ -15,8 +15,8 @@ PROJECT_CONFIG = (
 MEMORY_GITIGNORE = "sessions/\nevents.jsonl\n*.sqlite\n"
 
 
-def test_version_is_0_0_2_dev0():
-    assert __version__ == "0.0.2.dev0"
+def test_version_is_0_0_3_dev0():
+    assert __version__ == "0.0.3.dev0"
 
 
 def test_init_creates_the_soul_layout(tmp_path):
