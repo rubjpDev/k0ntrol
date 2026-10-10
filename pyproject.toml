@@ -1,6 +1,6 @@
 [project]
 name = "k0ntrol"
-version = "0.0.2.dev0"
+version = "0.0.3.dev0"
 description = "Local harness for coding agents: deterministic routing, TDD loop, human gates."
 requires-python = ">=3.11"
 license = "Apache-2.0"
