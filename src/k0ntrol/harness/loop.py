@@ -78,29 +78,29 @@ def run_fast(
         write(str(error))
         return "stuck"
     _show_file(written, root, write)
-    target = _first_non_test_path(paths, root)
-    if target is None:
+    targets = _mention_non_test_paths(paths, root)
+    if not targets:
         return "tested"
     try:
-        coded, before = _write_coder(
+        befores = _write_coder_targets(
             spec,
-            target,
+            targets,
             written,
             reference_text,
             root,
             config,
             _with_event_step(invoke, "coder"),
+            write,
         )
     except CodeWriteError as error:
         write(str(error))
         return "stuck"
-    _show_file(coded, root, write)
     if run_suite is None:
         return "tested"
     return _validate_fast(
         spec,
-        before,
-        target,
+        befores,
+        targets,
         root,
         config,
         invoke,
@@ -277,18 +277,24 @@ def _literal_spec(question: str, paths: list[Path], root: Path) -> str:
 
 
 def _first_non_test_path(paths: list[Path], root: Path) -> Path | None:
-    for path in paths:
-        relative = path.relative_to(root.resolve()).as_posix()
-        if not _is_test_path(relative):
-            return path
-    return None
+    targets = _mention_non_test_paths(paths, root)
+    return targets[0] if targets else None
 
 
-def _first_spec_non_test_path(paths: list[str], root: Path) -> Path | None:
-    for relative in paths:
-        if not _is_test_path(relative):
-            return (root / relative).resolve()
-    return None
+def _mention_non_test_paths(paths: list[Path], root: Path) -> list[Path]:
+    return [
+        path
+        for path in paths
+        if not _is_test_path(path.relative_to(root.resolve()).as_posix())
+    ]
+
+
+def _spec_non_test_paths(paths: list[str], root: Path) -> list[Path]:
+    return [
+        (root / relative).resolve()
+        for relative in paths
+        if not _is_test_path(relative)
+    ]
 
 
 def _mention_references(
@@ -366,10 +372,39 @@ def _write_coder(
     return coded, before
 
 
+def _write_coder_targets(
+    spec: str,
+    targets: list[Path],
+    test_path: Path,
+    reference_text: str,
+    root: Path,
+    config: dict,
+    invoke: Invoke,
+    write: Callable[[str], None],
+) -> dict[Path, str]:
+    befores: dict[Path, str] = {}
+    refs = reference_text
+    for target in targets:
+        coded, before = _write_coder(
+            spec, target, test_path, refs, root, config, invoke
+        )
+        _show_file(coded, root, write)
+        befores[target] = before
+        refs = _append_written_reference(refs, coded, root)
+    return befores
+
+
+def _append_written_reference(reference_text: str, path: Path, root: Path) -> str:
+    section = _file_section(path, root)
+    if not reference_text:
+        return section
+    return f"{reference_text}\n{section}"
+
+
 def _validate_fast(
     spec: str,
-    before: str,
-    target: Path,
+    befores: dict[Path, str],
+    targets: list[Path],
     root: Path,
     config: dict,
     invoke: Invoke,
@@ -381,8 +416,8 @@ def _validate_fast(
 ) -> str:
     result = _validate_attempt(
         spec,
-        before,
-        target,
+        befores,
+        targets,
         root,
         config,
         invoke,
@@ -393,8 +428,8 @@ def _validate_fast(
     )
     if result is None:
         return "stuck"
-    current_spec, current_before = result
-    write(_unified_diff(target, current_before, root))
+    current_spec, befores = result
+    write(_combined_diff(targets, befores, root))
     if _read_gate(read_line, write) == "y":
         return "done"
     _append_spec_text(current_spec, root, "rejected at final gate")
@@ -403,8 +438,8 @@ def _validate_fast(
 
 def _validate_attempt(
     spec: str,
-    before: str,
-    target: Path,
+    befores: dict[Path, str],
+    targets: list[Path],
     root: Path,
     config: dict,
     invoke: Invoke,
@@ -412,15 +447,15 @@ def _validate_attempt(
     run_suite: RunSuite,
     test_path: Path,
     reference_text: str,
-) -> tuple[str, str] | None:
+) -> tuple[str, dict[Path, str]] | None:
     retries = 0
     while True:
         code, output = run_suite(root)
         if code == 0:
-            return spec, before
+            return spec, befores
         result = _validation_retry(
             spec,
-            target,
+            targets,
             test_path,
             reference_text,
             root,
@@ -432,12 +467,12 @@ def _validate_attempt(
         )
         if result is None:
             return None
-        spec, before, retries = result
+        spec, befores, retries = result
 
 
 def _validation_retry(
     spec: str,
-    target: Path,
+    targets: list[Path],
     test_path: Path,
     reference_text: str,
     root: Path,
@@ -446,7 +481,7 @@ def _validation_retry(
     write: Callable[[str], None],
     output: str,
     retries: int,
-) -> tuple[str, str, int] | None:
+) -> tuple[str, dict[Path, str], int] | None:
     summary = _with_event_step(invoke, "validator")(
         load_mode("validator", config),
         _validator_prompt(spec, output),
@@ -456,9 +491,9 @@ def _validation_retry(
         _append_spec_text(updated_spec, root, "stuck")
         write("stuck")
         return None
-    updated_before = _retry_coder(
+    updated_befores = _retry_coder(
         updated_spec,
-        target,
+        targets,
         test_path,
         reference_text,
         root,
@@ -466,36 +501,35 @@ def _validation_retry(
         _with_event_step(invoke, "coder"),
         write,
     )
-    if updated_before is None:
+    if updated_befores is None:
         return None
-    return updated_spec, updated_before, retries + 1
+    return updated_spec, updated_befores, retries + 1
 
 
 def _retry_coder(
     spec: str,
-    target: Path,
+    targets: list[Path],
     test_path: Path,
     reference_text: str,
     root: Path,
     config: dict,
     invoke: Invoke,
     write: Callable[[str], None],
-) -> str | None:
+) -> dict[Path, str] | None:
     try:
-        coded, before = _write_coder(
+        return _write_coder_targets(
             spec,
-            target,
+            targets,
             test_path,
             reference_text,
             root,
             config,
             invoke,
+            write,
         )
     except CodeWriteError as error:
         write(str(error))
         return None
-    _show_file(coded, root, write)
-    return before
 
 
 def _validator_prompt(spec: str, output: str) -> str:
@@ -519,6 +553,10 @@ def _unified_diff(path: Path, before: str, root: Path) -> str:
             tofile=f"b/{relative}",
         )
     )
+
+
+def _combined_diff(targets: list[Path], befores: dict[Path, str], root: Path) -> str:
+    return "".join(_unified_diff(path, befores[path], root) for path in targets)
 
 
 def _file_section(path: Path, root: Path) -> str:
@@ -685,29 +723,29 @@ def _continue_full_after_tests(
     if run_suite is None:
         return "done"
     test_path = test_paths[0]
-    target = _first_spec_non_test_path(files, root)
-    if target is None:
+    targets = _spec_non_test_paths(files, root)
+    if not targets:
         return "done"
     coder_reference = _coder_reference_text(
         reference_text,
         test_path,
-        target,
+        targets[0],
         root,
     )
-    coded, before = _write_coder(
+    befores = _write_coder_targets(
         spec,
-        target,
+        targets,
         test_path,
         coder_reference,
         root,
         config,
         _with_event_step(invoke, "coder"),
+        write,
     )
-    _show_file(coded, root, write)
     return _validate_full(
         spec,
-        before,
-        target,
+        befores,
+        targets,
         root,
         config,
         invoke,
@@ -722,8 +760,8 @@ def _continue_full_after_tests(
 
 def _validate_full(
     spec: str,
-    before: str,
-    target: Path,
+    befores: dict[Path, str],
+    targets: list[Path],
     root: Path,
     config: dict,
     invoke: Invoke,
@@ -737,8 +775,8 @@ def _validate_full(
     while True:
         result = _validate_attempt(
             spec,
-            before,
-            target,
+            befores,
+            targets,
             root,
             config,
             invoke,
@@ -749,12 +787,12 @@ def _validate_full(
         )
         if result is None:
             return "stuck"
-        spec, before = result
-        write(_unified_diff(target, before, root))
+        spec, befores = result
+        write(_combined_diff(targets, befores, root))
         decision = _review_decision(
             spec,
-            before,
-            target,
+            befores,
+            targets,
             reference_text,
             test_paths,
             root,
@@ -767,13 +805,13 @@ def _validate_full(
         )
         if isinstance(decision, str):
             return decision
-        spec, before = decision
+        spec, befores = decision
 
 
 def _review_decision(
     spec: str,
-    before: str,
-    target: Path,
+    befores: dict[Path, str],
+    targets: list[Path],
     reference_text: str,
     test_paths: list[Path],
     root: Path,
@@ -783,11 +821,11 @@ def _review_decision(
     bulk_read: BulkRead,
     read_line: Callable[[], str],
     write: Callable[[str], None],
-) -> str | tuple[str, str]:
+) -> str | tuple[str, dict[Path, str]]:
     review_path = _write_review(
         spec,
-        before,
-        target,
+        befores,
+        targets,
         test_paths,
         root,
         config,
@@ -802,23 +840,23 @@ def _review_decision(
     updated_spec = _append_review(spec, root, review)
     if choice == "spec":
         return "spec"
-    coded, updated_before = _write_coder(
+    updated_befores = _write_coder_targets(
         updated_spec,
-        target,
+        targets,
         test_paths[0],
         reference_text,
         root,
         config,
         coder_invoke,
+        write,
     )
-    _show_file(coded, root, write)
-    return updated_spec, updated_before
+    return updated_spec, updated_befores
 
 
 def _write_review(
     spec: str,
-    before: str,
-    target: Path,
+    befores: dict[Path, str],
+    targets: list[Path],
     test_paths: list[Path],
     root: Path,
     config: dict,
@@ -835,8 +873,8 @@ def _write_review(
         invoke=_memory_invoke(reviewer_invoke, spec, root, config),
         target=review_path,
         reference_text=_review_reference(
-            before,
-            target,
+            befores,
+            targets,
             test_paths,
             root,
             config,
@@ -850,50 +888,73 @@ def _write_review(
 
 
 def _review_reference(
-    before: str,
-    target: Path,
+    befores: dict[Path, str],
+    targets: list[Path],
     test_paths: list[Path],
     root: Path,
     config: dict,
     bulk_read: BulkRead,
     invoke: Invoke,
 ) -> str:
-    paths = [*test_paths, target]
-    paths = list(dict.fromkeys(paths))
+    paths = list(dict.fromkeys([*test_paths, *targets]))
     delegated = [
         path for path in paths if should_delegate(path, config["threshold_lines"])
     ]
-    summary = ""
-    if delegated:
-        summary = bulk_read(
-            "Review the completed implementation against spec.md.",
-            delegated,
-            root=root,
-            repo=root.name,
-            mode=load_mode("bulk_reader", config),
-            invoke=_with_event_step(invoke, "reviewer"),
-        )
-    diff = _unified_diff(target, before, root)
-    if len(diff.splitlines()) > config["threshold_lines"]:
-        diff = bulk_read(
-            "Summarize this implementation diff for review:\n" + diff,
-            [target],
-            root=root,
-            repo=root.name,
-            mode=load_mode("bulk_reader", config),
-            invoke=_with_event_step(invoke, "reviewer"),
-        )
+    summary = _review_delegated_summary(delegated, root, config, bulk_read, invoke)
+    diff = _review_diff(targets, befores, root, config, bulk_read, invoke)
     test_context = "\n\n".join(
         _review_path_context(path, root, delegated, summary)
         for path in test_paths
     )
+    implementation = "\n\n".join(
+        _review_path_context(path, root, delegated, summary) for path in targets
+    )
     return "\n\n".join(
         (
             "Tests:\n" + test_context,
-            "Implementation:\n"
-            + _review_path_context(target, root, delegated, summary),
+            "Implementation:\n" + implementation,
             "Implementation diff:\n" + diff,
         )
+    )
+
+
+def _review_delegated_summary(
+    delegated: list[Path],
+    root: Path,
+    config: dict,
+    bulk_read: BulkRead,
+    invoke: Invoke,
+) -> str:
+    if not delegated:
+        return ""
+    return bulk_read(
+        "Review the completed implementation against spec.md.",
+        delegated,
+        root=root,
+        repo=root.name,
+        mode=load_mode("bulk_reader", config),
+        invoke=_with_event_step(invoke, "reviewer"),
+    )
+
+
+def _review_diff(
+    targets: list[Path],
+    befores: dict[Path, str],
+    root: Path,
+    config: dict,
+    bulk_read: BulkRead,
+    invoke: Invoke,
+) -> str:
+    diff = _combined_diff(targets, befores, root)
+    if len(diff.splitlines()) <= config["threshold_lines"]:
+        return diff
+    return bulk_read(
+        "Summarize this implementation diff for review:\n" + diff,
+        targets,
+        root=root,
+        repo=root.name,
+        mode=load_mode("bulk_reader", config),
+        invoke=_with_event_step(invoke, "reviewer"),
     )
 
 

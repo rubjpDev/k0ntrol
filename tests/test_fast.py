@@ -16,6 +16,31 @@ def loop_config(**overrides):
     return cfg
 
 
+def test_fast_without_a_non_test_file_stops_after_tester(tmp_path):
+    tests_dir = tmp_path / "tests"
+    tests_dir.mkdir()
+    (tests_dir / "test_fast.py").write_text("old\n", encoding="utf-8")
+    names = []
+
+    def fake_invoke(mode, prompt):
+        names.append(mode.name)
+        if mode.name == "tester":
+            return "FILE tests/test_fast.py\ndef test_fast():\n    assert False\n"
+        raise AssertionError(mode.name)
+
+    status = run_fast(
+        "only tests @tests/test_fast.py",
+        root=tmp_path,
+        config=loop_config(),
+        read_line=lambda: (_ for _ in ()).throw(AssertionError("gate")),
+        write=lambda _line: None,
+        invoke=fake_invoke,
+        bulk_read=lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("bulk")),
+    )
+    assert status == "tested"
+    assert names == ["tester"]
+
+
 def test_fast_writes_literal_spec_and_a_test(tmp_path):
     (tmp_path / "a.py").write_text("original\n", encoding="utf-8")
     names = []
@@ -66,9 +91,12 @@ def test_coder_gets_the_whole_target_and_bulk_reads_only_the_reference(tmp_path)
             assert "x\n" * 351 not in prompt
             return "FILE tests/test_app.py\ndef test_app():\n    assert False\n"
         assert mode.name == "coder"
-        assert "x\n" * 351 in prompt
-        assert "SUMMARY" in prompt
-        return "FILE src/app.py\nprint('ok')\n"
+        if "Target:\n" + "x\n" * 351 in prompt:
+            assert "SUMMARY" in prompt
+            return "FILE src/app.py\nprint('ok')\n"
+        assert "Target:\n" + "n\n" * 400 in prompt
+        assert "print('ok')" in prompt
+        return "FILE docs/notes.md\nnotes ok\n"
 
     run_fast(
         "change app @src/app.py @docs/notes.md",
@@ -80,7 +108,8 @@ def test_coder_gets_the_whole_target_and_bulk_reads_only_the_reference(tmp_path)
         bulk_read=fake_bulk,
     )
     assert [path.name for path in bulk_paths] == ["notes.md"]
-    assert (target).read_text(encoding="utf-8") == "print('ok')\n"
+    assert target.read_text(encoding="utf-8") == "print('ok')\n"
+    assert (notes / "notes.md").read_text(encoding="utf-8") == "notes ok\n"
 
 
 import sys
@@ -120,6 +149,51 @@ def test_red_suite_retries_coder_then_stuck(tmp_path):
     assert counts["coder"] == 3
     assert counts["validator"] == 3
     assert "stuck" in (tmp_path / "spec.md").read_text(encoding="utf-8")
+
+
+def test_fast_coder_writes_every_non_test_file_and_shows_combined_diff(tmp_path):
+    from k0ntrol.backends.invoke import current_event_context
+
+    (tmp_path / "a.py").write_text("a original\n", encoding="utf-8")
+    (tmp_path / "b.py").write_text("b original\n", encoding="utf-8")
+    coder_prompts = []
+    steps = []
+
+    def fake_invoke(mode, prompt):
+        steps.append((mode.name, current_event_context()["step"]))
+        if mode.name == "tester":
+            return "FILE tests/test_fast.py\ndef test_fast():\n    assert False\n"
+        if mode.name == "coder":
+            coder_prompts.append(prompt)
+            if "Target:\na original\n" in prompt:
+                return "FILE a.py\na changed\n"
+            if "Target:\nb original\n" in prompt:
+                return "FILE b.py\nb changed\n"
+            raise AssertionError(prompt)
+        raise AssertionError(mode.name)
+
+    shown = []
+    status = run_fast(
+        "change both @a.py @b.py",
+        root=tmp_path,
+        config=loop_config(),
+        read_line=lambda: "y",
+        write=shown.append,
+        invoke=fake_invoke,
+        bulk_read=lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("bulk")),
+        run_suite=lambda root: (0, "ok\n"),
+    )
+    assert status == "done"
+    assert len(coder_prompts) == 2
+    assert "Target:\na original\n" in coder_prompts[0]
+    assert "a changed" in coder_prompts[1]
+    assert [step for name, step in steps if name == "coder"] == ["coder", "coder"]
+    assert (tmp_path / "a.py").read_text(encoding="utf-8") == "a changed\n"
+    assert (tmp_path / "b.py").read_text(encoding="utf-8") == "b changed\n"
+    text = "\n".join(shown)
+    assert text.index("--- a/a.py") < text.index("--- a/b.py")
+    assert "+a changed" in text
+    assert "+b changed" in text
 
 
 def test_green_suite_reaches_the_gate(tmp_path):
