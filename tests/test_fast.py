@@ -186,6 +186,7 @@ def test_fast_coder_writes_every_non_test_file_and_shows_combined_diff(tmp_path)
     assert status == "done"
     assert len(coder_prompts) == 2
     assert "Target:\na original\n" in coder_prompts[0]
+    assert "def test_fast" in coder_prompts[0]
     assert "a changed" in coder_prompts[1]
     assert [step for name, step in steps if name == "coder"] == ["coder", "coder"]
     assert (tmp_path / "a.py").read_text(encoding="utf-8") == "a changed\n"
@@ -194,6 +195,42 @@ def test_fast_coder_writes_every_non_test_file_and_shows_combined_diff(tmp_path)
     assert text.index("--- a/a.py") < text.index("--- a/b.py")
     assert "+a changed" in text
     assert "+b changed" in text
+
+
+def test_fast_red_suite_redoes_all_coder_targets(tmp_path):
+    (tmp_path / "a.py").write_text("a original\n", encoding="utf-8")
+    (tmp_path / "b.py").write_text("b original\n", encoding="utf-8")
+    coder_files = []
+    counts = {"coder": 0, "validator": 0}
+
+    def fake_invoke(mode, prompt):
+        if mode.name == "tester":
+            return "FILE tests/test_fast.py\ndef test_fast():\n    assert False\n"
+        if mode.name == "coder":
+            counts["coder"] += 1
+            if "Target:\na " in prompt:
+                coder_files.append("a.py")
+                return "FILE a.py\na BREAK\n"
+            if "Target:\nb " in prompt:
+                coder_files.append("b.py")
+                return "FILE b.py\nb BREAK\n"
+            raise AssertionError(prompt)
+        counts["validator"] += 1
+        return "- test_old failed\n"
+
+    status = run_fast(
+        "change both @a.py @b.py",
+        root=tmp_path,
+        config=loop_config(),
+        read_line=lambda: "y",
+        write=lambda _line: None,
+        invoke=fake_invoke,
+        bulk_read=lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("bulk")),
+        run_suite=lambda root: (1, "FAILED tests/test_old.py::test_old\n"),
+    )
+    assert status == "stuck"
+    assert counts == {"coder": 6, "validator": 3}
+    assert coder_files == ["a.py", "b.py", "a.py", "b.py", "a.py", "b.py"]
 
 
 def test_green_suite_reaches_the_gate(tmp_path):

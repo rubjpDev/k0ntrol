@@ -383,15 +383,29 @@ def _write_coder_targets(
     write: Callable[[str], None],
 ) -> dict[Path, str]:
     befores: dict[Path, str] = {}
-    refs = reference_text
+    written: list[Path] = []
     for target in targets:
+        refs = _coder_call_reference(reference_text, test_path, target, written, root)
         coded, before = _write_coder(
             spec, target, test_path, refs, root, config, invoke
         )
         _show_file(coded, root, write)
         befores[target] = before
-        refs = _append_written_reference(refs, coded, root)
+        written.append(coded)
     return befores
+
+
+def _coder_call_reference(
+    reference_text: str,
+    test_path: Path,
+    target: Path,
+    written: list[Path],
+    root: Path,
+) -> str:
+    refs = _coder_reference_text(reference_text, test_path, target, root)
+    for path in written:
+        refs = _append_written_reference(refs, path, root)
+    return refs
 
 
 def _append_written_reference(reference_text: str, path: Path, root: Path) -> str:
@@ -726,17 +740,11 @@ def _continue_full_after_tests(
     targets = _spec_non_test_paths(files, root)
     if not targets:
         return "done"
-    coder_reference = _coder_reference_text(
-        reference_text,
-        test_path,
-        targets[0],
-        root,
-    )
     befores = _write_coder_targets(
         spec,
         targets,
         test_path,
-        coder_reference,
+        reference_text,
         root,
         config,
         _with_event_step(invoke, "coder"),
@@ -754,7 +762,7 @@ def _continue_full_after_tests(
         write,
         run_suite,
         test_paths,
-        coder_reference,
+        reference_text,
     )
 
 
