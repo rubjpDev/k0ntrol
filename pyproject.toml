@@ -14,7 +14,11 @@ dependencies = [
 k0 = "k0ntrol.cli:main"
 
 [dependency-groups]
-dev = ["pytest>=8"]
+dev = [
+    "complexipy>=8.0.1",
+    "pytest>=8",
+    "pytest-cov>=7.1.0",
+]
 
 [build-system]
 requires = ["hatchling>=1.27"]
