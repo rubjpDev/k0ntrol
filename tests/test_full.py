@@ -1028,6 +1028,205 @@ def test_full_last_retry_redoes_all_coder_targets(tmp_path):
     assert shown.count("↻ coder: src/app.py src/util.py") == 1
 
 
+def python_cmd(source: str) -> str:
+    return f"{sys.executable} -c {source!r}"
+
+
+def test_full_green_gates_skip_validator(tmp_path):
+    seed_product(tmp_path)
+    names = []
+
+    def fake_invoke(mode, prompt):
+        names.append(mode.name)
+        if mode.name == "spec":
+            return files_spec(
+                ("tests/test_app.py", "create"),
+                ("src/app.py", "change"),
+            )
+        if mode.name == "tester":
+            return "FILE tests/test_app.py\ndef test_app():\n    assert True\n"
+        if mode.name == "coder":
+            return "FILE src/app.py\nchanged\n"
+        if mode.name == "reviewer":
+            return "FILE review.md\nLooks good.\n"
+        raise AssertionError(mode.name)
+
+    status = run_full(
+        "change the app",
+        root=tmp_path,
+        config=loop_config(
+            gates=[
+                {
+                    "name": "complexity",
+                    "cmd": python_cmd("open('complexity.ok','w').write('ok')"),
+                },
+                {
+                    "name": "coverage",
+                    "cmd": python_cmd("open('coverage.ok','w').write('ok')"),
+                },
+            ]
+        ),
+        read_line=iter(["y", "y", "ok"]).__next__,
+        write=lambda _line: None,
+        invoke=fake_invoke,
+        bulk_read=lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("bulk")
+        ),
+        run_suite=lambda root: (0, "ok\n"),
+    )
+
+    assert status == "done"
+    assert names == ["spec", "tester", "coder", "reviewer"]
+    assert (tmp_path / "complexity.ok").read_text(encoding="utf-8") == "ok"
+    assert (tmp_path / "coverage.ok").read_text(encoding="utf-8") == "ok"
+
+
+def test_full_red_gate_retries_coder_then_passes(tmp_path):
+    seed_product(tmp_path)
+    coder_count = 0
+    validator_prompts = []
+
+    def fake_invoke(mode, prompt):
+        nonlocal coder_count
+        if mode.name == "spec":
+            return files_spec(
+                ("tests/test_app.py", "create"),
+                ("src/app.py", "change"),
+            )
+        if mode.name == "tester":
+            return "FILE tests/test_app.py\ndef test_app():\n    assert True\n"
+        if mode.name == "coder":
+            coder_count += 1
+            if coder_count == 1:
+                return "FILE src/app.py\nbroken\n"
+            return "FILE src/app.py\nfixed\n"
+        if mode.name == "validator":
+            validator_prompts.append(prompt)
+            assert "complexity" in prompt
+            assert "too complex" in prompt
+            return "- complexity failed\nredo:\n- src/app.py\n"
+        return "FILE review.md\nLooks good.\n"
+
+    status = run_full(
+        "change the app",
+        root=tmp_path,
+        config=loop_config(
+            gates=[
+                {
+                    "name": "complexity",
+                    "cmd": python_cmd(
+                        "from pathlib import Path; "
+                        "text = Path('src/app.py').read_text(); "
+                        "print('too complex'); "
+                        "raise SystemExit(0 if 'fixed' in text else 1)"
+                    ),
+                }
+            ]
+        ),
+        read_line=iter(["y", "y", "ok"]).__next__,
+        write=lambda _line: None,
+        invoke=fake_invoke,
+        bulk_read=lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("bulk")
+        ),
+        run_suite=lambda root: (0, "ok\n"),
+    )
+
+    assert status == "done"
+    assert coder_count == 2
+    assert validator_prompts
+    assert (tmp_path / "src" / "app.py").read_text(encoding="utf-8") == "fixed\n"
+
+
+def test_full_red_gate_retries_coder_then_stuck(tmp_path):
+    seed_product(tmp_path)
+    counts = {"coder": 0, "validator": 0}
+
+    def fake_invoke(mode, prompt):
+        if mode.name == "spec":
+            return files_spec(
+                ("tests/test_app.py", "create"),
+                ("src/app.py", "change"),
+            )
+        if mode.name == "tester":
+            return "FILE tests/test_app.py\ndef test_app():\n    assert True\n"
+        if mode.name == "coder":
+            counts["coder"] += 1
+            return "FILE src/app.py\nbroken\n"
+        counts["validator"] += 1
+        assert "complexity" in prompt
+        assert "too complex" in prompt
+        return "- complexity failed\n"
+
+    shown = []
+    status = run_full(
+        "change the app",
+        root=tmp_path,
+        config=loop_config(
+            gates=[
+                {
+                    "name": "complexity",
+                    "cmd": python_cmd("print('too complex'); raise SystemExit(1)"),
+                }
+            ]
+        ),
+        read_line=iter(["y", "y"]).__next__,
+        write=shown.append,
+        invoke=fake_invoke,
+        bulk_read=lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("bulk")
+        ),
+        run_suite=lambda root: (0, "ok\n"),
+    )
+
+    assert status == "stuck"
+    assert counts == {"coder": 3, "validator": 3}
+    spec = (tmp_path / "spec.md").read_text(encoding="utf-8")
+    assert spec.count("- complexity failed") == 3
+    assert "stuck" in spec
+    assert "stuck" in "\n".join(shown)
+
+
+def test_full_red_suite_skips_gates(tmp_path):
+    seed_product(tmp_path)
+
+    def fake_invoke(mode, prompt):
+        if mode.name == "spec":
+            return files_spec(
+                ("tests/test_app.py", "create"),
+                ("src/app.py", "change"),
+            )
+        if mode.name == "tester":
+            return "FILE tests/test_app.py\ndef test_app():\n    assert True\n"
+        if mode.name == "coder":
+            return "FILE src/app.py\nbroken\n"
+        return "- test_app failed\n"
+
+    status = run_full(
+        "change the app",
+        root=tmp_path,
+        config=loop_config(
+            max_retries=0,
+            gates=[
+                {
+                    "name": "complexity",
+                    "cmd": python_cmd("open('gate_ran','w').write('x')"),
+                }
+            ],
+        ),
+        read_line=iter(["y", "y"]).__next__,
+        write=lambda _line: None,
+        invoke=fake_invoke,
+        bulk_read=lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("bulk")
+        ),
+        run_suite=lambda root: (1, "FAILED tests/test_app.py::test_app\n"),
+    )
+
+    assert status == "stuck"
+    assert not (tmp_path / "gate_ran").exists()
+
+
 def test_full_red_suite_redoes_all_when_validator_pick_is_invalid(tmp_path):
     seed_product(tmp_path, "src/app.py", "app original\n")
     seed_product(tmp_path, "src/util.py", "util original\n")

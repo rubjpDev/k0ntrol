@@ -341,6 +341,32 @@ def test_green_suite_reaches_the_gate(tmp_path):
     assert "+print('ok')" in "\n".join(shown)
 
 
+def test_fast_runs_gates_after_green_suite(tmp_path):
+    (tmp_path / "a.py").write_text("a\n", encoding="utf-8")
+
+    def fake_invoke(mode, prompt):
+        if mode.name == "tester":
+            return "FILE tests/test_fast.py\ndef test_fast():\n    assert False\n"
+        if mode.name == "coder":
+            return "FILE a.py\nprint('ok')\n"
+        raise AssertionError(mode.name)
+
+    source = "open('complexity.ok','w').write('ok')"
+    cmd = f"{sys.executable} -c {source!r}"
+    status = run_fast(
+        "change @a.py",
+        root=tmp_path,
+        config=loop_config(gates=[{"name": "complexity", "cmd": cmd}]),
+        read_line=lambda: "y",
+        write=lambda _line: None,
+        invoke=fake_invoke,
+        bulk_read=lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("bulk")),
+        run_suite=lambda root: (0, "ok\n"),
+    )
+    assert status == "done"
+    assert (tmp_path / "complexity.ok").read_text(encoding="utf-8") == "ok"
+
+
 def test_no_on_the_green_gate_is_stuck(tmp_path):
     (tmp_path / "a.py").write_text("a\n", encoding="utf-8")
 

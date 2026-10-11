@@ -70,6 +70,7 @@ def _run_doctor() -> int:
         return 1
 
     print(yaml.safe_dump(cfg, sort_keys=False), end="")
+    print(_gates_report(cfg.get("gates") or []))
 
     problems = k0ntrol.backends.cursor.cursor_problems(cfg)
     if problems:
@@ -78,6 +79,15 @@ def _run_doctor() -> int:
         return 1
 
     return 0
+
+
+def _gates_report(gates: list) -> str:
+    if not gates:
+        return "active gates: none"
+    lines = ["active gates:"]
+    for gate in gates:
+        lines.append(f"  {gate['name']}: {gate['cmd']}")
+    return "\n".join(lines)
 
 
 def _run_session() -> int:

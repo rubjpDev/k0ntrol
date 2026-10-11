@@ -8,7 +8,15 @@ STRATEGY = "# Strategy\n\nHow we change this codebase.\n"
 CODE_RULES = "# Code rules\n\nLocal coding constraints.\n"
 MEMORY_GITIGNORE = "sessions/\nevents.jsonl\n*.sqlite\n"
 PROJECT_CONFIG = (
-    "# Project overrides. An empty mapping inherits the package defaults.\n{}\n"
+    "# Project overrides. An empty mapping inherits the package defaults.\n"
+    "#\n"
+    "# Uncomment to enable validator gates after a green test_cmd:\n"
+    "# gates:\n"
+    "#   - name: complexity\n"
+    "#     cmd: complexipy src --max-complexity-allowed 6\n"
+    "#   - name: coverage\n"
+    "#     cmd: pytest --cov=src --cov-fail-under=90\n"
+    "{}\n"
 )
 
 

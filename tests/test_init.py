@@ -10,7 +10,15 @@ ARCHITECTURE = "# Architecture\n\nSystem shape. Layers, boundaries, key modules.
 STRATEGY = "# Strategy\n\nHow we change this codebase.\n"
 CODE_RULES = "# Code rules\n\nLocal coding constraints.\n"
 PROJECT_CONFIG = (
-    "# Project overrides. An empty mapping inherits the package defaults.\n{}\n"
+    "# Project overrides. An empty mapping inherits the package defaults.\n"
+    "#\n"
+    "# Uncomment to enable validator gates after a green test_cmd:\n"
+    "# gates:\n"
+    "#   - name: complexity\n"
+    "#     cmd: complexipy src --max-complexity-allowed 6\n"
+    "#   - name: coverage\n"
+    "#     cmd: pytest --cov=src --cov-fail-under=90\n"
+    "{}\n"
 )
 MEMORY_GITIGNORE = "sessions/\nevents.jsonl\n*.sqlite\n"
 
@@ -47,7 +55,18 @@ def test_init_creates_the_soul_layout(tmp_path):
         "created .k0-mem/modes",
     ]
     assert load_config(tmp_path, tmp_path / "home")["threshold_lines"] == 350
+    assert load_config(tmp_path, tmp_path / "home")["gates"] == []
     assert not (root / "modes").joinpath("tester.yaml").exists()
+
+
+def test_init_gate_examples_are_commented(tmp_path):
+    init_project(tmp_path)
+    text = (tmp_path / ".k0-mem" / "config.yaml").read_text(encoding="utf-8")
+    assert "complexipy src --max-complexity-allowed 6" in text
+    assert "pytest --cov=src --cov-fail-under=90" in text
+    for line in text.splitlines():
+        if "complexipy" in line or "cov-fail-under" in line or line.strip() == "gates:":
+            assert line.lstrip().startswith("#")
 
 
 def test_cli_init_prints_the_report(tmp_path, capsys):

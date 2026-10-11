@@ -475,7 +475,7 @@ def _validate_attempt(
 ) -> tuple[str, dict[Path, str]] | None:
     retries = 0
     while True:
-        code, output = run_suite(root)
+        code, output = _run_suite_and_gates(run_suite, root, config)
         if code == 0:
             return spec, befores
         result = _validation_retry(
@@ -494,6 +494,27 @@ def _validate_attempt(
         if result is None:
             return None
         spec, befores, retries = result
+
+
+def _run_suite_and_gates(
+    run_suite: RunSuite, root: Path, config: dict
+) -> tuple[int, str]:
+    code, output = run_suite(root)
+    if code != 0:
+        return code, output
+    return _run_gates(root, config.get("gates") or [])
+
+
+def _run_gates(root: Path, gates: list) -> tuple[int, str]:
+    for gate in gates:
+        code, output = run_configured_suite(root, gate["cmd"])
+        if code != 0:
+            return code, _gate_failure(gate["name"], output)
+    return 0, ""
+
+
+def _gate_failure(name: str, output: str) -> str:
+    return f"gate {name}\n{output}"
 
 
 def _validation_retry(

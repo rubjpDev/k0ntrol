@@ -60,6 +60,26 @@ def _validate_top_level(cfg: dict) -> list[str]:
     errors.extend(_validate_integer("reflect_every", cfg.get("reflect_every"), 1))
     errors.extend(_validate_text("test_cmd", cfg.get("test_cmd")))
     errors.extend(_validate_integer("max_retries", cfg.get("max_retries"), 0))
+    errors.extend(_validate_gates(cfg.get("gates")))
+    return errors
+
+
+def _validate_gates(value: object) -> list[str]:
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        return ["gates: must be a list"]
+    errors = []
+    for index, gate in enumerate(value):
+        errors.extend(_validate_gate(index, gate))
+    return errors
+
+
+def _validate_gate(index: int, gate: object) -> list[str]:
+    if not isinstance(gate, Mapping):
+        return [f"gates[{index}]: must be a mapping"]
+    errors = _validate_text(f"gates[{index}].name", gate.get("name"))
+    errors.extend(_validate_text(f"gates[{index}].cmd", gate.get("cmd")))
     return errors
 
 
