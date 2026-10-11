@@ -26,7 +26,16 @@ def init_project(root: Path) -> list[str]:
     memory_root = root / ".k0-mem"
     memory_root.mkdir(parents=True, exist_ok=True)
     topology = memory_root / "Project_topology" / root.name
-    entries = (
+    return [
+        _init_entry(path, content, root)
+        for path, content in _init_entries(memory_root, topology)
+    ]
+
+
+def _init_entries(
+    memory_root: Path, topology: Path
+) -> tuple[tuple[Path, str | None], ...]:
+    return (
         (memory_root / "Project_context", None),
         (memory_root / "Project_topology", None),
         (topology / "architecture.md", ARCHITECTURE),
@@ -38,16 +47,20 @@ def init_project(root: Path) -> list[str]:
         (memory_root / "config.yaml", PROJECT_CONFIG),
         (memory_root / "modes", None),
     )
-    lines = []
-    for path, content in entries:
-        if path.exists():
-            action = "exists"
-        else:
-            if content is None:
-                path.mkdir()
-            else:
-                path.parent.mkdir(parents=True, exist_ok=True)
-                path.write_text(content, encoding="utf-8")
-            action = "created"
-        lines.append(f"{action} {path.relative_to(root).as_posix()}")
-    return lines
+
+
+def _init_entry(path: Path, content: str | None, root: Path) -> str:
+    if path.exists():
+        action = "exists"
+    else:
+        _create_init_path(path, content)
+        action = "created"
+    return f"{action} {path.relative_to(root).as_posix()}"
+
+
+def _create_init_path(path: Path, content: str | None) -> None:
+    if content is None:
+        path.mkdir()
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content, encoding="utf-8")

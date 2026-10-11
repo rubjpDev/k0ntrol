@@ -45,23 +45,43 @@ def run_session(
             color=color,
         )
     )
+    return _session_loop(
+        read_line,
+        show,
+        transcript,
+        echo_input=echo_input,
+        session_run=session_run,
+        root=root,
+        config=config,
+        invoke=invoke,
+        bulk_read=bulk_read,
+        run_suite=run_suite,
+        hinted=hinted,
+        reflect=reflect,
+    )
+
+
+def _session_loop(
+    read_line: Callable[[], str],
+    show: Callable[[str], None],
+    transcript: Path,
+    *,
+    echo_input: bool,
+    session_run: str,
+    root: Path,
+    config: dict,
+    invoke: Callable,
+    bulk_read: Callable,
+    run_suite: Callable[[Path], tuple[int, str]] | None,
+    hinted: dict[str, bool],
+    reflect: "_ReflectScheduler",
+) -> int:
     while True:
-        try:
-            offer_mem_proposals(root, read_line, show)
-            line = read_line()
-        except (KeyboardInterrupt, EOFError):
-            return 0
-        input_line = f"› {line}"
-        if echo_input:
-            show(input_line)
-        else:
-            _append_transcript(transcript, input_line)
-        if not line:
-            continue
-        if _handle_command(
-            line,
+        if _session_should_quit(
+            read_line,
             show,
-            read_line=read_line,
+            transcript,
+            echo_input=echo_input,
             session_run=session_run,
             root=root,
             config=config,
@@ -72,6 +92,67 @@ def run_session(
             reflect=reflect,
         ):
             return 0
+
+
+def _session_should_quit(
+    read_line: Callable[[], str],
+    show: Callable[[str], None],
+    transcript: Path,
+    *,
+    echo_input: bool,
+    session_run: str,
+    root: Path,
+    config: dict,
+    invoke: Callable,
+    bulk_read: Callable,
+    run_suite: Callable[[Path], tuple[int, str]] | None,
+    hinted: dict[str, bool],
+    reflect: "_ReflectScheduler",
+) -> bool:
+    line = _read_session_line(read_line, show, root)
+    if line is None:
+        return True
+    _echo_session_input(line, show, transcript, echo_input)
+    if not line:
+        return False
+    return _handle_command(
+        line,
+        show,
+        read_line=read_line,
+        session_run=session_run,
+        root=root,
+        config=config,
+        invoke=invoke,
+        bulk_read=bulk_read,
+        run_suite=run_suite,
+        hinted=hinted,
+        reflect=reflect,
+    )
+
+
+def _read_session_line(
+    read_line: Callable[[], str],
+    show: Callable[[str], None],
+    root: Path,
+) -> str | None:
+    try:
+        offer_mem_proposals(root, read_line, show)
+        return read_line()
+    except (KeyboardInterrupt, EOFError):
+        return None
+
+
+def _echo_session_input(
+    line: str,
+    show: Callable[[str], None],
+    transcript: Path,
+    echo_input: bool,
+) -> None:
+    input_line = f"› {line}"
+    if echo_input:
+        show(input_line)
+        return
+    _append_transcript(transcript, input_line)
 
 
 def _new_transcript(root: Path) -> Path:

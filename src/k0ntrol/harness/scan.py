@@ -115,24 +115,40 @@ def _confirm_scan(
 
 
 def _git_tracked_files(root: Path) -> list[Path]:
+    result = _run_git_ls_files(root)
+    _raise_git_ls_error(result)
+    return _text_tracked_files(root, result.stdout)
+
+
+def _run_git_ls_files(root: Path) -> subprocess.CompletedProcess[bytes]:
     try:
-        result = subprocess.run(
+        return subprocess.run(
             ["git", "-C", str(root), "ls-files", "-z"],
             capture_output=True,
             check=False,
         )
     except OSError as error:
         raise ScanError(f"unable to list git files: {error}") from error
-    if result.returncode != 0:
-        err = result.stderr.decode().strip() or "git ls-files failed"
-        raise ScanError(err)
-    relative_paths = [item.decode() for item in result.stdout.split(b"\0") if item]
+
+
+def _raise_git_ls_error(result: subprocess.CompletedProcess[bytes]) -> None:
+    if result.returncode == 0:
+        return
+    err = result.stderr.decode().strip() or "git ls-files failed"
+    raise ScanError(err)
+
+
+def _text_tracked_files(root: Path, stdout: bytes) -> list[Path]:
     files = []
-    for relative in relative_paths:
+    for relative in _nul_split_paths(stdout):
         path = (root / relative).resolve()
         if _is_text_file(path):
             files.append(path)
     return files
+
+
+def _nul_split_paths(stdout: bytes) -> list[str]:
+    return [item.decode() for item in stdout.split(b"\0") if item]
 
 
 def _is_text_file(path: Path) -> bool:

@@ -309,35 +309,89 @@ def _mention_references(
     invoke: Invoke,
     bulk_read: BulkRead,
 ) -> str:
+    threshold = config["threshold_lines"]
+    reference_paths = _tester_reference_paths(paths, root, threshold)
+    delegated = _delegated_paths(reference_paths, threshold)
+    summary = _delegated_summary(
+        question, delegated, root, config, invoke, bulk_read
+    )
+    return _join_reference_sections(reference_paths, delegated, summary, root)
+
+
+def _tester_reference_paths(
+    paths: list[Path], root: Path, threshold: int
+) -> list[Path]:
     target = _first_non_test_path(paths, root)
-    reference_paths = [path for path in paths if path != target]
-    if target is not None and not should_delegate(target, config["threshold_lines"]):
-        reference_paths.insert(0, target)
-    delegated = [
-        path
-        for path in reference_paths
-        if should_delegate(path, config["threshold_lines"])
-    ]
-    delegated_summary = ""
-    if delegated:
-        delegated_summary = bulk_read(
-            question,
-            delegated,
-            root=root,
-            repo=root.name,
-            mode=load_mode("bulk_reader", config),
-            invoke=invoke,
+    others = [path for path in paths if path != target]
+    if _include_target_in_refs(target, threshold):
+        others.insert(0, target)
+    return others
+
+
+def _include_target_in_refs(target: Path | None, threshold: int) -> bool:
+    return target is not None and not should_delegate(target, threshold)
+
+
+def _delegated_paths(paths: list[Path], threshold: int) -> list[Path]:
+    return [path for path in paths if should_delegate(path, threshold)]
+
+
+def _delegated_summary(
+    question: str,
+    delegated: list[Path],
+    root: Path,
+    config: dict,
+    invoke: Invoke,
+    bulk_read: BulkRead,
+) -> str:
+    if not delegated:
+        return ""
+    return bulk_read(
+        question,
+        delegated,
+        root=root,
+        repo=root.name,
+        mode=load_mode("bulk_reader", config),
+        invoke=invoke,
+    )
+
+
+def _join_reference_sections(
+    paths: list[Path],
+    delegated: list[Path],
+    summary: str,
+    root: Path,
+) -> str:
+    sections: list[str] = []
+    inserted = False
+    for path in paths:
+        inserted = _add_mention_section(
+            sections, path, delegated, summary, inserted, root
         )
-    sections = []
-    summary_added = False
-    for path in reference_paths:
-        if path in delegated:
-            if delegated_summary and not summary_added:
-                sections.append(delegated_summary)
-                summary_added = True
-            continue
-        sections.append(_file_section(path, root))
     return "\n".join(sections)
+
+
+def _add_mention_section(
+    sections: list[str],
+    path: Path,
+    delegated: list[Path],
+    summary: str,
+    inserted: bool,
+    root: Path,
+) -> bool:
+    if path not in delegated:
+        sections.append(_file_section(path, root))
+        return inserted
+    return _add_delegated_summary(sections, summary, inserted)
+
+
+def _add_delegated_summary(
+    sections: list[str], summary: str, inserted: bool
+) -> bool:
+    if inserted or not summary:
+        return inserted
+    sections.append(summary)
+    return True
 
 
 def _coder_reference_text(
@@ -587,12 +641,37 @@ def _append_redo_bullet(stripped: str, paths: list[str]) -> None:
 def _filter_redo_targets(
     proposed: list[str] | None, targets: list[Path], root: Path
 ) -> list[Path]:
-    if not proposed:
+    selected = _picked_redo_targets(proposed, targets, root)
+    if not selected:
         return list(targets)
-    allowed = {path.relative_to(root.resolve()).as_posix(): path for path in targets}
-    picked = {allowed[rel] for rel in proposed if rel in allowed}
-    selected = [path for path in targets if path in picked]
-    return selected or list(targets)
+    return selected
+
+
+def _picked_redo_targets(
+    proposed: list[str] | None, targets: list[Path], root: Path
+) -> list[Path]:
+    if not proposed:
+        return []
+    allowed = _redo_allowed(targets, root)
+    picked = _proposed_redo_paths(proposed, allowed)
+    return [path for path in targets if path in picked]
+
+
+def _redo_allowed(targets: list[Path], root: Path) -> dict[str, Path]:
+    allowed: dict[str, Path] = {}
+    for path in targets:
+        allowed[path.relative_to(root.resolve()).as_posix()] = path
+    return allowed
+
+
+def _proposed_redo_paths(
+    proposed: list[str], allowed: dict[str, Path]
+) -> set[Path]:
+    picked: set[Path] = set()
+    for rel in proposed:
+        if rel in allowed:
+            picked.add(allowed[rel])
+    return picked
 
 
 def _select_redo_targets(
@@ -1214,12 +1293,22 @@ def _parse_files_line(line: str) -> tuple[str, str] | None:
 
 def _files_section_lines(spec: str) -> list[str]:
     lines = spec.splitlines()
-    try:
-        start = next(index for index, line in enumerate(lines) if line.strip() == "## Files")
-    except StopIteration:
+    start = _files_section_start(lines)
+    if start is None:
         return []
+    return _nonempty_until_heading(lines[start + 1 :])
+
+
+def _files_section_start(lines: list[str]) -> int | None:
+    for index, line in enumerate(lines):
+        if line.strip() == "## Files":
+            return index
+    return None
+
+
+def _nonempty_until_heading(lines: list[str]) -> list[str]:
     values = []
-    for line in lines[start + 1 :]:
+    for line in lines:
         if line.startswith("## "):
             break
         value = line.strip()

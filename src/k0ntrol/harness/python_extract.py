@@ -35,13 +35,32 @@ def resolve_imports(
     found: list[str] = []
     seen: set[str] = set()
     for level, module, names in raw_imports:
-        for candidate in _import_candidates(current_module, level, module, names):
-            path = modules.get(candidate)
-            if path is None or path in seen:
-                continue
-            seen.add(path)
-            found.append(path)
+        _collect_import_paths(
+            found, seen, current_module, level, module, names, modules
+        )
     return found
+
+
+def _collect_import_paths(
+    found: list[str],
+    seen: set[str],
+    current_module: str,
+    level: int,
+    module: str,
+    names: list[str],
+    modules: dict[str, str],
+) -> None:
+    for candidate in _import_candidates(current_module, level, module, names):
+        _remember_import_path(found, seen, modules.get(candidate))
+
+
+def _remember_import_path(
+    found: list[str], seen: set[str], path: str | None
+) -> None:
+    if path is None or path in seen:
+        return
+    seen.add(path)
+    found.append(path)
 
 
 def resolve_calls(
@@ -70,12 +89,32 @@ def _import_candidates(
     base = _import_base(current, level, module)
     if base is None:
         return []
-    candidates = [base] if base else []
+    return _namespaced_import_candidates(base, names)
+
+
+def _namespaced_import_candidates(base: str, names: list[str]) -> list[str]:
+    candidates = _optional_import_base(base)
     for name in names:
-        if name == "*":
-            continue
-        candidates.append(f"{base}.{name}" if base else name)
+        _append_imported_name(candidates, base, name)
     return candidates
+
+
+def _optional_import_base(base: str) -> list[str]:
+    if not base:
+        return []
+    return [base]
+
+
+def _append_imported_name(candidates: list[str], base: str, name: str) -> None:
+    if name == "*":
+        return
+    candidates.append(_qualified_import(base, name))
+
+
+def _qualified_import(base: str, name: str) -> str:
+    if not base:
+        return name
+    return f"{base}.{name}"
 
 
 def _import_base(current: str, level: int, module: str) -> str | None:

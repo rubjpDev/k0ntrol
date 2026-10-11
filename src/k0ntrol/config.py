@@ -100,13 +100,16 @@ def _validate_agents(value: object) -> list[str]:
         return ["agents: must be a mapping"]
     errors = []
     for name in AGENTS:
-        agent = value.get(name)
-        if not isinstance(agent, Mapping):
-            errors.append(f"agents.{name}: must be a mapping")
-            continue
-        if not isinstance(agent.get("model"), str) or not agent["model"].strip():
-            errors.append(f"agents.{name}.model: must be a non-empty string")
+        errors.extend(_validate_agent(name, value.get(name)))
     return errors
+
+
+def _validate_agent(name: str, agent: object) -> list[str]:
+    if not isinstance(agent, Mapping):
+        return [f"agents.{name}: must be a mapping"]
+    if not isinstance(agent.get("model"), str) or not agent["model"].strip():
+        return [f"agents.{name}.model: must be a non-empty string"]
+    return []
 
 
 def _read_config(path: Any) -> dict:
