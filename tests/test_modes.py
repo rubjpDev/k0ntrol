@@ -15,6 +15,12 @@ def test_all_six_modes_load(cfg):
     assert all(isinstance(m, ModeSpec) and m.instructions.strip() for m in modes.values())
 
 
+def test_spec_mode_asks_for_files_create_or_change_bullets(cfg):
+    instructions = load_mode("spec", cfg).instructions
+    assert "- <path> (create|change)" in instructions
+    assert "one per line" in instructions
+
+
 def test_reviewer_mode_loads(cfg):
     mode = load_mode("reviewer", cfg)
     assert mode.name == "reviewer"

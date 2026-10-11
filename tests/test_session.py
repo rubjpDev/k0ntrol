@@ -121,8 +121,14 @@ def test_blank_and_unknown_stay_in_session(tmp_path):
 
 def test_full_in_the_session_writes_spec_on_yes(tmp_path):
     def fake_invoke(mode, prompt):
+        if mode.name == "tester":
+            return "FILE tests/test_app.py\ndef test_app():\n    assert True\n"
         assert mode.name == "spec"
-        return "## Goal\nhello\n## Files\n"
+        return (
+            "## Goal\nhello\n## Files\n"
+            "- tests/test_app.py (create)\n"
+            "- app.py (create)\n"
+        )
 
     cfg = {
         "backend": "cursor",
@@ -141,7 +147,7 @@ def test_full_in_the_session_writes_spec_on_yes(tmp_path):
             )
         },
     }
-    lines = iter(["/full add checkout", "y", "/quit"])
+    lines = iter(["/full add checkout", "y", "y", "/quit"])
     shown = []
     code = run_session(
         lambda: next(lines),
@@ -164,7 +170,11 @@ def test_full_in_the_session_runs_the_coder_and_validator_path(tmp_path):
     def fake_invoke(mode, prompt):
         names.append(mode.name)
         if mode.name == "spec":
-            return "## Goal\ng\n## Files\n- tests/test_app.py\n- app.py\n"
+            return (
+                "## Goal\ng\n## Files\n"
+                "- tests/test_app.py (create)\n"
+                "- app.py (change)\n"
+            )
         if mode.name == "tester":
             return "FILE tests/test_app.py\ndef test_app():\n    assert True\n"
         if mode.name == "coder":
@@ -217,7 +227,11 @@ def test_full_in_the_session_prints_stuck_after_validation_limit(tmp_path):
     def fake_invoke(mode, prompt):
         names.append(mode.name)
         if mode.name == "spec":
-            return "## Goal\ng\n## Files\n- tests/test_app.py\n- app.py\n"
+            return (
+                "## Goal\ng\n## Files\n"
+                "- tests/test_app.py (create)\n"
+                "- app.py (change)\n"
+            )
         if mode.name == "tester":
             return "FILE tests/test_app.py\ndef test_app():\n    assert True\n"
         if mode.name == "coder":
@@ -501,8 +515,13 @@ def test_full_rescan_drops_deleted_file_markdown(tmp_path):
     def fake_invoke(mode, prompt):
         if mode.name == "retrieval_gate":
             return "retrieve: no\n"
-        assert mode.name == "spec"
-        return "## Goal\nhello\n## Files\n"
+        if mode.name == "spec":
+            return (
+                "## Goal\nhello\n## Files\n"
+                "- tests/test_app.py (create)\n"
+                "- keep.py (change)\n"
+            )
+        return "FILE tests/test_app.py\ndef test_app():\n    assert True\n"
 
     cfg = config()
     cfg.update(
@@ -523,7 +542,7 @@ def test_full_rescan_drops_deleted_file_markdown(tmp_path):
             },
         }
     )
-    lines = iter(["/full add checkout", "y", "/quit"])
+    lines = iter(["/full add checkout", "y", "y", "/quit"])
     shown = []
     code = run_session(
         lambda: next(lines),
@@ -1069,12 +1088,21 @@ def test_mem_proposal_is_shown_at_next_prompt_not_mid_turn(tmp_path):
         if mode.name == "spec":
             spec_started.set()
             assert _pending_mem_arrives(tmp_path)
-            return "## Goal\nhello\n## Files\n"
+            return (
+                "## Goal\nhello\n## Files\n"
+                "- tests/test_app.py (create)\n"
+                "- app.py (change)\n"
+            )
+        if mode.name == "tester":
+            return "FILE tests/test_app.py\ndef test_app():\n    assert True\n"
         return "ok\n"
 
     cfg = reflect_cfg(reflect_every=1)
     cfg["agents"]["spec"] = {"model": "m"}
-    lines = iter(["/ask what is line 1? @app.py", "/full add checkout", "y", "n", "/quit"])
+    cfg["agents"]["tester"] = {"model": "m"}
+    cfg["max_retries"] = 2
+    cfg["test_cmd"] = "pytest -q"
+    lines = iter(["/ask what is line 1? @app.py", "/full add checkout", "y", "y", "n", "/quit"])
     shown = []
     code = run_session(
         lambda: next(lines),

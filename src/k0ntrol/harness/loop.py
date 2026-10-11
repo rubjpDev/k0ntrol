@@ -169,6 +169,13 @@ def _run_full_iteration(
     run_suite: RunSuite | None,
     spec_invoke: Invoke,
 ) -> tuple[str, str, str]:
+    accepted = _accept_files_contract(
+        spec, prompt, root, config, spec_invoke, write
+    )
+    if accepted is None:
+        return "stuck", prompt, spec
+    spec, files, prompt = accepted
+    _show_files_contract(files, write)
     if _read_gate(read_line, write) != "y":
         prompt = _rejected_prompt(prompt, spec)
         spec = _write_and_show_spec(prompt, root, config, spec_invoke, write)
@@ -556,7 +563,11 @@ def _join_memory(prompt: str, extra: str) -> str:
 
 
 def _rejected_prompt(prompt: str, spec: str) -> str:
-    return f"{prompt}\n\nPrevious spec:\n{spec}\n\nrejected"
+    return _retry_prompt(prompt, spec, "rejected")
+
+
+def _retry_prompt(prompt: str, spec: str, reason: str) -> str:
+    return f"{prompt}\n\nPrevious spec:\n{spec}\n\n{reason}"
 
 
 def _write_tests(
@@ -907,20 +918,137 @@ def _append_rejection(spec: str, root: Path) -> str:
     return updated
 
 
-def _spec_files(spec: str) -> list[str]:
+_FILE_LINE = re.compile(r"^- +(?:`([^`]+)`|(\S+)) +\((create|change)\)$")
+
+
+def _accept_files_contract(
+    spec: str,
+    prompt: str,
+    root: Path,
+    config: dict,
+    spec_invoke: Invoke,
+    write: Callable[[str], None],
+) -> tuple[str, list[tuple[str, str]], str] | None:
+    retries = 0
+    while True:
+        entries = _parse_files_entries(spec)
+        error = _files_contract_error(spec, root, entries)
+        if error is None:
+            return spec, entries or [], prompt
+        spec = _append_spec_text(spec, root, error)
+        write(error)
+        if retries >= config["max_retries"]:
+            write("stuck")
+            return None
+        prompt = _retry_prompt(prompt, spec, error)
+        spec = _write_and_show_spec(prompt, root, config, spec_invoke, write)
+        retries += 1
+
+
+def _files_contract_error(
+    spec: str,
+    root: Path,
+    entries: list[tuple[str, str]] | None,
+) -> str | None:
+    if entries is None:
+        return _invalid_files_line(spec)
+    return _files_entries_error(entries, root)
+
+
+def _invalid_files_line(spec: str) -> str:
+    bad = next(
+        line for line in _files_section_lines(spec) if _parse_files_line(line) is None
+    )
+    return f"invalid ## Files line: {bad}"
+
+
+def _files_entries_error(
+    entries: list[tuple[str, str]], root: Path
+) -> str | None:
+    for path, action in entries:
+        error = _files_path_error(path, action, root)
+        if error:
+            return error
+    return _files_mix_error(entries)
+
+
+def _files_path_error(path: str, action: str, root: Path) -> str | None:
+    resolved = _resolved_in_repo(path, root)
+    if resolved is None:
+        return f"path is outside the repo: {path}"
+    relative = resolved.relative_to(root.resolve())
+    if relative.parts[:1] == (".k0-mem",):
+        return f"path is inside .k0-mem/: {path}"
+    if action == "change" and not resolved.is_file():
+        return f"change path does not exist: {path}"
+    if action == "create" and resolved.exists():
+        return f"create path already exists: {path}"
+    return None
+
+
+def _resolved_in_repo(relative: str, root: Path) -> Path | None:
+    root_resolved = root.resolve()
+    candidate = (root_resolved / relative).resolve()
+    try:
+        candidate.relative_to(root_resolved)
+    except ValueError:
+        return None
+    return candidate
+
+
+def _files_mix_error(entries: list[tuple[str, str]]) -> str | None:
+    if not any(_is_test_path(path) for path, _action in entries):
+        return "## Files needs a test path"
+    if not any(not _is_test_path(path) for path, _action in entries):
+        return "## Files needs a non-test path"
+    return None
+
+
+def _show_files_contract(
+    entries: list[tuple[str, str]], write: Callable[[str], None]
+) -> None:
+    for path, action in entries:
+        write(f"{path} ({action})")
+
+
+def _parse_files_line(line: str) -> tuple[str, str] | None:
+    match = _FILE_LINE.fullmatch(line.strip())
+    if match is None:
+        return None
+    return match.group(1) or match.group(2), match.group(3)
+
+
+def _files_section_lines(spec: str) -> list[str]:
     lines = spec.splitlines()
     try:
         start = next(index for index, line in enumerate(lines) if line.strip() == "## Files")
     except StopIteration:
         return []
-    paths = []
+    values = []
     for line in lines[start + 1 :]:
         if line.startswith("## "):
             break
         value = line.strip()
         if value:
-            paths.append(value[2:].strip() if value.startswith("- ") else value)
-    return paths
+            values.append(value)
+    return values
+
+
+def _parse_files_entries(spec: str) -> list[tuple[str, str]] | None:
+    entries = []
+    for line in _files_section_lines(spec):
+        parsed = _parse_files_line(line)
+        if parsed is None:
+            return None
+        entries.append(parsed)
+    return entries
+
+
+def _spec_files(spec: str) -> list[str]:
+    entries = _parse_files_entries(spec)
+    if entries is None:
+        return []
+    return [path for path, _action in entries]
 
 
 def _is_test_path(relative: str) -> bool:
