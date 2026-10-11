@@ -472,6 +472,62 @@ def test_full_review_code_runs_a_fresh_coder_and_reviewer(tmp_path):
     assert "Fix the code." in (tmp_path / "spec.md").read_text(encoding="utf-8")
 
 
+def test_full_review_code_redoes_only_review_picked_targets(tmp_path):
+    seed_product(tmp_path, "src/app.py", "app original\n")
+    seed_product(tmp_path, "src/util.py", "util original\n")
+    coder_files = []
+    redo_prompts = []
+
+    def fake_invoke(mode, prompt):
+        if mode.name == "spec":
+            return files_spec(
+                ("tests/test_app.py", "create"),
+                ("src/app.py", "change"),
+                ("src/util.py", "change"),
+            )
+        if mode.name == "tester":
+            return "FILE tests/test_app.py\ndef test_app():\n    assert True\n"
+        if mode.name == "coder":
+            if "Target:\napp " in prompt:
+                coder_files.append("src/app.py")
+                return "FILE src/app.py\napp v1\n"
+            if "Target:\nutil " in prompt:
+                coder_files.append("src/util.py")
+                if "Review:" in prompt:
+                    redo_prompts.append(prompt)
+                    return "FILE src/util.py\nutil v2\n"
+                return "FILE src/util.py\nutil v1\n"
+            raise AssertionError(prompt)
+        return (
+            "FILE review.md\n"
+            "Fix util.\n"
+            "redo:\n"
+            "- src/util.py\n"
+        )
+
+    shown = []
+    status = run_full(
+        "change the app",
+        root=tmp_path,
+        config=loop_config(),
+        read_line=iter(["y", "y", "code", "ok"]).__next__,
+        write=shown.append,
+        invoke=fake_invoke,
+        bulk_read=lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("bulk")
+        ),
+        run_suite=lambda root: (0, "ok\n"),
+    )
+
+    assert status == "done"
+    assert coder_files == ["src/app.py", "src/util.py", "src/util.py"]
+    assert "↻ coder: src/util.py" in shown
+    assert redo_prompts
+    assert "app v1" in redo_prompts[0]
+    assert (tmp_path / "src" / "app.py").read_text(encoding="utf-8") == "app v1\n"
+    assert (tmp_path / "src" / "util.py").read_text(encoding="utf-8") == "util v2\n"
+
+
 def test_full_review_code_redoes_all_coder_targets(tmp_path):
     seed_product(tmp_path, "src/app.py", "app original\n")
     seed_product(tmp_path, "src/util.py", "util original\n")
@@ -792,6 +848,226 @@ def test_full_red_suite_redoes_all_coder_targets(tmp_path):
         "src/app.py",
         "src/util.py",
     ]
+
+
+def test_full_red_suite_redoes_only_validator_picked_targets(tmp_path):
+    seed_product(tmp_path, "src/app.py", "app original\n")
+    seed_product(tmp_path, "src/util.py", "util original\n")
+    coder_files = []
+    redo_prompts = []
+
+    def fake_invoke(mode, prompt):
+        if mode.name == "spec":
+            return files_spec(
+                ("tests/test_app.py", "create"),
+                ("src/app.py", "change"),
+                ("src/util.py", "change"),
+            )
+        if mode.name == "tester":
+            return "FILE tests/test_app.py\ndef test_app():\n    assert True\n"
+        if mode.name == "coder":
+            if "Target:\napp " in prompt:
+                coder_files.append("src/app.py")
+                return "FILE src/app.py\napp v1\n"
+            if "Target:\nutil " in prompt:
+                coder_files.append("src/util.py")
+                if "test_app failed" in prompt:
+                    redo_prompts.append(prompt)
+                    return "FILE src/util.py\nutil v2\n"
+                return "FILE src/util.py\nutil v1\n"
+            raise AssertionError(prompt)
+        if mode.name == "validator":
+            return "- test_app failed\nredo:\n- src/util.py\n"
+        return "FILE review.md\nLooks good.\n"
+
+    shown = []
+
+    def suite(root):
+        util = (root / "src" / "util.py").read_text(encoding="utf-8")
+        if "util v2" in util:
+            return 0, "ok\n"
+        return 1, "FAILED tests/test_app.py::test_app\n"
+
+    status = run_full(
+        "change the app",
+        root=tmp_path,
+        config=loop_config(),
+        read_line=iter(["y", "y", "ok"]).__next__,
+        write=shown.append,
+        invoke=fake_invoke,
+        bulk_read=lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("bulk")
+        ),
+        run_suite=suite,
+    )
+
+    assert status == "done"
+    assert coder_files == ["src/app.py", "src/util.py", "src/util.py"]
+    assert "↻ coder: src/util.py" in shown
+    assert redo_prompts
+    assert "app v1" in redo_prompts[0]
+    assert (tmp_path / "src" / "app.py").read_text(encoding="utf-8") == "app v1\n"
+    assert (tmp_path / "src" / "util.py").read_text(encoding="utf-8") == "util v2\n"
+
+
+def test_full_records_picked_paths_on_validator_jsonl_event(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    seed_product(tmp_path, "src/app.py", "app original\n")
+    seed_product(tmp_path, "src/util.py", "util original\n")
+
+    def fake_invoke(mode, prompt):
+        if mode.name == "spec":
+            return files_spec(
+                ("tests/test_app.py", "create"),
+                ("src/app.py", "change"),
+                ("src/util.py", "change"),
+            )
+        if mode.name == "tester":
+            return "FILE tests/test_app.py\ndef test_app():\n    assert True\n"
+        if mode.name == "coder":
+            if "Target:\napp " in prompt:
+                return "FILE src/app.py\napp v1\n"
+            if "Target:\nutil " in prompt:
+                body = "util v2\n" if "test_app failed" in prompt else "util v1\n"
+                return f"FILE src/util.py\n{body}"
+            raise AssertionError(prompt)
+        if mode.name == "validator":
+            events = tmp_path / ".k0-mem" / "events.jsonl"
+            events.parent.mkdir(parents=True, exist_ok=True)
+            events.write_text(
+                json.dumps({"step": "validator", "mode": "validator", "ok": True})
+                + "\n",
+                encoding="utf-8",
+            )
+            return "- test_app failed\nredo:\n- src/util.py\n"
+        return "FILE review.md\nLooks good.\n"
+
+    def suite(root):
+        if "util v2" in (root / "src" / "util.py").read_text(encoding="utf-8"):
+            return 0, "ok\n"
+        return 1, "FAILED tests/test_app.py::test_app\n"
+
+    status = run_full(
+        "change the app",
+        root=tmp_path,
+        config=loop_config(),
+        read_line=iter(["y", "y", "ok"]).__next__,
+        write=lambda _line: None,
+        invoke=fake_invoke,
+        bulk_read=lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("bulk")
+        ),
+        run_suite=suite,
+    )
+
+    assert status == "done"
+    events = [
+        json.loads(line)
+        for line in (tmp_path / ".k0-mem" / "events.jsonl").read_text().splitlines()
+    ]
+    validator = [event for event in events if event.get("step") == "validator"]
+    assert validator[-1]["redo"] == ["src/util.py"]
+
+
+def test_full_last_retry_redoes_all_coder_targets(tmp_path):
+    seed_product(tmp_path, "src/app.py", "app original\n")
+    seed_product(tmp_path, "src/util.py", "util original\n")
+    coder_files = []
+
+    def fake_invoke(mode, prompt):
+        if mode.name == "spec":
+            return files_spec(
+                ("tests/test_app.py", "create"),
+                ("src/app.py", "change"),
+                ("src/util.py", "change"),
+            )
+        if mode.name == "tester":
+            return "FILE tests/test_app.py\ndef test_app():\n    assert True\n"
+        if mode.name == "coder":
+            if "Target:\napp " in prompt:
+                coder_files.append("src/app.py")
+                return "FILE src/app.py\napp broken\n"
+            if "Target:\nutil " in prompt:
+                coder_files.append("src/util.py")
+                return "FILE src/util.py\nutil broken\n"
+            raise AssertionError(prompt)
+        return "- test_app failed\nredo:\n- src/util.py\n"
+
+    shown = []
+    status = run_full(
+        "change the app",
+        root=tmp_path,
+        config=loop_config(),
+        read_line=iter(["y", "y"]).__next__,
+        write=shown.append,
+        invoke=fake_invoke,
+        bulk_read=lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("bulk")
+        ),
+        run_suite=lambda root: (1, "FAILED tests/test_app.py::test_app\n"),
+    )
+
+    assert status == "stuck"
+    assert coder_files == [
+        "src/app.py",
+        "src/util.py",
+        "src/util.py",
+        "src/app.py",
+        "src/util.py",
+    ]
+    assert shown.count("↻ coder: src/util.py") == 1
+    assert shown.count("↻ coder: src/app.py src/util.py") == 1
+
+
+def test_full_red_suite_redoes_all_when_validator_pick_is_invalid(tmp_path):
+    seed_product(tmp_path, "src/app.py", "app original\n")
+    seed_product(tmp_path, "src/util.py", "util original\n")
+    coder_files = []
+
+    def fake_invoke(mode, prompt):
+        if mode.name == "spec":
+            return files_spec(
+                ("tests/test_app.py", "create"),
+                ("src/app.py", "change"),
+                ("src/util.py", "change"),
+            )
+        if mode.name == "tester":
+            return "FILE tests/test_app.py\ndef test_app():\n    assert True\n"
+        if mode.name == "coder":
+            if "Target:\napp " in prompt:
+                coder_files.append("src/app.py")
+                return "FILE src/app.py\napp v1\n"
+            if "Target:\nutil " in prompt:
+                coder_files.append("src/util.py")
+                return "FILE src/util.py\nutil v1\n"
+            raise AssertionError(prompt)
+        if mode.name == "validator":
+            return "- test_app failed\nredo:\n- tests/test_app.py\n- missing.py\n"
+        return "FILE review.md\nLooks good.\n"
+
+    shown = []
+
+    def suite(root):
+        if coder_files.count("src/app.py") >= 2:
+            return 0, "ok\n"
+        return 1, "FAILED tests/test_app.py::test_app\n"
+
+    status = run_full(
+        "change the app",
+        root=tmp_path,
+        config=loop_config(),
+        read_line=iter(["y", "y", "ok"]).__next__,
+        write=shown.append,
+        invoke=fake_invoke,
+        bulk_read=lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("bulk")
+        ),
+        run_suite=suite,
+    )
+
+    assert status == "done"
+    assert coder_files == ["src/app.py", "src/util.py", "src/app.py", "src/util.py"]
+    assert "↻ coder: src/app.py src/util.py" in shown
 
 
 def test_full_coder_can_create_a_new_product_file(tmp_path):

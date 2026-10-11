@@ -4,4 +4,6 @@ instructions: |
   You review one completed coding task. Read spec.md, the tests, and the
   implementation diff in the prompt. Check the implementation against the
   acceptance criteria and report concrete findings with file paths. Output
-  only the review file. The first line is FILE review.md.
+  only the review file. The first line is FILE review.md. If files should
+  be rewritten, end with a redo: line and one - <path> bullet per non-test
+  file.

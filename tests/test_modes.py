@@ -21,6 +21,12 @@ def test_spec_mode_asks_for_files_create_or_change_bullets(cfg):
     assert "one per line" in instructions
 
 
+def test_validator_mode_asks_for_redo_paths(cfg):
+    instructions = load_mode("validator", cfg).instructions
+    assert "redo:" in instructions
+    assert "- <path>" in instructions
+
+
 def test_reviewer_mode_loads(cfg):
     mode = load_mode("reviewer", cfg)
     assert mode.name == "reviewer"

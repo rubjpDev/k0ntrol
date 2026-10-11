@@ -22,10 +22,34 @@ _EVENT_CONTEXT: contextvars.ContextVar[dict[str, str]] = contextvars.ContextVar(
 
 def set_event_context(run: str, step: str) -> None:
     _EVENT_CONTEXT.set({"run": run, "step": step})
+    set_event_extra()
 
 
 def current_event_context() -> dict[str, str]:
     return dict(_EVENT_CONTEXT.get())
+
+
+_EVENT_EXTRA: contextvars.ContextVar[dict[str, object]] = contextvars.ContextVar(
+    "k0ntrol_event_extra",
+    default={},
+)
+
+
+def set_event_extra(extra: dict[str, object] | None = None) -> None:
+    _EVENT_EXTRA.set(dict(extra or {}))
+
+
+def update_last_event(**fields: object) -> None:
+    events_file = Path.cwd() / ".k0-mem" / "events.jsonl"
+    if not events_file.is_file():
+        return
+    lines = events_file.read_text(encoding="utf-8").splitlines()
+    if not lines:
+        return
+    last = json.loads(lines[-1])
+    last.update(fields)
+    lines[-1] = json.dumps(last, separators=(",", ":"))
+    events_file.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 def _resolve_agent_binary() -> str:
@@ -111,6 +135,7 @@ def _record_event(
     tokens = _token_count(data.get("usage")) if data is not None else None
     if tokens is not None:
         event["tokens"] = tokens
+    event.update(_EVENT_EXTRA.get())
 
     events_file = mem_dir / "events.jsonl"
     with events_file.open("a", encoding="utf-8") as f:

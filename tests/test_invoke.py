@@ -11,6 +11,8 @@ from k0ntrol.backends.invoke import (
     current_event_context,
     invoke,
     set_event_context,
+    set_event_extra,
+    update_last_event,
 )
 from k0ntrol.modespec import ModeSpec
 
@@ -272,4 +274,49 @@ def test_failed_invoke_appends_ok_false(tmp_path, monkeypatch):
     assert line["step"] == "coder"
     assert line["mode"] == "bulk_reader"
     assert isinstance(line["ms"], int) and line["ms"] >= 0
+
+
+def test_success_event_includes_extra_fields(tmp_path, monkeypatch):
+    agent = tmp_path / "cursor-agent"
+    write_agent(
+        agent,
+        "import json\n"
+        "print(json.dumps({'type':'result','subtype':'success','is_error':False,"
+        "'result':'hello bullets'}))\n",
+    )
+    monkeypatch.setenv("K0_CURSOR_AGENT", str(agent))
+    monkeypatch.chdir(tmp_path)
+    set_event_context(run="run-1", step="validator")
+    set_event_extra({"redo": ["src/util.py"]})
+    assert invoke(MODE, "q") == "hello bullets"
+    line = json.loads((tmp_path / ".k0-mem" / "events.jsonl").read_text().splitlines()[-1])
+    assert line["redo"] == ["src/util.py"]
+    assert list(line)[:9] == [
+        "ts",
+        "run",
+        "step",
+        "mode",
+        "model",
+        "ms",
+        "chars",
+        "ok",
+        "err",
+    ]
+
+
+def test_update_last_event_merges_fields(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    events = tmp_path / ".k0-mem" / "events.jsonl"
+    events.parent.mkdir()
+    events.write_text(
+        json.dumps({"step": "validator", "ok": True}) + "\n",
+        encoding="utf-8",
+    )
+    update_last_event(redo=["src/app.py", "src/util.py"])
+    line = json.loads(events.read_text(encoding="utf-8").splitlines()[-1])
+    assert line == {
+        "step": "validator",
+        "ok": True,
+        "redo": ["src/app.py", "src/util.py"],
+    }
 

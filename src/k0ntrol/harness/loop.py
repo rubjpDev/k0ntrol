@@ -6,7 +6,12 @@ from collections.abc import Callable
 from pathlib import Path
 from uuid import uuid4
 
-from k0ntrol.backends.invoke import current_event_context, set_event_context
+from k0ntrol.backends.invoke import (
+    current_event_context,
+    set_event_context,
+    set_event_extra,
+    update_last_event,
+)
 from k0ntrol.frontends.mentions import MentionError, mention_paths
 from k0ntrol.harness.delegate import should_delegate
 from k0ntrol.harness.retrieve import agent_memory, custom_topology_text
@@ -381,11 +386,14 @@ def _write_coder_targets(
     config: dict,
     invoke: Invoke,
     write: Callable[[str], None],
+    keep: list[Path] | None = None,
 ) -> dict[Path, str]:
     befores: dict[Path, str] = {}
     written: list[Path] = []
     for target in targets:
-        refs = _coder_call_reference(reference_text, test_path, target, written, root)
+        refs = _coder_call_reference(
+            reference_text, test_path, target, written, root, keep or []
+        )
         coded, before = _write_coder(
             spec, target, test_path, refs, root, config, invoke
         )
@@ -401,10 +409,14 @@ def _coder_call_reference(
     target: Path,
     written: list[Path],
     root: Path,
+    keep: list[Path],
 ) -> str:
     refs = _coder_reference_text(reference_text, test_path, target, root)
     for path in written:
         refs = _append_written_reference(refs, path, root)
+    for path in keep:
+        if path != target and path.is_file():
+            refs = _append_written_reference(refs, path, root)
     return refs
 
 
@@ -478,6 +490,7 @@ def _validate_attempt(
             write,
             output,
             retries,
+            befores,
         )
         if result is None:
             return None
@@ -495,6 +508,7 @@ def _validation_retry(
     write: Callable[[str], None],
     output: str,
     retries: int,
+    befores: dict[Path, str],
 ) -> tuple[str, dict[Path, str], int] | None:
     summary = _with_event_step(invoke, "validator")(
         load_mode("validator", config),
@@ -505,19 +519,85 @@ def _validation_retry(
         _append_spec_text(updated_spec, root, "stuck")
         write("stuck")
         return None
+    redo = _select_redo_targets(
+        summary, targets, root, last_attempt=retries + 1 >= config["max_retries"]
+    )
+    _record_redo(redo, root, write)
     updated_befores = _retry_coder(
         updated_spec,
-        targets,
+        redo,
         test_path,
         reference_text,
         root,
         config,
         _with_event_step(invoke, "coder"),
         write,
+        keep=_skipped_targets(targets, redo),
     )
     if updated_befores is None:
         return None
-    return updated_spec, updated_befores, retries + 1
+    return updated_spec, {**befores, **updated_befores}, retries + 1
+
+
+def _parse_redo_paths(raw: str) -> list[str] | None:
+    collecting = False
+    paths: list[str] = []
+    for line in raw.splitlines():
+        stripped = line.strip()
+        if stripped.lower().startswith("redo:"):
+            collecting = True
+            continue
+        if collecting and stripped.startswith("- "):
+            paths.append(stripped[2:].strip().strip("`"))
+    if not collecting:
+        return None
+    return paths
+
+
+def _filter_redo_targets(
+    proposed: list[str] | None, targets: list[Path], root: Path
+) -> list[Path]:
+    if not proposed:
+        return list(targets)
+    allowed = {path.relative_to(root.resolve()).as_posix(): path for path in targets}
+    picked = {allowed[rel] for rel in proposed if rel in allowed}
+    selected = [path for path in targets if path in picked]
+    return selected or list(targets)
+
+
+def _select_redo_targets(
+    raw: str,
+    targets: list[Path],
+    root: Path,
+    last_attempt: bool = False,
+) -> list[Path]:
+    if last_attempt:
+        return list(targets)
+    return _filter_redo_targets(_parse_redo_paths(raw), targets, root)
+
+
+def _skipped_targets(targets: list[Path], redo: list[Path]) -> list[Path]:
+    chosen = set(redo)
+    return [path for path in targets if path not in chosen]
+
+
+def _relative_targets(targets: list[Path], root: Path) -> list[str]:
+    return [path.relative_to(root.resolve()).as_posix() for path in targets]
+
+
+def _show_redo(
+    targets: list[Path], root: Path, write: Callable[[str], None]
+) -> None:
+    write("↻ coder: " + " ".join(_relative_targets(targets, root)))
+
+
+def _record_redo(
+    targets: list[Path], root: Path, write: Callable[[str], None]
+) -> None:
+    rels = _relative_targets(targets, root)
+    _show_redo(targets, root, write)
+    set_event_extra({"redo": rels})
+    update_last_event(redo=rels)
 
 
 def _retry_coder(
@@ -529,6 +609,7 @@ def _retry_coder(
     config: dict,
     invoke: Invoke,
     write: Callable[[str], None],
+    keep: list[Path] | None = None,
 ) -> dict[Path, str] | None:
     try:
         return _write_coder_targets(
@@ -540,6 +621,7 @@ def _retry_coder(
             config,
             invoke,
             write,
+            keep=keep,
         )
     except CodeWriteError as error:
         write(str(error))
@@ -848,17 +930,20 @@ def _review_decision(
     updated_spec = _append_review(spec, root, review)
     if choice == "spec":
         return "spec"
+    redo = _select_redo_targets(review, targets, root)
+    _show_redo(redo, root, write)
     updated_befores = _write_coder_targets(
         updated_spec,
-        targets,
+        redo,
         test_paths[0],
         reference_text,
         root,
         config,
         coder_invoke,
         write,
+        keep=_skipped_targets(targets, redo),
     )
-    return updated_spec, updated_befores
+    return updated_spec, {**befores, **updated_befores}
 
 
 def _write_review(

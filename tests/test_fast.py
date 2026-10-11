@@ -233,6 +233,89 @@ def test_fast_red_suite_redoes_all_coder_targets(tmp_path):
     assert coder_files == ["a.py", "b.py", "a.py", "b.py", "a.py", "b.py"]
 
 
+def test_fast_red_suite_redoes_only_validator_picked_targets(tmp_path):
+    (tmp_path / "a.py").write_text("a original\n", encoding="utf-8")
+    (tmp_path / "b.py").write_text("b original\n", encoding="utf-8")
+    coder_files = []
+    redo_prompts = []
+
+    def fake_invoke(mode, prompt):
+        if mode.name == "tester":
+            return "FILE tests/test_fast.py\ndef test_fast():\n    assert False\n"
+        if mode.name == "coder":
+            if "Target:\na " in prompt:
+                coder_files.append("a.py")
+                return "FILE a.py\na v1\n"
+            if "Target:\nb " in prompt:
+                coder_files.append("b.py")
+                if "test_old failed" in prompt:
+                    redo_prompts.append(prompt)
+                    return "FILE b.py\nb v2\n"
+                return "FILE b.py\nb v1\n"
+            raise AssertionError(prompt)
+        return "- test_old failed\nredo:\n- b.py\n"
+
+    shown = []
+
+    def suite(root):
+        if "b v2" in (root / "b.py").read_text(encoding="utf-8"):
+            return 0, "ok\n"
+        return 1, "FAILED tests/test_old.py::test_old\n"
+
+    status = run_fast(
+        "change both @a.py @b.py",
+        root=tmp_path,
+        config=loop_config(),
+        read_line=lambda: "y",
+        write=shown.append,
+        invoke=fake_invoke,
+        bulk_read=lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("bulk")),
+        run_suite=suite,
+    )
+    assert status == "done"
+    assert coder_files == ["a.py", "b.py", "b.py"]
+    assert "↻ coder: b.py" in shown
+    assert redo_prompts
+    assert "a v1" in redo_prompts[0]
+    assert (tmp_path / "a.py").read_text(encoding="utf-8") == "a v1\n"
+    assert (tmp_path / "b.py").read_text(encoding="utf-8") == "b v2\n"
+
+
+def test_fast_last_retry_redoes_all_coder_targets(tmp_path):
+    (tmp_path / "a.py").write_text("a original\n", encoding="utf-8")
+    (tmp_path / "b.py").write_text("b original\n", encoding="utf-8")
+    coder_files = []
+
+    def fake_invoke(mode, prompt):
+        if mode.name == "tester":
+            return "FILE tests/test_fast.py\ndef test_fast():\n    assert False\n"
+        if mode.name == "coder":
+            if "Target:\na " in prompt:
+                coder_files.append("a.py")
+                return "FILE a.py\na BREAK\n"
+            if "Target:\nb " in prompt:
+                coder_files.append("b.py")
+                return "FILE b.py\nb BREAK\n"
+            raise AssertionError(prompt)
+        return "- test_old failed\nredo:\n- b.py\n"
+
+    shown = []
+    status = run_fast(
+        "change both @a.py @b.py",
+        root=tmp_path,
+        config=loop_config(),
+        read_line=lambda: "y",
+        write=shown.append,
+        invoke=fake_invoke,
+        bulk_read=lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("bulk")),
+        run_suite=lambda root: (1, "FAILED tests/test_old.py::test_old\n"),
+    )
+    assert status == "stuck"
+    assert coder_files == ["a.py", "b.py", "b.py", "a.py", "b.py"]
+    assert shown.count("↻ coder: b.py") == 1
+    assert shown.count("↻ coder: a.py b.py") == 1
+
+
 def test_green_suite_reaches_the_gate(tmp_path):
     (tmp_path / "a.py").write_text("a\n", encoding="utf-8")
 
