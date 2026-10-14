@@ -788,10 +788,17 @@ def _write_and_show_spec(
     write: Callable[[str], None],
 ) -> str:
     spec_invoke = _memory_invoke(invoke, prompt, root, config)
-    spec = spec_invoke(load_mode("spec", config), prompt)
+    spec = _trim_spec_to_goal(spec_invoke(load_mode("spec", config), prompt))
     (root / "spec.md").write_text(spec, encoding="utf-8")
     write(spec)
     return spec
+
+
+def _trim_spec_to_goal(spec: str) -> str:
+    index = spec.find("## Goal")
+    if index < 0:
+        return spec
+    return spec[index:]
 
 
 def _memory_invoke(invoke: Invoke, query: str, root: Path, config: dict) -> Invoke:

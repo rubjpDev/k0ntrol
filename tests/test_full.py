@@ -102,6 +102,112 @@ def test_full_rewrites_spec_until_yes(tmp_path):
     assert "y/n" in "\n".join(shown)
 
 
+def test_full_trims_spec_narration_before_goal(tmp_path):
+    seed_product(tmp_path)
+    shown = []
+
+    def fake_invoke(mode, prompt):
+        if mode.name == "tester":
+            return "FILE tests/test_app.py\ndef test_app():\n    assert True\n"
+        return (
+            "I'll read X.Now Y.## Goal\n"
+            "g\n"
+            "## Files\n"
+            "- tests/test_app.py (create)\n"
+            "- src/app.py (change)\n"
+        )
+
+    status = run_full(
+        "add checkout",
+        root=tmp_path,
+        config=loop_config(),
+        read_line=lambda: "y",
+        write=shown.append,
+        invoke=fake_invoke,
+        bulk_read=lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("bulk")
+        ),
+    )
+    assert status == "done"
+    spec = (tmp_path / "spec.md").read_text(encoding="utf-8")
+    assert spec.startswith("## Goal")
+    assert shown[0].startswith("## Goal")
+    assert "I'll read" not in spec
+    assert "I'll read" not in shown[0]
+
+
+def test_full_keeps_spec_without_goal_for_files_check(tmp_path):
+    seed_product(tmp_path)
+
+    def fake_invoke(mode, prompt):
+        return "I'll narrate only.\n## Files\n- src/app.py (change)\n"
+
+    shown = []
+    status = run_full(
+        "change the app",
+        root=tmp_path,
+        config=loop_config(max_retries=0),
+        read_line=lambda: (_ for _ in ()).throw(AssertionError("gate")),
+        write=shown.append,
+        invoke=fake_invoke,
+        bulk_read=lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("bulk")
+        ),
+    )
+
+    assert status == "stuck"
+    spec = (tmp_path / "spec.md").read_text(encoding="utf-8")
+    assert spec.startswith("I'll narrate only.")
+    assert shown[0].startswith("I'll narrate only.")
+    assert "## Files needs a test path" in "\n".join(shown)
+    assert "## Files needs a test path" in spec
+    assert "stuck" in shown
+
+
+def test_full_trims_spec_narration_on_files_retry(tmp_path):
+    seed_product(tmp_path)
+    shown = []
+
+    def fake_invoke(mode, prompt):
+        if mode.name == "tester":
+            return "FILE tests/test_app.py\ndef test_app():\n    assert True\n"
+        if "## Files needs a test path" in prompt:
+            return (
+                "I'll read X.Now Y.## Goal\n"
+                "g\n"
+                "## Files\n"
+                "- tests/test_app.py (create)\n"
+                "- src/app.py (change)\n"
+            )
+        return (
+            "I'll read X.Now Y.## Goal\n"
+            "g\n"
+            "## Files\n"
+            "- src/app.py (change)\n"
+        )
+
+    status = run_full(
+        "change the app",
+        root=tmp_path,
+        config=loop_config(max_retries=1),
+        read_line=lambda: "y",
+        write=shown.append,
+        invoke=fake_invoke,
+        bulk_read=lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("bulk")
+        ),
+    )
+
+    assert status == "done"
+    spec_writes = [text for text in shown if "## Goal" in text]
+    assert spec_writes
+    assert all(text.startswith("## Goal") for text in spec_writes)
+    assert all("I'll read" not in text for text in spec_writes)
+    spec = (tmp_path / "spec.md").read_text(encoding="utf-8")
+    assert spec.startswith("## Goal")
+    assert "I'll read" not in spec
+
+
 def test_full_delegates_a_large_file_before_spec(tmp_path):
     seed_product(tmp_path)
     big = tmp_path / "big.py"
