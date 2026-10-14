@@ -420,9 +420,126 @@ def test_full_stops_when_tester_writes_the_wrong_test_path(tmp_path):
     )
 
     assert status == "stuck"
-    assert names == ["spec", "tester", "tester"]
+    assert names == ["spec", "tester", "tester", "tester", "tester"]
     assert not (tmp_path / "tests/test_other.py").exists()
-    assert "tests/test_other.py" in "\n".join(shown)
+    error = (
+        "FILE path is not the expected test path: tests/test_app.py "
+        "(expected tests/test_other.py)"
+    )
+    assert error in shown
+    assert shown.count("y/n") == 1
+
+
+def test_full_retries_tester_when_file_is_the_wrong_test_path(tmp_path):
+    seed_product(tmp_path)
+    test_body = "def test_app():\n    assert False\n"
+    seed_product(tmp_path, "tests/test_app.py", test_body)
+    tester_prompts = []
+
+    def fake_invoke(mode, prompt):
+        if mode.name == "spec":
+            return files_spec(
+                ("tests/test_app.py", "change"),
+                ("src/app.py", "change"),
+            )
+        if mode.name == "tester":
+            tester_prompts.append(prompt)
+            if len(tester_prompts) == 1:
+                return "FILE tests/test_other.py\ndef test_other():\n    assert True\n"
+            return "FILE tests/test_app.py\ndef test_app():\n    assert True\n"
+        raise AssertionError(f"unexpected mode: {mode.name}")
+
+    shown = []
+    status = run_full(
+        "change the app",
+        root=tmp_path,
+        config=loop_config(),
+        read_line=iter(["y", "y"]).__next__,
+        write=shown.append,
+        invoke=fake_invoke,
+        bulk_read=lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("bulk")
+        ),
+    )
+
+    assert status == "done"
+    assert f"Target:\n{test_body}" in tester_prompts[0]
+    assert "Target:\n<new file>" not in tester_prompts[0]
+    error = (
+        "FILE path is not the expected test path: tests/test_other.py "
+        "(expected tests/test_app.py)"
+    )
+    assert error in shown
+    assert error in (tmp_path / "spec.md").read_text(encoding="utf-8")
+    assert len(tester_prompts) == 2
+    assert shown.count("y/n") == 2
+    assert not (tmp_path / "tests/test_other.py").exists()
+
+
+def test_full_stops_when_tester_omits_the_file_prefix(tmp_path):
+    seed_product(tmp_path)
+
+    def fake_invoke(mode, prompt):
+        if mode.name == "spec":
+            return files_spec(
+                ("tests/test_app.py", "create"),
+                ("src/app.py", "change"),
+            )
+        if mode.name == "tester":
+            return "def test_app():\n    assert True\n"
+        raise AssertionError(f"unexpected mode: {mode.name}")
+
+    shown = []
+    status = run_full(
+        "change the app",
+        root=tmp_path,
+        config=loop_config(),
+        read_line=iter(["y"]).__next__,
+        write=shown.append,
+        invoke=fake_invoke,
+        bulk_read=lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("bulk")
+        ),
+    )
+
+    assert status == "stuck"
+    text = "\n".join(shown)
+    assert "response must start with FILE <relative-path>" in text
+    assert "FILE path is not a test path" not in text
+    assert shown.count("y/n") == 1
+
+
+def test_full_stops_when_tester_file_is_not_a_test_path(tmp_path):
+    seed_product(tmp_path)
+
+    def fake_invoke(mode, prompt):
+        if mode.name == "spec":
+            return files_spec(
+                ("tests/test_app.py", "create"),
+                ("src/app.py", "change"),
+            )
+        if mode.name == "tester":
+            return "FILE src/app.py\nchanged\n"
+        raise AssertionError(f"unexpected mode: {mode.name}")
+
+    shown = []
+    status = run_full(
+        "change the app",
+        root=tmp_path,
+        config=loop_config(),
+        read_line=iter(["y"]).__next__,
+        write=shown.append,
+        invoke=fake_invoke,
+        bulk_read=lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("bulk")
+        ),
+    )
+
+    assert status == "stuck"
+    text = "\n".join(shown)
+    assert "FILE path is not a test path: src/app.py" in text
+    assert "expected" not in text
+    assert shown.count("y/n") == 1
 
 
 def test_full_review_code_runs_a_fresh_coder_and_reviewer(tmp_path):

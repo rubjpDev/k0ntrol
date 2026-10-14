@@ -23,6 +23,10 @@ BulkRead = Callable[..., str]
 RunSuite = Callable[[Path], tuple[int, str]]
 
 
+class UnexpectedTestPathError(CodeWriteError):
+    """FILE names a test path other than the current ## Files target."""
+
+
 def _begin_event_run() -> None:
     set_event_context(run=uuid4().hex, step="")
 
@@ -869,16 +873,19 @@ def _test_gate_loop(
 ) -> str:
     mode = load_mode("tester", config)
     tester_invoke = _with_event_step(invoke, "tester")
-    for attempt in range(2):
-        _write_test_files(
+    for _attempt in range(2):
+        spec = _write_test_files(
             spec,
             test_paths,
             reference_text,
             root,
+            config,
             mode,
             _memory_invoke(tester_invoke, spec, root, config),
             write,
         )
+        if spec is None:
+            return "stuck"
         if _read_gate(read_line, write) == "y":
             return _continue_full_after_tests(
                 spec=spec,
@@ -894,9 +901,7 @@ def _test_gate_loop(
                 run_suite=run_suite,
             )
         spec = _append_rejection(spec, root)
-        if attempt == 1:
-            write("stuck")
-            return "stuck"
+    write("stuck")
     return "stuck"
 
 
@@ -905,21 +910,58 @@ def _write_test_files(
     test_paths: list[str],
     reference_text: str,
     root: Path,
+    config: dict,
     mode: ModeSpec,
     invoke: Invoke,
     write: Callable[[str], None],
-) -> None:
+) -> str | None:
     for relative in test_paths:
-        expected = (root / relative).resolve()
-        written = code_write(
+        spec = _write_one_test_file(
             spec,
-            root=root,
-            mode=mode,
-            invoke=_test_invoke(invoke, expected, root),
-            target=None,
-            reference_text=reference_text,
+            relative,
+            reference_text,
+            root,
+            config,
+            mode,
+            invoke,
+            write,
         )
+        if spec is None:
+            return None
+    return spec
+
+
+def _write_one_test_file(
+    spec: str,
+    relative: str,
+    reference_text: str,
+    root: Path,
+    config: dict,
+    mode: ModeSpec,
+    invoke: Invoke,
+    write: Callable[[str], None],
+) -> str | None:
+    expected = (root / relative).resolve()
+    retries = 0
+    while True:
+        try:
+            written = code_write(
+                spec,
+                root=root,
+                mode=mode,
+                invoke=_test_invoke(invoke, expected, root),
+                target=expected,
+                reference_text=reference_text,
+            )
+        except UnexpectedTestPathError as error:
+            spec = _append_spec_text(spec, root, str(error))
+            write(str(error))
+            if retries >= config["max_retries"]:
+                return None
+            retries += 1
+            continue
         _show_file(written, root, write)
+        return spec
 
 
 def _continue_full_after_tests(
@@ -1362,22 +1404,44 @@ def _test_invoke(
 ) -> Invoke:
     def guarded(mode: ModeSpec, prompt: str) -> str:
         response = invoke(mode, prompt)
-        relative = response.partition("\n")[0].removeprefix("FILE ").strip()
-        candidate = Path(relative)
-        matches_expected = (
-            expected is None
-            or not candidate.is_absolute()
-            and ((root or Path.cwd()) / candidate).resolve() == expected
-        )
-        if (
-            not response.startswith("FILE ")
-            or not _is_test_path(relative)
-            or not matches_expected
-        ):
-            raise CodeWriteError(f"FILE path is not a test path: {relative}")
+        error = _test_file_error(response, expected, root)
+        if error is not None:
+            raise error
         return response
 
     return guarded
+
+
+def _test_file_error(
+    response: str,
+    expected: Path | None,
+    root: Path | None,
+) -> CodeWriteError | None:
+    relative = response.partition("\n")[0].removeprefix("FILE ").strip()
+    if not response.startswith("FILE "):
+        return CodeWriteError("response must start with FILE <relative-path>")
+    if not _is_test_path(relative):
+        return CodeWriteError(f"FILE path is not a test path: {relative}")
+    if expected is None or _same_test_path(relative, expected, root):
+        return None
+    return UnexpectedTestPathError(
+        f"FILE path is not the expected test path: {relative} "
+        f"(expected {_display_repo_path(expected, root)})"
+    )
+
+
+def _same_test_path(relative: str, expected: Path, root: Path | None) -> bool:
+    candidate = Path(relative)
+    if candidate.is_absolute():
+        return False
+    base = root if root is not None else Path.cwd()
+    return (base / candidate).resolve() == expected
+
+
+def _display_repo_path(path: Path, root: Path | None) -> str:
+    if root is None:
+        return path.as_posix()
+    return path.relative_to(root.resolve()).as_posix()
 
 
 def _coder_invoke(invoke: Invoke, target: Path, root: Path) -> Invoke:
