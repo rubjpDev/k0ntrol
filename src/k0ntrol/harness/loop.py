@@ -954,27 +954,41 @@ def _write_one_test_file(
     expected = (root / relative).resolve()
     retries = 0
     while True:
-        try:
-            written = code_write(
-                spec,
-                root=root,
-                mode=mode,
-                invoke=_test_invoke(invoke, expected, root),
-                target=expected,
-                reference_text=reference_text,
-            )
-        except CodeWriteError as error:
-            if not _retryable_tester_error(error):
-                raise
-            spec = _append_spec_text(spec, root, str(error))
-            write(str(error))
-            if retries >= config["max_retries"]:
-                write("stuck")
-                return None
-            retries += 1
-            continue
-        _show_file(written, root, write)
-        return spec
+        written = _try_write_test_file(
+            spec, root, mode, invoke, expected, reference_text
+        )
+        if isinstance(written, Path):
+            _show_file(written, root, write)
+            return spec
+        spec = _append_spec_text(spec, root, str(written))
+        write(str(written))
+        if retries >= config["max_retries"]:
+            write("stuck")
+            return None
+        retries += 1
+
+
+def _try_write_test_file(
+    spec: str,
+    root: Path,
+    mode: ModeSpec,
+    invoke: Invoke,
+    expected: Path,
+    reference_text: str,
+) -> Path | CodeWriteError:
+    try:
+        return code_write(
+            spec,
+            root=root,
+            mode=mode,
+            invoke=_test_invoke(invoke, expected, root),
+            target=expected,
+            reference_text=reference_text,
+        )
+    except CodeWriteError as error:
+        if not _retryable_tester_error(error):
+            raise
+        return error
 
 
 def _retryable_tester_error(error: CodeWriteError) -> bool:
