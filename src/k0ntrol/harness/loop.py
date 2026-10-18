@@ -27,6 +27,9 @@ class UnexpectedTestPathError(CodeWriteError):
     """FILE names a test path other than the current ## Files target."""
 
 
+_MISSING_FILE_PREFIX = "response must start with FILE <relative-path>"
+
+
 def _begin_event_run() -> None:
     set_event_context(run=uuid4().hex, step="")
 
@@ -960,15 +963,24 @@ def _write_one_test_file(
                 target=expected,
                 reference_text=reference_text,
             )
-        except UnexpectedTestPathError as error:
+        except CodeWriteError as error:
+            if not _retryable_tester_error(error):
+                raise
             spec = _append_spec_text(spec, root, str(error))
             write(str(error))
             if retries >= config["max_retries"]:
+                write("stuck")
                 return None
             retries += 1
             continue
         _show_file(written, root, write)
         return spec
+
+
+def _retryable_tester_error(error: CodeWriteError) -> bool:
+    return isinstance(error, UnexpectedTestPathError) or str(error) == (
+        _MISSING_FILE_PREFIX
+    )
 
 
 def _continue_full_after_tests(
@@ -1426,7 +1438,7 @@ def _test_file_error(
 ) -> CodeWriteError | None:
     relative = response.partition("\n")[0].removeprefix("FILE ").strip()
     if not response.startswith("FILE "):
-        return CodeWriteError("response must start with FILE <relative-path>")
+        return CodeWriteError(_MISSING_FILE_PREFIX)
     if not _is_test_path(relative):
         return CodeWriteError(f"FILE path is not a test path: {relative}")
     if expected is None or _same_test_path(relative, expected, root):

@@ -582,10 +582,51 @@ def test_full_retries_tester_when_file_is_the_wrong_test_path(tmp_path):
     assert not (tmp_path / "tests/test_other.py").exists()
 
 
-def test_full_stops_when_tester_omits_the_file_prefix(tmp_path):
+def test_full_retries_tester_when_it_omits_the_file_prefix(tmp_path):
     seed_product(tmp_path)
+    tester_prompts = []
 
     def fake_invoke(mode, prompt):
+        if mode.name == "spec":
+            return files_spec(
+                ("tests/test_app.py", "create"),
+                ("src/app.py", "change"),
+            )
+        if mode.name == "tester":
+            tester_prompts.append(prompt)
+            if len(tester_prompts) == 1:
+                return "def test_app():\n    assert True\n"
+            return "FILE tests/test_app.py\ndef test_app():\n    assert True\n"
+        raise AssertionError(f"unexpected mode: {mode.name}")
+
+    shown = []
+    status = run_full(
+        "change the app",
+        root=tmp_path,
+        config=loop_config(),
+        read_line=iter(["y", "y"]).__next__,
+        write=shown.append,
+        invoke=fake_invoke,
+        bulk_read=lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("bulk")
+        ),
+    )
+
+    assert status == "done"
+    error = "response must start with FILE <relative-path>"
+    assert error in shown
+    assert error in (tmp_path / "spec.md").read_text(encoding="utf-8")
+    assert "FILE path is not a test path" not in "\n".join(shown)
+    assert len(tester_prompts) == 2
+    assert shown.count("y/n") == 2
+
+
+def test_full_stops_when_tester_omits_the_file_prefix(tmp_path):
+    seed_product(tmp_path)
+    names = []
+
+    def fake_invoke(mode, prompt):
+        names.append(mode.name)
         if mode.name == "spec":
             return files_spec(
                 ("tests/test_app.py", "create"),
@@ -599,7 +640,7 @@ def test_full_stops_when_tester_omits_the_file_prefix(tmp_path):
     status = run_full(
         "change the app",
         root=tmp_path,
-        config=loop_config(),
+        config=loop_config(max_retries=0),
         read_line=iter(["y"]).__next__,
         write=shown.append,
         invoke=fake_invoke,
@@ -609,9 +650,12 @@ def test_full_stops_when_tester_omits_the_file_prefix(tmp_path):
     )
 
     assert status == "stuck"
-    text = "\n".join(shown)
-    assert "response must start with FILE <relative-path>" in text
-    assert "FILE path is not a test path" not in text
+    error = "response must start with FILE <relative-path>"
+    assert error in shown
+    assert error in (tmp_path / "spec.md").read_text(encoding="utf-8")
+    assert "FILE path is not a test path" not in "\n".join(shown)
+    assert names == ["spec", "tester"]
+    assert "stuck" in shown
     assert shown.count("y/n") == 1
 
 
