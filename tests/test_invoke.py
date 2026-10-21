@@ -48,6 +48,8 @@ def test_invoke_returns_result_and_sends_instructions_with_model(tmp_path, monke
     argv = json.loads(argv_file.read_text())
     assert argv == [
         "-p",
+        "--mode",
+        "ask",
         "--output-format",
         "json",
         "--model",
@@ -75,6 +77,8 @@ def test_invoke_omits_trust_when_k0_mem_is_empty_dir(tmp_path, monkeypatch):
     argv = json.loads(argv_file.read_text())
     assert argv == [
         "-p",
+        "--mode",
+        "ask",
         "--output-format",
         "json",
         "--model",
@@ -103,6 +107,8 @@ def test_invoke_omits_trust_on_second_call_after_events_file(tmp_path, monkeypat
     argv = json.loads(argv_file.read_text())
     assert argv == [
         "-p",
+        "--mode",
+        "ask",
         "--output-format",
         "json",
         "--model",
@@ -132,6 +138,8 @@ def test_invoke_passes_trust_when_k0_mem_exists(tmp_path, monkeypatch):
     argv = json.loads(argv_file.read_text())
     assert argv == [
         "-p",
+        "--mode",
+        "ask",
         "--output-format",
         "json",
         "--model",

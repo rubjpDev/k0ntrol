@@ -61,7 +61,10 @@ def _build_prompt(mode: ModeSpec, prompt: str) -> str:
 def _build_command(mode: ModeSpec, prompt: str) -> list[str]:
     agent_bin = _resolve_agent_binary()
     cli_prompt = _build_prompt(mode, prompt)
-    command = [agent_bin, "-p", "--output-format", "json", "--model", mode.model]
+    # -p alone grants write tools; ask mode is read-only, so code_write stays
+    # the only writer (D22).
+    command = [agent_bin, "-p", "--mode", "ask", "--output-format", "json"]
+    command += ["--model", mode.model]
     if (Path.cwd() / ".k0-mem" / "config.yaml").is_file():
         command.append("--trust")
     command.append(cli_prompt)

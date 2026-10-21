@@ -85,7 +85,9 @@ def run_fast(
             spec,
             root=root,
             mode=load_mode("tester", config),
-            invoke=_test_invoke(_memory_invoke(tester_invoke, spec, root, config)),
+            invoke=_test_invoke(
+                _memory_invoke(tester_invoke, spec, root, config), None, root
+            ),
             target=None,
             reference_text=reference_text,
         )
@@ -1536,6 +1538,7 @@ def _test_invoke(
         response = invoke(mode, prompt)
         error = _test_file_error(response, expected, root)
         if error is not None:
+            _save_rejected(response, error, root)
             raise error
         return response
 
@@ -1578,12 +1581,28 @@ def _display_repo_path(path: Path, root: Path | None) -> str:
 def _coder_invoke(invoke: Invoke, target: Path, root: Path) -> Invoke:
     def guarded(mode: ModeSpec, prompt: str) -> str:
         response = invoke(mode, prompt)
-        relative, _body = parse_file_response(response)
-        if not _is_coder_target(relative, target, root):
-            raise CodeWriteError(f"FILE path is not the coder target: {relative}")
+        try:
+            _check_coder_response(response, target, root)
+        except CodeWriteError as error:
+            _save_rejected(response, error, root)
+            raise
         return response
 
     return guarded
+
+
+def _check_coder_response(response: str, target: Path, root: Path) -> None:
+    relative, _body = parse_file_response(response)
+    if not _is_coder_target(relative, target, root):
+        raise CodeWriteError(f"FILE path is not the coder target: {relative}")
+
+
+def _save_rejected(response: str, error: Exception, root: Path | None) -> None:
+    # ponytail: append-only, grows per rejection; rotate if it ever gets large
+    path = (root or Path.cwd()) / ".k0-mem" / "rejected-writes.txt"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as f:
+        f.write(f"--- {error}\n{response}\n")
 
 
 def _is_coder_target(relative: str, target: Path, root: Path) -> bool:

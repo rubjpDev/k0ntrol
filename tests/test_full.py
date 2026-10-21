@@ -655,6 +655,8 @@ def test_full_stops_when_tester_omits_the_file_prefix(tmp_path):
     assert error in (tmp_path / "spec.md").read_text(encoding="utf-8")
     assert "FILE path is not a test path" not in "\n".join(shown)
     assert names == ["spec", "tester"]
+    rejected = tmp_path / ".k0-mem" / "rejected-writes.txt"
+    assert "def test_app():\n    assert True\n" in rejected.read_text(encoding="utf-8")
     assert "stuck" in shown
     assert shown.count("y/n") == 1
 
@@ -822,6 +824,8 @@ def test_full_stops_when_coder_omits_the_file_prefix(tmp_path):
     assert error in shown
     assert error in (tmp_path / "spec.md").read_text(encoding="utf-8")
     assert names == ["spec", "tester", "coder"]
+    rejected = tmp_path / ".k0-mem" / "rejected-writes.txt"
+    assert "changed without a file line\n" in rejected.read_text(encoding="utf-8")
     assert "stuck" in shown
     assert shown.count("y/n") == 2
 
