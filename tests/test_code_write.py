@@ -137,3 +137,102 @@ def test_code_write_rejects_project_topology(tmp_path):
             reference_text="",
         )
     assert dest.read_text(encoding="utf-8") == "human\n"
+
+
+def _write(tmp_path, response, target=None):
+    return code_write(
+        "spec",
+        root=tmp_path,
+        mode=MODE,
+        invoke=lambda mode, prompt: response,
+        target=target,
+        reference_text="",
+    )
+
+
+def test_code_write_drops_preamble_before_file_line(tmp_path):
+    written = _write(
+        tmp_path,
+        "I'll draft the tests now.\nFILE tests/test_app.py\ndef test_one():\n    assert False\n",
+    )
+    assert written == tmp_path / "tests" / "test_app.py"
+    assert written.read_text(encoding="utf-8") == "def test_one():\n    assert False\n"
+
+
+def test_code_write_unwraps_outer_fence_around_file_line(tmp_path):
+    fence = "`" * 3
+    written = _write(
+        tmp_path,
+        f"{fence}python\nFILE tests/test_app.py\ndef test_one():\n    assert False\n{fence}\n",
+    )
+    assert written.read_text(encoding="utf-8") == "def test_one():\n    assert False\n"
+
+
+def test_code_write_accepts_file_line_without_trailing_newline(tmp_path):
+    written = _write(tmp_path, "FILE src/app.py")
+    assert written == tmp_path / "src" / "app.py"
+    assert written.read_text(encoding="utf-8") == "\n"
+
+
+def test_code_write_strips_backticks_around_file_path(tmp_path):
+    written = _write(tmp_path, "FILE `src/app.py`\nprint(1)\n")
+    assert written == tmp_path / "src" / "app.py"
+    assert written.read_text(encoding="utf-8") == "print(1)\n"
+
+
+def test_code_write_accepts_indented_file_line(tmp_path):
+    written = _write(tmp_path, "  FILE src/app.py\nprint(1)\n")
+    assert written.read_text(encoding="utf-8") == "print(1)\n"
+
+
+def test_code_write_skips_blank_lines_before_file_line(tmp_path):
+    written = _write(tmp_path, "\n\nFILE src/app.py\nprint(1)\n")
+    assert written.read_text(encoding="utf-8") == "print(1)\n"
+
+
+def test_code_write_accepts_crlf_file_envelope(tmp_path):
+    written = _write(
+        tmp_path,
+        "thinking\r\nFILE src/app.py\r\nprint(1)\r\n",
+    )
+    assert written.read_text(encoding="utf-8") == "print(1)\n"
+
+
+def test_code_write_finds_file_line_inside_preamble_then_fence(tmp_path):
+    fence = "`" * 3
+    written = _write(
+        tmp_path,
+        (
+            "I'll draft it.\n"
+            f"{fence}python\n"
+            "FILE tests/test_app.py\n"
+            "def test_one():\n"
+            "    assert False\n"
+            f"{fence}\n"
+        ),
+    )
+    assert written.read_text(encoding="utf-8") == "def test_one():\n    assert False\n"
+
+
+def test_code_write_drops_preamble_inside_outer_fence(tmp_path):
+    fence = "`" * 3
+    written = _write(
+        tmp_path,
+        (
+            f"{fence}\n"
+            "I'll draft it.\n"
+            "FILE src/app.py\n"
+            "print(1)\n"
+            f"{fence}\n"
+        ),
+    )
+    assert written.read_text(encoding="utf-8") == "print(1)\n"
+
+
+def test_code_write_does_not_invent_file_line_from_thinking(tmp_path):
+    with pytest.raises(CodeWriteError, match="response must start with FILE"):
+        _write(
+            tmp_path,
+            "The file should start with FILE tests/test_app.py but here is thinking.\n",
+        )
+

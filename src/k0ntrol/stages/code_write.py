@@ -23,7 +23,7 @@ def code_write(
     root_path = root.resolve()
     prompt = _build_prompt(spec, target, reference_text)
     response = invoke(mode, prompt)
-    relative, body = _parse_response(response)
+    relative, body = parse_file_response(response)
     path = _resolve_output(relative, root_path)
     if target is not None and path != _resolve_target(target, root_path):
         raise CodeWriteError(f"FILE path does not match target: {relative}")
@@ -32,6 +32,17 @@ def code_write(
         body += "\n"
     path.write_text(body, encoding="utf-8")
     return path
+
+
+def parse_file_response(response: str) -> tuple[str, str]:
+    text = _unwrap_outer_fence(_normalize_response(response))
+    header, body = _split_file_header(text)
+    if header is None:
+        raise CodeWriteError("response must start with FILE <relative-path>")
+    relative = _clean_file_path(header)
+    if not relative:
+        raise CodeWriteError("response must name a file")
+    return relative, _strip_fences(body)
 
 
 def _build_prompt(spec: str, target: Path | None, reference_text: str) -> str:
@@ -48,14 +59,51 @@ def _build_prompt(spec: str, target: Path | None, reference_text: str) -> str:
     return prompt
 
 
-def _parse_response(response: str) -> tuple[str, str]:
-    first_line, separator, body = response.partition("\n")
-    if not separator or not first_line.startswith("FILE "):
-        raise CodeWriteError("response must start with FILE <relative-path>")
-    relative = first_line[5:].strip()
-    if not relative:
-        raise CodeWriteError("response must name a file")
-    return relative, _strip_fences(body)
+def _normalize_response(response: str) -> str:
+    return response.lstrip("\ufeff").strip()
+
+
+def _unwrap_outer_fence(text: str) -> str:
+    lines = text.splitlines()
+    if not lines or not lines[0].startswith("```"):
+        return text
+    inner = lines[1:]
+    if inner and inner[-1].strip() == "```":
+        inner = inner[:-1]
+    return "\n".join(inner)
+
+
+def _split_file_header(text: str) -> tuple[str | None, str]:
+    lines = text.splitlines()
+    for index, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped.startswith("FILE "):
+            return stripped[5:], _body_after_file(lines, index)
+    return None, text
+
+
+def _body_after_file(lines: list[str], index: int) -> str:
+    body_lines = lines[index + 1 :]
+    if _file_line_is_fenced(lines, index):
+        body_lines = _drop_trailing_fence(body_lines)
+    return "\n".join(body_lines)
+
+
+def _file_line_is_fenced(lines: list[str], index: int) -> bool:
+    return index > 0 and lines[index - 1].strip().startswith("```")
+
+
+def _drop_trailing_fence(lines: list[str]) -> list[str]:
+    if lines and lines[-1].strip() == "```":
+        return lines[:-1]
+    return lines
+
+
+def _clean_file_path(raw: str) -> str:
+    path = raw.strip()
+    if len(path) >= 2 and path[0] == "`" and path[-1] == "`":
+        return path[1:-1].strip()
+    return path
 
 
 def _resolve_output(relative: str, root: Path) -> Path:

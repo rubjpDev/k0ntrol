@@ -15,7 +15,11 @@ from k0ntrol.frontends.mentions import MentionError, mention_paths
 from k0ntrol.harness.delegate import should_delegate
 from k0ntrol.harness.retrieve import agent_memory, custom_topology_text
 from k0ntrol.modespec import ModeSpec, load_mode
-from k0ntrol.stages.code_write import CodeWriteError, code_write
+from k0ntrol.stages.code_write import (
+    CodeWriteError,
+    code_write,
+    parse_file_response,
+)
 
 
 Invoke = Callable[[ModeSpec, str], str]
@@ -92,19 +96,17 @@ def run_fast(
     targets = _mention_non_test_paths(paths, root)
     if not targets:
         return "tested"
-    try:
-        befores = _write_coder_targets(
-            spec,
-            targets,
-            written,
-            reference_text,
-            root,
-            config,
-            _with_event_step(invoke, "coder"),
-            write,
-        )
-    except CodeWriteError as error:
-        write(str(error))
+    befores = _write_coder_or_stuck(
+        spec,
+        targets,
+        written,
+        reference_text,
+        root,
+        config,
+        _with_event_step(invoke, "coder"),
+        write,
+    )
+    if befores is None:
         return "stuck"
     if run_suite is None:
         return "tested"
@@ -424,17 +426,71 @@ def _write_coder(
     root: Path,
     config: dict,
     invoke: Invoke,
-) -> tuple[Path, str]:
-    before = target.read_text(encoding="utf-8") if target.is_file() else ""
-    coded = code_write(
-        spec,
-        root=root,
-        mode=load_mode("coder", config),
-        invoke=_coder_invoke(_memory_invoke(invoke, spec, root, config), target, root),
-        target=target,
-        reference_text=reference_text,
-    )
-    return coded, before
+    write: Callable[[str], None],
+) -> tuple[Path, str, str] | None:
+    before = _coder_before(target)
+    retries = 0
+    current = spec
+    while True:
+        coded = _try_write_coder_file(
+            current, target, reference_text, root, config, invoke
+        )
+        if isinstance(coded, Path):
+            return coded, before, current
+        current = _retry_write_spec(current, root, config, write, coded, retries)
+        if current is None:
+            return None
+        retries += 1
+
+
+def _coder_before(target: Path) -> str:
+    return target.read_text(encoding="utf-8") if target.is_file() else ""
+
+
+def _try_write_coder_file(
+    spec: str,
+    target: Path,
+    reference_text: str,
+    root: Path,
+    config: dict,
+    invoke: Invoke,
+) -> Path | CodeWriteError:
+    try:
+        return _invoke_coder_write(
+            spec, target, reference_text, root, config, invoke
+        )
+    except CodeWriteError as error:
+        if not _retryable_write_error(error):
+            raise
+        return error
+
+
+def _write_coder_or_stuck(
+    spec: str,
+    targets: list[Path],
+    test_path: Path,
+    reference_text: str,
+    root: Path,
+    config: dict,
+    invoke: Invoke,
+    write: Callable[[str], None],
+    kept: list[Path] | None = None,
+) -> dict[Path, str] | None:
+    try:
+        return _write_coder_targets(
+            spec,
+            targets,
+            test_path,
+            reference_text,
+            root,
+            config,
+            invoke,
+            write,
+            kept=kept,
+        )
+    except CodeWriteError as error:
+        write(str(error))
+        return None
 
 
 def _write_coder_targets(
@@ -447,20 +503,58 @@ def _write_coder_targets(
     invoke: Invoke,
     write: Callable[[str], None],
     kept: list[Path] | None = None,
-) -> dict[Path, str]:
+) -> dict[Path, str] | None:
     befores: dict[Path, str] = {}
     written: list[Path] = []
+    current = spec
     for target in targets:
         refs = _coder_call_reference(
             reference_text, test_path, target, written, root, kept or []
         )
-        coded, before = _write_coder(
-            spec, target, test_path, refs, root, config, invoke
+        result = _write_coder(
+            current, target, test_path, refs, root, config, invoke, write
         )
+        if result is None:
+            return None
+        coded, before, current = result
         _show_file(coded, root, write)
         befores[target] = before
         written.append(coded)
     return befores
+
+
+def _invoke_coder_write(
+    spec: str,
+    target: Path,
+    reference_text: str,
+    root: Path,
+    config: dict,
+    invoke: Invoke,
+) -> Path:
+    return code_write(
+        spec,
+        root=root,
+        mode=load_mode("coder", config),
+        invoke=_coder_invoke(_memory_invoke(invoke, spec, root, config), target, root),
+        target=target,
+        reference_text=reference_text,
+    )
+
+
+def _retry_write_spec(
+    spec: str,
+    root: Path,
+    config: dict,
+    write: Callable[[str], None],
+    error: CodeWriteError,
+    retries: int,
+) -> str | None:
+    updated = _append_spec_text(spec, root, str(error))
+    write(str(error))
+    if retries >= config["max_retries"]:
+        write("stuck")
+        return None
+    return updated
 
 
 def _coder_call_reference(
@@ -738,21 +832,17 @@ def _retry_coder(
     write: Callable[[str], None],
     kept: list[Path] | None = None,
 ) -> dict[Path, str] | None:
-    try:
-        return _write_coder_targets(
-            spec,
-            targets,
-            test_path,
-            reference_text,
-            root,
-            config,
-            invoke,
-            write,
-            kept=kept,
-        )
-    except CodeWriteError as error:
-        write(str(error))
-        return None
+    return _write_coder_or_stuck(
+        spec,
+        targets,
+        test_path,
+        reference_text,
+        root,
+        config,
+        invoke,
+        write,
+        kept=kept,
+    )
 
 
 def _validator_prompt(spec: str, output: str) -> str:
@@ -986,14 +1076,17 @@ def _try_write_test_file(
             reference_text=reference_text,
         )
     except CodeWriteError as error:
-        if not _retryable_tester_error(error):
+        if not _retryable_write_error(error):
             raise
         return error
 
 
-def _retryable_tester_error(error: CodeWriteError) -> bool:
-    return isinstance(error, UnexpectedTestPathError) or str(error) == (
-        _MISSING_FILE_PREFIX
+def _retryable_write_error(error: CodeWriteError) -> bool:
+    message = str(error)
+    return (
+        isinstance(error, UnexpectedTestPathError)
+        or message == _MISSING_FILE_PREFIX
+        or message.startswith("FILE path is not the coder target:")
     )
 
 
@@ -1027,6 +1120,8 @@ def _continue_full_after_tests(
         _with_event_step(invoke, "coder"),
         write,
     )
+    if befores is None:
+        return "stuck"
     return _validate_full(
         spec,
         befores,
@@ -1137,6 +1232,8 @@ def _review_decision(
         write,
         kept=kept,
     )
+    if updated_befores is None:
+        return "stuck"
     return updated_spec, {**befores, **updated_befores}
 
 
@@ -1450,9 +1547,10 @@ def _test_file_error(
     expected: Path | None,
     root: Path | None,
 ) -> CodeWriteError | None:
-    relative = response.partition("\n")[0].removeprefix("FILE ").strip()
-    if not response.startswith("FILE "):
-        return CodeWriteError(_MISSING_FILE_PREFIX)
+    try:
+        relative, _body = parse_file_response(response)
+    except CodeWriteError as error:
+        return error
     if not _is_test_path(relative):
         return CodeWriteError(f"FILE path is not a test path: {relative}")
     if expected is None or _same_test_path(relative, expected, root):
@@ -1480,18 +1578,19 @@ def _display_repo_path(path: Path, root: Path | None) -> str:
 def _coder_invoke(invoke: Invoke, target: Path, root: Path) -> Invoke:
     def guarded(mode: ModeSpec, prompt: str) -> str:
         response = invoke(mode, prompt)
-        first_line = response.partition("\n")[0]
-        relative = first_line.removeprefix("FILE ").strip()
-        candidate = Path(relative)
-        if (
-            not response.startswith("FILE ")
-            or candidate.is_absolute()
-            or (root / candidate).resolve() != target.resolve()
-        ):
+        relative, _body = parse_file_response(response)
+        if not _is_coder_target(relative, target, root):
             raise CodeWriteError(f"FILE path is not the coder target: {relative}")
         return response
 
     return guarded
+
+
+def _is_coder_target(relative: str, target: Path, root: Path) -> bool:
+    candidate = Path(relative)
+    if candidate.is_absolute():
+        return False
+    return (root / candidate).resolve() == target.resolve()
 
 
 def _show_file(path: Path, root: Path, write: Callable[[str], None]) -> None:

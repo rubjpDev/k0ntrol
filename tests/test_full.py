@@ -659,6 +659,215 @@ def test_full_stops_when_tester_omits_the_file_prefix(tmp_path):
     assert shown.count("y/n") == 1
 
 
+def test_full_tester_accepts_file_line_after_preamble(tmp_path):
+    seed_product(tmp_path)
+    tester_calls = []
+
+    def fake_invoke(mode, prompt):
+        if mode.name == "spec":
+            return files_spec(
+                ("tests/test_app.py", "create"),
+                ("src/app.py", "change"),
+            )
+        if mode.name == "tester":
+            tester_calls.append(prompt)
+            return (
+                "I'll draft the tests now.\n"
+                "FILE tests/test_app.py\n"
+                "def test_app():\n"
+                "    assert True\n"
+            )
+        if mode.name == "coder":
+            return "FILE src/app.py\nchanged\n"
+        return "FILE review.md\nLooks good.\n"
+
+    shown = []
+    status = run_full(
+        "change the app",
+        root=tmp_path,
+        config=loop_config(),
+        read_line=iter(["y", "y", "ok"]).__next__,
+        write=shown.append,
+        invoke=fake_invoke,
+        bulk_read=lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("bulk")
+        ),
+        run_suite=lambda root: (0, "ok\n"),
+    )
+
+    assert status == "done"
+    assert len(tester_calls) == 1
+    assert (tmp_path / "tests" / "test_app.py").read_text(encoding="utf-8") == (
+        "def test_app():\n    assert True\n"
+    )
+    assert "response must start with FILE <relative-path>" not in shown
+
+
+def test_full_retries_coder_when_it_omits_the_file_prefix(tmp_path):
+    seed_product(tmp_path)
+    coder_prompts = []
+
+    def fake_invoke(mode, prompt):
+        if mode.name == "spec":
+            return files_spec(
+                ("tests/test_app.py", "create"),
+                ("src/app.py", "change"),
+            )
+        if mode.name == "tester":
+            return "FILE tests/test_app.py\ndef test_app():\n    assert True\n"
+        if mode.name == "coder":
+            coder_prompts.append(prompt)
+            if len(coder_prompts) == 1:
+                return "changed without a file line\n"
+            return "FILE src/app.py\nchanged\n"
+        return "FILE review.md\nLooks good.\n"
+
+    shown = []
+    status = run_full(
+        "change the app",
+        root=tmp_path,
+        config=loop_config(),
+        read_line=iter(["y", "y", "ok"]).__next__,
+        write=shown.append,
+        invoke=fake_invoke,
+        bulk_read=lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("bulk")
+        ),
+        run_suite=lambda root: (0, "ok\n"),
+    )
+
+    assert status == "done"
+    assert len(coder_prompts) == 2
+    assert "response must start with FILE <relative-path>" in shown
+    assert "response must start with FILE <relative-path>" in (
+        tmp_path / "spec.md"
+    ).read_text(encoding="utf-8")
+    assert (tmp_path / "src" / "app.py").read_text(encoding="utf-8") == "changed\n"
+
+
+def test_full_coder_accepts_file_line_after_preamble(tmp_path):
+    seed_product(tmp_path)
+    coder_calls = []
+
+    def fake_invoke(mode, prompt):
+        if mode.name == "spec":
+            return files_spec(
+                ("tests/test_app.py", "create"),
+                ("src/app.py", "change"),
+            )
+        if mode.name == "tester":
+            return "FILE tests/test_app.py\ndef test_app():\n    assert True\n"
+        if mode.name == "coder":
+            coder_calls.append(prompt)
+            return (
+                "I'll patch the app now.\n"
+                "FILE src/app.py\n"
+                "changed\n"
+            )
+        return "FILE review.md\nLooks good.\n"
+
+    shown = []
+    status = run_full(
+        "change the app",
+        root=tmp_path,
+        config=loop_config(),
+        read_line=iter(["y", "y", "ok"]).__next__,
+        write=shown.append,
+        invoke=fake_invoke,
+        bulk_read=lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("bulk")
+        ),
+        run_suite=lambda root: (0, "ok\n"),
+    )
+
+    assert status == "done"
+    assert len(coder_calls) == 1
+    assert (tmp_path / "src" / "app.py").read_text(encoding="utf-8") == "changed\n"
+    assert "FILE path is not the coder target" not in "\n".join(shown)
+
+
+def test_full_stops_when_coder_omits_the_file_prefix(tmp_path):
+    seed_product(tmp_path)
+    names = []
+
+    def fake_invoke(mode, prompt):
+        names.append(mode.name)
+        if mode.name == "spec":
+            return files_spec(
+                ("tests/test_app.py", "create"),
+                ("src/app.py", "change"),
+            )
+        if mode.name == "tester":
+            return "FILE tests/test_app.py\ndef test_app():\n    assert True\n"
+        if mode.name == "coder":
+            return "changed without a file line\n"
+        raise AssertionError(f"unexpected mode: {mode.name}")
+
+    shown = []
+    status = run_full(
+        "change the app",
+        root=tmp_path,
+        config=loop_config(max_retries=0),
+        read_line=iter(["y", "y"]).__next__,
+        write=shown.append,
+        invoke=fake_invoke,
+        bulk_read=lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("bulk")
+        ),
+        run_suite=lambda root: (0, "ok\n"),
+    )
+
+    assert status == "stuck"
+    error = "response must start with FILE <relative-path>"
+    assert error in shown
+    assert error in (tmp_path / "spec.md").read_text(encoding="utf-8")
+    assert names == ["spec", "tester", "coder"]
+    assert "stuck" in shown
+    assert shown.count("y/n") == 2
+
+
+def test_full_retries_coder_when_file_is_the_wrong_target(tmp_path):
+    seed_product(tmp_path)
+    coder_prompts = []
+
+    def fake_invoke(mode, prompt):
+        if mode.name == "spec":
+            return files_spec(
+                ("tests/test_app.py", "create"),
+                ("src/app.py", "change"),
+            )
+        if mode.name == "tester":
+            return "FILE tests/test_app.py\ndef test_app():\n    assert True\n"
+        if mode.name == "coder":
+            coder_prompts.append(prompt)
+            if len(coder_prompts) == 1:
+                return "FILE src/other.py\nnope\n"
+            return "FILE src/app.py\nchanged\n"
+        return "FILE review.md\nLooks good.\n"
+
+    shown = []
+    status = run_full(
+        "change the app",
+        root=tmp_path,
+        config=loop_config(),
+        read_line=iter(["y", "y", "ok"]).__next__,
+        write=shown.append,
+        invoke=fake_invoke,
+        bulk_read=lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("bulk")
+        ),
+        run_suite=lambda root: (0, "ok\n"),
+    )
+
+    assert status == "done"
+    error = "FILE path is not the coder target: src/other.py"
+    assert error in shown
+    assert error in (tmp_path / "spec.md").read_text(encoding="utf-8")
+    assert len(coder_prompts) == 2
+    assert not (tmp_path / "src" / "other.py").exists()
+    assert (tmp_path / "src" / "app.py").read_text(encoding="utf-8") == "changed\n"
+
+
 def test_full_stops_when_tester_file_is_not_a_test_path(tmp_path):
     seed_product(tmp_path)
 
