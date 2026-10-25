@@ -7,24 +7,20 @@ dist/
 .venv/
 .pytest_cache/
 .ruff_cache/
+.complexipy_cache/
 .coverage
 htmlcov/
+
+# k0's own runtime state while dogfooding
+# ponytail: whole .k0-mem/ ignored; 0.1.0 dogfood decides what memory to commit
 .k0-mem/
-!.k0-mem/
-.k0-mem/*
-!.k0-mem/.gitignore
-!.k0-mem/config.yaml
-!.k0-mem/Project_context/
-!.k0-mem/Project_context/**
-!.k0-mem/Project_topology/
-!.k0-mem/Project_topology/**
-!.k0-mem/General_mem/
-!.k0-mem/General_mem/**
-.k0-mem/sessions/
-.k0-mem/events.jsonl
-.k0-mem/*.sqlite
-.k0-mem/**/*.sqlite
+/spec.md
+/review.md
+
+# Claude Code worktrees
+.claude/worktrees/
 
 # env / OS
 .env
+.env.*
 .DS_Store
