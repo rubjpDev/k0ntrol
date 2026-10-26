@@ -26,6 +26,10 @@ _Avoid_: Check, approval step
 A one-shot model call made by the harness or by a tool, with no tools of its own and no place in the workflow graph (`bulk_read`, reflect).
 _Avoid_: Mode, stage, agent
 
+**Run**:
+One execution of the workflow graph for one work item, or for one `/fast` task, from start to its outcome: `done`, `stuck` or `rejected`.
+_Avoid_: Job, session, attempt
+
 **Harness**:
 The deterministic program that owns the workflow graph, its gates and its tool allowlists. It is not an agent.
 _Avoid_: Orchestrator, supervisor
@@ -39,6 +43,10 @@ _Avoid_: Backlog, board
 **Work item**:
 One issue or ticket in the tracker; the carrier of what an agent is asked to do.
 _Avoid_: Spec file, task file, ticket (when meaning the tracker-agnostic concept)
+
+**Change**:
+The branch and its pull or merge request that propose the code for one work item. Trackers without a code host have none.
+_Avoid_: PR (when meaning the tracker-neutral concept), patch
 
 ### Memory
 
