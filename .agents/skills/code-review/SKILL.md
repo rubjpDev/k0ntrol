@@ -8,7 +8,7 @@ Two-axis review of the diff between `HEAD` and a fixed point the user supplies:
 - **Standards**: does the code conform to this repo's documented coding standards?
 - **Spec**: does the code faithfully implement the originating issue / spec?
 
-Both axes are **Task spawns in the same turn**, so they don't pollute each other's context. Inherit (same model as the parent) is still a spawn. The parent aggregates after both return; it does not write either axis report itself.
+Both axes are **subagent spawns in the same turn**, using the profiles named in AGENTS.md, so they don't pollute each other's context. The parent aggregates after both return; it does not write either axis report itself.
 
 The issue tracker should have been provided to you. If not, tell the user to run `/setup-matt-pocock-skills`.
 
@@ -57,7 +57,7 @@ Each smell reads *what it is* → *how to fix*; match it against the diff:
 
 ### 4. Spawn both sub-agents in parallel
 
-Done when this turn contains two Task calls (Standards and Spec) before aggregation. Spec on inherit is still one of those two calls.
+Done when this turn contains two subagent calls (Standards and Spec), using the profiles named in AGENTS.md, before aggregation.
 
 **Standards** (`standards-reviewer`) prompt should include:
 

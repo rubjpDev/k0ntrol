@@ -60,12 +60,15 @@ Skills are vendored per repo in `.agents/skills/` (from `mattpocock/skills`, pin
 
 ### Subagent routing
 
-When a skill spawns one of these sub-agents, use the named subagent from `.claude/agents/`. Tools without these subagents run the step inline.
+In Devin, use the profiles in `.devin/agents/` and the `design-variant` skill in `.devin/skills/`. The profiles in `.claude/agents/` remain for legacy clients. Clients without custom subagents run the step inline.
 
 - `/code-review`: two sub-agents in one turn — Standards `standards-reviewer`, Spec `spec-reviewer`. The parent aggregates after both return.
 - `/research` background agent, including wayfinder research tickets: `researcher`.
-- `/implement-spec` merger subagent: `merger`.
-- `codebase-design` design-it-twice: run Agent 3 ("optimise for the most common caller") with `design-variant`. The other agents inherit.
+- `/implement-spec`: use `swe-worker` for implementer and exploration subagents, and `merger` for the merger subagent.
+- `codebase-design` design-it-twice: invoke the `design-variant` skill for Agent 3 ("optimise for the most common caller"). It uses `subagent_general` to inherit the parent's model. Use `swe-worker` for the other designers and include the read-only constraint in each brief.
+- Other Matt Pocock skill subagents that previously inherited the parent model use `swe-worker`.
+
+A custom Devin profile without `model` uses the subagent router, not the parent's model. Keep `design-variant` as a skill backed by `subagent_general`, with no model override.
 
 ### Issue tracker
 
