@@ -6,7 +6,12 @@ from k0ntrol.memory.session import add_mem_proposal, list_pending_mem_proposals
 
 
 def config(**overrides):
-    cfg = {"threshold_lines": 350, "test_cmd": "pytest -q", "gates": []}
+    cfg = {
+        "threshold_lines": 350,
+        "test_cmd": "pytest -q",
+        "gates": [],
+        "agents": {"chatty": {"provider": "anthropic", "model": "claude-haiku-5-5"}},
+    }
     cfg.update(overrides)
     return cfg
 
@@ -141,7 +146,7 @@ def test_banner_shows_the_configured_provider(tmp_path):
         lambda: next(lines),
         shown.append,
         root=tmp_path,
-        config=config(provider="ollama"),
+        config=config(agents={"chatty": {"provider": "ollama", "model": "m"}}),
         color=False,
     )
     assert "ollama" in "\n".join(shown)
