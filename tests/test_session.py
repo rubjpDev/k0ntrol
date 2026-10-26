@@ -16,6 +16,9 @@ from k0ntrol.harness.session_memory import (
     list_pending_mem_proposals,
 )
 
+# Positive waits return as soon as the event fires, so a generous cap only matters on slow CI runners.
+THREAD_TIMEOUT = 5.0
+
 
 def config():
     return {
@@ -951,7 +954,7 @@ def test_prompt_does_not_wait_for_reflect(tmp_path):
 
     def fake_invoke(mode, prompt):
         if mode.name == "reflect":
-            assert continued.wait(1.0)
+            assert continued.wait(THREAD_TIMEOUT)
             return "fact: async\n"
         return "ok\n"
 
@@ -983,7 +986,7 @@ def test_quit_waits_for_in_flight_reflect(tmp_path):
     def fake_invoke(mode, prompt):
         if mode.name == "reflect":
             started.set()
-            assert release.wait(1.0)
+            assert release.wait(THREAD_TIMEOUT)
             return "fact: flushed\n"
         return "ok\n"
 
@@ -1003,17 +1006,17 @@ def test_quit_waits_for_in_flight_reflect(tmp_path):
 
     worker = threading.Thread(target=run)
     worker.start()
-    assert started.wait(1.0)
+    assert started.wait(THREAD_TIMEOUT)
     assert worker.is_alive()
     assert list_facts(tmp_path) == []
     release.set()
-    worker.join(1.0)
+    worker.join(THREAD_TIMEOUT)
     assert not worker.is_alive()
     assert finished == [0]
     assert [item["body"] for item in list_facts(tmp_path)] == ["flushed"]
 
 
-def _pending_mem_arrives(root: Path, timeout: float = 1.0) -> bool:
+def _pending_mem_arrives(root: Path, timeout: float = THREAD_TIMEOUT) -> bool:
     end = time.monotonic() + timeout
     while time.monotonic() < end:
         if list_pending_mem_proposals(root):
@@ -1083,7 +1086,7 @@ def test_mem_proposal_is_shown_at_next_prompt_not_mid_turn(tmp_path):
 
     def fake_invoke(mode, prompt):
         if mode.name == "reflect":
-            assert spec_started.wait(1.0)
+            assert spec_started.wait(THREAD_TIMEOUT)
             return "mem: Prefer sqlite for checkout state\n"
         if mode.name == "spec":
             spec_started.set()
