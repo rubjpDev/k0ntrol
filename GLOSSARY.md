@@ -18,6 +18,10 @@ _Avoid_: Graph (alone), pipeline, loop
 The fixed set of tools an agent may call, enforced in code.
 _Avoid_: Permissions (alone), capabilities
 
+**Path guard**:
+The code check that keeps a tool's path inside the files an agent may see and, for writes, the paths its role may change.
+_Avoid_: Sandbox, jail
+
 **Gate**:
 A pass/fail decision taken by code or by the human, never by a prompt alone. VALIDATOR is the gate that runs the test command and the configured checks; it is not an agent.
 _Avoid_: Check, approval step
@@ -47,6 +51,10 @@ _Avoid_: Backlog, board
 **Work item**:
 One issue or ticket in the tracker; the carrier of what an agent is asked to do.
 _Avoid_: Spec file, task file, ticket (when meaning the tracker-agnostic concept)
+
+**Trusted author**:
+A tracker account with write access to the repo. Only trusted authors' content in a work item reaches agents.
+_Avoid_: Maintainer, collaborator (alone)
 
 **Change**:
 The branch and its pull or merge request that propose the code for one work item. Trackers without a code host have none.
