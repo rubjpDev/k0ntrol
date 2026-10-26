@@ -60,8 +60,8 @@ def test_blank_and_unknown_stay_in_session(tmp_path):
     assert "unknown command: /nope" in "\n".join(shown)
 
 
-def test_full_fast_and_ask_are_not_available_yet(tmp_path):
-    lines = iter(["/full add checkout", "/fast fix bug", "/ask what is x?", "/quit"])
+def test_full_and_fast_are_not_available_yet(tmp_path):
+    lines = iter(["/full add checkout", "/fast fix bug", "/quit"])
     shown = []
     code = run_session(
         lambda: next(lines),
@@ -73,7 +73,28 @@ def test_full_fast_and_ask_are_not_available_yet(tmp_path):
     text = "\n".join(shown)
     assert "/full is not available yet" in text
     assert "/fast is not available yet" in text
-    assert "/ask is not available yet" in text
+
+
+def test_ask_runs_the_ask_path(tmp_path):
+    asked = []
+
+    def fake_ask(question, **kwargs):
+        asked.append(question)
+        kwargs["write"]("an answer")
+        kwargs["on_text"]("an answer")
+
+    lines = iter(["/ask what is x?", "/quit"])
+    shown = []
+    code = run_session(
+        lambda: next(lines),
+        shown.append,
+        root=tmp_path,
+        config=config(),
+        ask=fake_ask,
+    )
+    assert code == 0
+    assert asked == ["what is x?"]
+    assert "an answer" in "\n".join(shown)
 
 
 def test_work_commands_do_not_touch_the_disk_beyond_the_transcript(tmp_path):
@@ -83,6 +104,7 @@ def test_work_commands_do_not_touch_the_disk_beyond_the_transcript(tmp_path):
         lambda _line: None,
         root=tmp_path,
         config=config(),
+        ask=lambda question, **kwargs: None,
     )
     assert code == 0
     assert not (tmp_path / "spec.md").exists()
