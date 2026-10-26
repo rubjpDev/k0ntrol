@@ -10,7 +10,7 @@ from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.tools import BaseTool, tool
 
 from fakes import FakeChatModel, cfg_with
-from k0ntrol.agents import ALLOWLISTS, agent_tools, build_agent
+from k0ntrol.agents import ALLOWLISTS, agent_tools, allowlist_for, build_agent
 from k0ntrol.tools.errors import ToolError
 
 
@@ -68,6 +68,35 @@ def test_build_agent_refuses_off_allowlist_tools(tmp_path):
     with pytest.raises(ToolError) as error:
         build_agent("chatty", cfg, tools, init=_init(_scripted()))
     assert error.value.denied == "allowlist"
+
+
+# --- /fast drops the tracker reads ---------------------------------------------
+
+
+def test_allowlist_without_a_tracker_drops_tracker_reads():
+    assert "read_work_item" not in allowlist_for("tester", tracker=False)
+    assert "read_change_diff" not in allowlist_for("reviewer", tracker=False)
+    assert allowlist_for("tester", tracker=True) == ALLOWLISTS["tester"]
+
+
+def test_agent_tools_without_a_tracker_omits_tracker_reads(tmp_path):
+    tools = agent_tools("tester", root=tmp_path, cfg={"test_cmd": "pytest -q"})
+    names = {t.name for t in tools}
+    assert "read_work_item" not in names
+    assert {"read_file", "write_file", "edit_file", "run_tests"} <= names
+
+
+def test_build_agent_accepts_the_fast_allowlist(tmp_path):
+    cfg = cfg_with({"tester": {"provider": "anthropic", "model": "m", "model_calls": 5}})
+    tools = agent_tools("tester", root=tmp_path, cfg={"test_cmd": "pytest -q"})
+    agent = build_agent(
+        "tester",
+        cfg,
+        tools,
+        init=_init(_scripted()),
+        allowlist=allowlist_for("tester", tracker=False),
+    )
+    assert {t.name for t in agent.tools} == set(allowlist_for("tester", tracker=False))
 
 
 # --- building and answering --------------------------------------------------

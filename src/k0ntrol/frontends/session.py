@@ -6,6 +6,9 @@ from k0ntrol import __version__
 from k0ntrol.frontends.ask import answer_ask
 from k0ntrol.frontends.banner import render_banner
 from k0ntrol.memory.reflect import offer_mem_proposals
+from k0ntrol.workflow import Outcome, Pending, RunRefused
+from k0ntrol.workflow import resume as resume_run
+from k0ntrol.workflow import start as start_run
 
 
 def run_session(
@@ -17,6 +20,8 @@ def run_session(
     color: bool = False,
     echo_input: bool = True,
     ask: Callable = answer_ask,
+    start: Callable = start_run,
+    resume: Callable = resume_run,
 ) -> int:
     transcript = _new_transcript(root)
     show = _transcript_writer(write, transcript)
@@ -43,6 +48,16 @@ def run_session(
             show=show,
             transcript=transcript,
         ),
+        work=lambda kind, task: _run_work(
+            kind,
+            task,
+            read_line=read_line,
+            show=show,
+            root=root,
+            config=config,
+            start=start,
+            resume=resume,
+        ),
     )
 
 
@@ -59,6 +74,7 @@ def _session_loop(
     echo_input: bool,
     root: Path,
     ask: Callable[[str], None],
+    work: Callable[[str, str], None],
 ) -> int:
     while True:
         if _session_should_quit(
@@ -68,6 +84,7 @@ def _session_loop(
             echo_input=echo_input,
             root=root,
             ask=ask,
+            work=work,
         ):
             return 0
 
@@ -80,6 +97,7 @@ def _session_should_quit(
     echo_input: bool,
     root: Path,
     ask: Callable[[str], None],
+    work: Callable[[str, str], None],
 ) -> bool:
     line = _read_session_line(read_line, show, root)
     if line is None:
@@ -87,7 +105,7 @@ def _session_should_quit(
     _echo_session_input(line, show, transcript, echo_input)
     if not line:
         return False
-    return _handle_command(line, show, ask=ask)
+    return _handle_command(line, show, ask=ask, work=work)
 
 
 def _run_ask(
@@ -111,6 +129,74 @@ def _run_ask(
     )
     if deltas:
         _append_transcript(transcript, "".join(deltas))
+
+
+def _run_work(
+    kind: str,
+    task: str,
+    *,
+    read_line: Callable[[], str],
+    show: Callable[[str], None],
+    root: Path,
+    config: dict,
+    start: Callable,
+    resume: Callable,
+) -> None:
+    """Drive one run: start, then Pending → answer → resume until it ends."""
+    try:
+        result = start(kind, task, root=root, cfg=config, write=show)
+    except RunRefused as error:
+        _show_refusal(error, show)
+        return
+    while isinstance(result, Pending):
+        _show_pending(result, show)
+        answer = _gate_answer(read_line, show, result)
+        if answer is None:
+            return
+        try:
+            result = resume(
+                result.run, answer, root=root, cfg=config, write=show
+            )
+        except RunRefused as error:
+            _show_refusal(error, show)
+    show(_outcome_text(result))
+
+
+def _show_pending(pending: Pending, show: Callable[[str], None]) -> None:
+    if pending.detail:
+        show(pending.detail)
+    answers = "/".join(pending.answers)
+    show(f"{pending.question} [{answers}]")
+
+
+def _gate_answer(
+    read_line: Callable[[], str],
+    show: Callable[[str], None],
+    pending: Pending,
+) -> str | None:
+    try:
+        return read_line().strip()
+    except (KeyboardInterrupt, EOFError):
+        show(
+            f"run {pending.run} is paused at gate {pending.gate}; "
+            "resume it later"
+        )
+        return None
+
+
+def _show_refusal(error: RunRefused, show: Callable[[str], None]) -> None:
+    for line in error.lines:
+        show(line)
+
+
+def _outcome_text(result: Outcome) -> str:
+    text = f"run {result.outcome}"
+    if result.reason:
+        text += f" ({result.reason}"
+        if result.node:
+            text += f" at {result.node}"
+        text += ")"
+    return text
 
 
 def _read_session_line(
@@ -165,7 +251,11 @@ def _append_transcript(transcript: Path, text: str) -> None:
 
 
 def _handle_command(
-    line: str, write: Callable[[str], None], *, ask: Callable[[str], None]
+    line: str,
+    write: Callable[[str], None],
+    *,
+    ask: Callable[[str], None],
+    work: Callable[[str, str], None],
 ) -> bool:
     command, _, argument = line.partition(" ")
     if command == "/quit":
@@ -176,8 +266,11 @@ def _handle_command(
     if command == "/ask":
         ask(argument)
         return False
-    if command in {"/fast", "/full"}:
-        write(f"{command} is not available yet")
+    if command == "/fast":
+        work("fast", argument)
+        return False
+    if command == "/full":
+        write("/full is not available yet")
         return False
     write(f"unknown command: {command}")
     return False

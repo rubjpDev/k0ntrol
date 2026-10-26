@@ -60,8 +60,8 @@ def test_blank_and_unknown_stay_in_session(tmp_path):
     assert "unknown command: /nope" in "\n".join(shown)
 
 
-def test_full_and_fast_are_not_available_yet(tmp_path):
-    lines = iter(["/full add checkout", "/fast fix bug", "/quit"])
+def test_full_is_not_available_yet(tmp_path):
+    lines = iter(["/full add checkout", "/quit"])
     shown = []
     code = run_session(
         lambda: next(lines),
@@ -70,9 +70,93 @@ def test_full_and_fast_are_not_available_yet(tmp_path):
         config=config(),
     )
     assert code == 0
+    assert "/full is not available yet" in "\n".join(shown)
+
+
+def test_fast_drives_the_pending_gate_to_done(tmp_path):
+    """The REPL renders Pending (question + answers + detail), reads the
+    answer and calls resume until the run ends."""
+    from k0ntrol.workflow import Outcome, Pending
+
+    calls = []
+
+    def fake_start(kind, task, **kwargs):
+        calls.append(("start", kind, task))
+        return Pending(
+            run="r1",
+            gate="diff",
+            question="tests are green — keep the change?",
+            answers=("y", "n"),
+            detail=" M calc.py",
+        )
+
+    def fake_resume(run_id, decision, **kwargs):
+        calls.append(("resume", run_id, decision))
+        return Outcome(run=run_id, outcome="done")
+
+    lines = iter(["/fast add a calc module", "y", "/quit"])
+    shown = []
+    code = run_session(
+        lambda: next(lines),
+        shown.append,
+        root=tmp_path,
+        config=config(),
+        start=fake_start,
+        resume=fake_resume,
+    )
+    assert code == 0
     text = "\n".join(shown)
-    assert "/full is not available yet" in text
-    assert "/fast is not available yet" in text
+    assert calls == [("start", "fast", "add a calc module"), ("resume", "r1", "y")]
+    assert "tests are green — keep the change?" in text
+    assert "y/n" in text
+    assert " M calc.py" in text
+    assert "done" in text
+
+
+def test_fast_refusal_is_shown(tmp_path):
+    from k0ntrol.workflow import RunRefused
+
+    def refusing(kind, task, **kwargs):
+        raise RunRefused("a run is already open; use another git worktree")
+
+    lines = iter(["/fast fix bug", "/quit"])
+    shown = []
+    code = run_session(
+        lambda: next(lines),
+        shown.append,
+        root=tmp_path,
+        config=config(),
+        start=refusing,
+    )
+    assert code == 0
+    assert "another git worktree" in "\n".join(shown)
+
+
+def test_fast_bad_gate_answer_reasks(tmp_path):
+    from k0ntrol.workflow import Outcome, Pending, RunRefused
+
+    pending = Pending(run="r1", gate="diff", question="keep?", answers=("y", "n"))
+    decisions = []
+
+    def fake_resume(run_id, decision, **kwargs):
+        decisions.append(decision)
+        if decision != "y":
+            raise RunRefused(f"answer {decision!r} is not one of: y, n")
+        return Outcome(run=run_id, outcome="done")
+
+    lines = iter(["/fast task", "maybe", "y", "/quit"])
+    shown = []
+    code = run_session(
+        lambda: next(lines),
+        shown.append,
+        root=tmp_path,
+        config=config(),
+        start=lambda *a, **k: pending,
+        resume=fake_resume,
+    )
+    assert code == 0
+    assert decisions == ["maybe", "y"]
+    assert "not one of: y, n" in "\n".join(shown)
 
 
 def test_ask_runs_the_ask_path(tmp_path):
@@ -98,6 +182,8 @@ def test_ask_runs_the_ask_path(tmp_path):
 
 
 def test_work_commands_do_not_touch_the_disk_beyond_the_transcript(tmp_path):
+    from k0ntrol.workflow import Outcome
+
     lines = iter(["/full add checkout", "/fast fix bug", "/ask what is x?", "/quit"])
     code = run_session(
         lambda: next(lines),
@@ -105,6 +191,7 @@ def test_work_commands_do_not_touch_the_disk_beyond_the_transcript(tmp_path):
         root=tmp_path,
         config=config(),
         ask=lambda question, **kwargs: None,
+        start=lambda *a, **k: Outcome(run="r1", outcome="done"),
     )
     assert code == 0
     assert not (tmp_path / "spec.md").exists()
