@@ -7,7 +7,7 @@ k0ntrol (`k0`) is a local harness for coding agents: a human defines work and ap
 ### Workflow
 
 **Agent**:
-A node of the workflow graph with its own prompt, model and tool allowlist (SPEC, TESTER, CODER, VALIDATOR, REVIEWER, CHATTY).
+A model with its own prompt and tool allowlist that the harness runs with fresh context: SPEC, TESTER, CODER and REVIEWER as nodes of the workflow graph, CHATTY on its own for `/ask`.
 _Avoid_: Mode, worker, bot
 
 **Workflow graph**:
@@ -19,8 +19,12 @@ The fixed set of tools an agent may call, enforced in code.
 _Avoid_: Permissions (alone), capabilities
 
 **Gate**:
-A pass/fail decision taken by code or by the human, never by a prompt alone.
+A pass/fail decision taken by code or by the human, never by a prompt alone. VALIDATOR is the gate that runs the test command and the configured checks; it is not an agent.
 _Avoid_: Check, approval step
+
+**Helper**:
+A one-shot model call made by the harness or by a tool, with no tools of its own and no place in the workflow graph (`bulk_read`, reflect).
+_Avoid_: Mode, stage, agent
 
 **Harness**:
 The deterministic program that owns the workflow graph, its gates and its tool allowlists. It is not an agent.
