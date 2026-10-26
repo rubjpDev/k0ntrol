@@ -35,6 +35,9 @@ from k0ntrol.tools.write import make_edit_file, make_write_file
 
 _BASE_READ_TOOLS = ("read_file", "list_files", "grep")
 
+# Reads that need a tracker; ``/fast`` has no work item so they drop off.
+_TRACKER_TOOLS = ("read_work_item", "read_change_diff")
+
 # The roster's tool allowlists (issue #12). `bulk_read` and `search_memory`
 # join every list in #40 once those tools exist; CHATTY's `read_work_item`
 # too.
@@ -59,6 +62,18 @@ _STEPS_PER_CALL = 4
 _STEPS_SLACK = 8
 
 
+def allowlist_for(name: str, *, tracker: bool) -> tuple[str, ...]:
+    """Agent ``name``'s allowlist for this run.
+
+    Without a tracker (``/fast`` — there is no work item), the tracker
+    reads drop off the allowlist; the agent can never see the tool.
+    """
+    names = ALLOWLISTS[name]
+    if tracker:
+        return names
+    return tuple(n for n in names if n not in _TRACKER_TOOLS)
+
+
 def agent_tools(
     name: str,
     *,
@@ -69,11 +84,12 @@ def agent_tools(
     """The tools on agent ``name``'s allowlist, bound to the run context.
 
     ``cfg`` supplies ``test_cmd``/``test_timeout`` for ``run_tests`` and
-    ``tracker`` the tracker reads; both are needed only by agents whose
-    allowlist contains those tools.
+    ``tracker`` the tracker reads. With ``tracker=None`` the tracker
+    reads are left off entirely (``/fast``), matching
+    ``allowlist_for(name, tracker=False)``.
     """
     try:
-        names = ALLOWLISTS[name]
+        names = allowlist_for(name, tracker=tracker is not None)
     except KeyError:
         raise ValueError(f"unknown agent: {name!r}") from None
     factories = _tool_factories(name, root=root, cfg=cfg, tracker=tracker)
@@ -86,15 +102,17 @@ def build_agent(
     tools: Sequence[BaseTool],
     *,
     init: Callable = init_chat_model,
+    allowlist: Sequence[str] | None = None,
 ) -> "K0Agent":
     """Build agent ``name`` behind the fresh-context wrapper.
 
-    ``tools`` must be exactly the agent's allowlist; the model comes from
-    the ``agents.<name>`` config entry, and the prompt from
-    ``prompts/<name>.md``.
+    ``tools`` must be exactly the agent's allowlist — ``allowlist``, or
+    ``ALLOWLISTS[name]`` when it is ``None`` (``/fast`` passes the
+    tracker-less list). The model comes from the ``agents.<name>``
+    config entry, and the prompt from ``prompts/<name>.md``.
     """
     entry = cfg["agents"][name]
-    checked = _check_allowlist(name, tools)
+    checked = _check_allowlist(name, tools, allowlist)
     model = build_chat_model(cfg, entry, init=init)
     graph = create_agent(
         model,
@@ -116,13 +134,15 @@ def build_agent(
     )
 
 
-def _check_allowlist(name: str, tools: Sequence[BaseTool]) -> list[BaseTool]:
+def _check_allowlist(
+    name: str, tools: Sequence[BaseTool], allowlist: Sequence[str] | None = None
+) -> list[BaseTool]:
     for item in tools:
         if not isinstance(item, BaseTool):
             raise TypeError(
                 f"tools must be BaseTool instances, got {item!r}"
             )
-    expected = set(ALLOWLISTS[name])
+    expected = set(allowlist if allowlist is not None else ALLOWLISTS[name])
     got = {tool.name for tool in tools}
     if got != expected:
         raise ToolError(
