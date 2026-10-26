@@ -361,6 +361,25 @@ def test_resume_a_finished_run_is_refused(tmp_path):
         resume(result.run, "y", root=tmp_path, cfg=fast_cfg(), init=models_init())
 
 
+def test_crash_between_steps_resumes_with_invoke_none(tmp_path):
+    """A node that dies mid-run leaves a resumable checkpoint, never stuck:
+    resume (fresh graph, same DB) re-runs the failed node."""
+    git_repo(tmp_path)
+    dead_tester = scripted_tester()  # empty script raises on the model call
+    with pytest.raises(AssertionError, match="script exhausted"):
+        run_fast(tmp_path, fast_cfg(), dead_tester)
+    run_id = events(tmp_path)[0]["run"]
+
+    tester = scripted_tester(
+        write_call("tests/test_calc.py", TEST_SRC), AIMessage(content="tests")
+    )
+    coder = scripted_tester(write_call("calc.py", CALC_SRC), AIMessage(content="code"))
+    result = resume(run_id, "", root=tmp_path, cfg=fast_cfg(), init=models_init(tester, coder))
+
+    assert isinstance(result, Pending)
+    assert result.gate == "diff"
+
+
 def test_a_broken_event_log_ends_the_run_stuck(tmp_path):
     git_repo(tmp_path)
     # events.jsonl as a directory makes every write fail (EventWriteError).

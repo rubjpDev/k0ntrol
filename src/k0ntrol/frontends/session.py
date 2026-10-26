@@ -143,23 +143,41 @@ def _run_work(
     resume: Callable,
 ) -> None:
     """Drive one run: start, then Pending → answer → resume until it ends."""
-    try:
-        result = start(kind, task, root=root, cfg=config, write=show)
-    except RunRefused as error:
-        _show_refusal(error, show)
+    result = _try_start(kind, task, show=show, root=root, config=config, start=start)
+    if result is None:
         return
     while isinstance(result, Pending):
         _show_pending(result, show)
         answer = _gate_answer(read_line, show, result)
         if answer is None:
             return
-        try:
-            result = resume(
-                result.run, answer, root=root, cfg=config, write=show
-            )
-        except RunRefused as error:
-            _show_refusal(error, show)
+        result = _try_resume(result, answer, show=show, root=root, config=config, resume=resume)
+        if result is None:
+            return
     show(_outcome_text(result))
+
+
+def _try_start(kind, task, *, show, root, config, start):
+    try:
+        return start(kind, task, root=root, cfg=config, write=show)
+    except RunRefused as error:
+        _show_refusal(error, show)
+        return None
+    except Exception as error:
+        # A mid-run failure leaves a resumable checkpoint, never stuck.
+        show(f"run failed: {error}")
+        return None
+
+
+def _try_resume(result: Pending, answer: str, *, show, root, config, resume):
+    try:
+        return resume(result.run, answer, root=root, cfg=config, write=show)
+    except RunRefused as error:
+        _show_refusal(error, show)
+        return result  # bad answer: re-ask the same gate
+    except Exception as error:
+        show(f"run {result.run} failed: {error}")
+        return None
 
 
 def _show_pending(pending: Pending, show: Callable[[str], None]) -> None:
