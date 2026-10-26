@@ -16,8 +16,10 @@ _GRADIENT_START = (94, 234, 212)
 _GRADIENT_END = (167, 139, 250)
 
 
-def render_banner(*, version: str, backend: str, cwd: str, color: bool) -> str:
-    body = _build_body(version, backend, cwd)
+def render_banner(
+    *, version: str, provider: str | None, cwd: str, color: bool
+) -> str:
+    body = _build_body(version, provider, cwd)
     panel = Panel(
         body,
         box=ROUNDED,
@@ -45,12 +47,13 @@ def _body_width(body: Text) -> int:
     return max(cell_len(line) for line in body.plain.splitlines())
 
 
-def _build_body(version: str, backend: str, cwd: str) -> Text:
+def _build_body(version: str, provider: str | None, cwd: str) -> Text:
     labels = {
         2: f"k0ntrol v{version}",
-        3: backend,
         4: cwd,
     }
+    if provider:
+        labels[3] = provider
     body = Text()
     for index, logo_line in enumerate(LOGO.splitlines()):
         if index:

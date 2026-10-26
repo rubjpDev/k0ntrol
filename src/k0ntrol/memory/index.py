@@ -1,17 +1,13 @@
-"""Derived FTS index and retrieval gate for code memory."""
+"""Derived FTS index over project memory, plus prompt-facing memory text."""
 
 from __future__ import annotations
 
 import re
 import sqlite3
-from collections.abc import Callable
 from pathlib import Path
 
-from k0ntrol.harness.init import ARCHITECTURE, CODE_RULES, RULES, STRATEGY
-from k0ntrol.harness.session_memory import fact_entry_id, has_facts, list_facts
-from k0ntrol.modespec import ModeSpec, load_mode
-
-Invoke = Callable[[ModeSpec, str], str]
+from k0ntrol.memory.layout import ARCHITECTURE, CODE_RULES, RULES, STRATEGY
+from k0ntrol.memory.session import fact_entry_id, list_facts
 
 INDEX_NAME = "index.sqlite"
 KIND_PREFIX = {"files": "file", "functions": "fn", "classes": "class"}
@@ -56,40 +52,6 @@ def _custom_file_text(path: Path, template: str) -> str:
     if not text or text == template:
         return ""
     return text
-
-
-def agent_memory(
-    query: str,
-    *,
-    root: Path,
-    config: dict,
-    invoke: Invoke,
-) -> str:
-    """Rules (if customized) plus gated retrieval, for injection into a prompt."""
-    sections: list[str] = []
-    rules = custom_rules_text(root)
-    if rules:
-        sections.append(rules)
-    if has_code_memory(root) or has_facts(root):
-        retrieved = memory_context(query, root=root, config=config, invoke=invoke)
-        if retrieved:
-            sections.append(retrieved)
-    return "\n\n".join(sections)
-
-
-def memory_context(
-    question: str,
-    *,
-    root: Path,
-    config: dict,
-    invoke: Invoke,
-) -> str:
-    """Rebuild FTS, run the retrieval gate, and return markdown to inject."""
-    rebuild_index(root)
-    top_k = config.get("retrieval_top_k", 5)
-    candidates = query_index(root, question, top_k)
-    picked = _run_gate(question, candidates, top_k, config, invoke)
-    return _join_entries(picked)
 
 
 def rebuild_index(root: Path) -> Path:
@@ -181,91 +143,3 @@ def _rows_as_entries(rows: list[tuple[str, str, str]]) -> list[dict[str, str]]:
 def _fts_query(question: str) -> str:
     tokens = re.findall(r"[A-Za-z0-9_]+", question)
     return " OR ".join(tokens)
-
-
-def _run_gate(
-    question: str,
-    candidates: list[dict[str, str]],
-    top_k: int,
-    config: dict,
-    invoke: Invoke,
-) -> list[dict[str, str]]:
-    mode = load_mode("retrieval_gate", config)
-    raw = invoke(mode, _gate_prompt(question, candidates, top_k))
-    return _parse_gate(raw, candidates, top_k)
-
-
-def _gate_prompt(question: str, candidates: list[dict[str, str]], top_k: int) -> str:
-    lines = [
-        f"Pick at most {top_k} candidate ids if the question needs retrieved memory (code or session facts).",
-        "",
-        "Question:",
-        question,
-        "",
-        "Candidates:",
-    ]
-    lines.extend(_candidate_lines(candidates))
-    lines.append("")
-    lines.append("Reply with retrieve: yes and ids, or retrieve: no.")
-    return "\n".join(lines)
-
-
-def _candidate_lines(candidates: list[dict[str, str]]) -> list[str]:
-    if not candidates:
-        return ["- (none)"]
-    return [f"- {item['id']} {item['path']}" for item in candidates]
-
-
-def _parse_gate(
-    raw: str,
-    candidates: list[dict[str, str]],
-    top_k: int,
-) -> list[dict[str, str]]:
-    if not _wants_retrieve(raw):
-        return []
-    by_id = {item["id"]: item for item in candidates}
-    return _picked_entries(_picked_ids(raw), by_id, top_k)
-
-
-def _wants_retrieve(raw: str) -> bool:
-    for line in raw.splitlines():
-        stripped = line.strip().lower()
-        if stripped.startswith("retrieve:"):
-            return stripped.split(":", 1)[1].strip() == "yes"
-    return False
-
-
-def _picked_ids(raw: str) -> list[str]:
-    ids = []
-    for line in raw.splitlines():
-        stripped = line.strip()
-        if stripped.startswith("- "):
-            ids.append(stripped[2:].strip())
-    return ids
-
-
-def _picked_entries(
-    ids: list[str],
-    by_id: dict[str, dict[str, str]],
-    top_k: int,
-) -> list[dict[str, str]]:
-    picked: list[dict[str, str]] = []
-    for token in ids:
-        _append_pick(picked, by_id.get(token), top_k)
-        if len(picked) == top_k:
-            break
-    return picked
-
-
-def _append_pick(
-    picked: list[dict[str, str]],
-    item: dict[str, str] | None,
-    top_k: int,
-) -> None:
-    if item is None or item in picked or len(picked) == top_k:
-        return
-    picked.append(item)
-
-
-def _join_entries(entries: list[dict[str, str]]) -> str:
-    return "\n\n".join(item["body"] for item in entries)
