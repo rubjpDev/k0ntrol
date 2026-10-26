@@ -6,7 +6,7 @@ from k0ntrol import __version__
 from k0ntrol.config import ConfigError, load_config
 from k0ntrol.frontends.banner import color_enabled
 from k0ntrol.frontends.session import run_session
-from k0ntrol.memory.layout import init_project
+from k0ntrol.init_flow import run_init
 from k0ntrol.memory.scan import ScanError, run_scan
 from k0ntrol.providers import free_checks, has_errors, live_checks, report_lines
 
@@ -36,13 +36,21 @@ def main(argv: list[str] | None = None) -> int:
         help="create the project memory layout",
     )
     init_parser.add_argument("directory")
+    init_parser.add_argument(
+        "--tracker",
+        help="work-item tracker for the project (github; others not in 0.1.0)",
+    )
+    init_parser.add_argument(
+        "--provider",
+        help="one provider for every agent and helper (user config)",
+    )
     subparsers.add_parser("scan", help="write the code graph")
     args = parser.parse_args(argv)
 
     if args.command == "doctor":
         return _run_doctor(live=args.live)
     if args.command == "init":
-        return _run_init(args.directory)
+        return _run_init(args.directory, tracker=args.tracker, provider=args.provider)
     if args.command == "scan":
         return _run_scan()
     if args.command is None:
@@ -50,10 +58,10 @@ def main(argv: list[str] | None = None) -> int:
     return 0
 
 
-def _run_init(directory: str) -> int:
-    for line in init_project(Path(directory)):
-        print(line)
-    return 0
+def _run_init(
+    directory: str, *, tracker: str | None = None, provider: str | None = None
+) -> int:
+    return run_init(Path(directory), tracker=tracker, provider=provider)
 
 
 def _run_doctor(live: bool) -> int:

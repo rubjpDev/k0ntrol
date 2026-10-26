@@ -459,6 +459,46 @@ def _num_ctx_checks(label: str, provider: str, cfg: dict, entry: dict) -> list[C
     return []
 
 
+def tool_calling_models(
+    provider: str, base_url: str | None = None, *, fetch: Callable | None = None
+) -> list[str]:
+    """Installed models that can call tools on a local provider.
+
+    Ollama lists pulled models via ``/api/tags`` and probes each with
+    ``/api/show`` (``tools`` capability); LM Studio's ``/v1/models`` reports
+    ``tool_use`` per item. Anything else returns ``[]``.
+    """
+    http = fetch or _fetch_json
+    if provider == "ollama":
+        return _ollama_tool_models(http, base_url or OLLAMA_BASE_URL)
+    if provider == "lmstudio":
+        return _lmstudio_tool_models(http, base_url or LMSTUDIO_BASE_URL)
+    return []
+
+
+def _ollama_tool_models(fetch: Callable, base: str) -> list[str]:
+    data = fetch(f"{base}/api/tags")
+    names = [m.get("name") for m in data.get("models", [])]
+    return [n for n in names if n and _ollama_tool_capable(base, n, fetch)]
+
+
+def _ollama_tool_capable(base: str, model: str, fetch: Callable) -> bool:
+    try:
+        info = fetch(f"{base}/api/show", {"model": model})
+    except Exception:
+        return False
+    return "tools" in (info.get("capabilities") or ())
+
+
+def _lmstudio_tool_models(fetch: Callable, base: str) -> list[str]:
+    data = fetch(f"{base}/models")
+    return [
+        item["id"]
+        for item in data.get("data", [])
+        if "tool_use" in (item.get("capabilities") or ())
+    ]
+
+
 def _used_models(entries: dict[str, dict], provider: str) -> list[str]:
     return sorted({e["model"] for e in entries.values()
                    if e.get("provider") == provider})
