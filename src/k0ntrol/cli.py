@@ -4,17 +4,12 @@ from pathlib import Path
 
 import yaml
 
-import k0ntrol.backends.cursor
-import k0ntrol.backends.invoke
 from k0ntrol import __version__
 from k0ntrol.config import ConfigError, load_config
 from k0ntrol.frontends.banner import color_enabled
 from k0ntrol.frontends.session import run_session
-from k0ntrol.harness.init import init_project
-from k0ntrol.harness.loop import run_configured_suite
-from k0ntrol.harness.scan import ScanError, run_scan
-from k0ntrol.modespec import load_mode
-from k0ntrol.stages.bulk_read import BulkReadError, bulk_read
+from k0ntrol.memory.layout import init_project
+from k0ntrol.memory.scan import ScanError, run_scan
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -34,21 +29,13 @@ def main(argv: list[str] | None = None) -> int:
         help="create the project memory layout",
     )
     init_parser.add_argument("directory")
-    bulk_read_parser = subparsers.add_parser(
-        "bulk-read",
-        help="ask the bulk-reader mode about files",
-    )
-    bulk_read_parser.add_argument("--question", required=True)
-    bulk_read_parser.add_argument("--paths", nargs="+", required=True)
-    subparsers.add_parser("scan", help="write file-level code memory")
+    subparsers.add_parser("scan", help="write the code graph")
     args = parser.parse_args(argv)
 
     if args.command == "doctor":
         return _run_doctor()
     if args.command == "init":
         return _run_init(args.directory)
-    if args.command == "bulk-read":
-        return _run_bulk_read(args.question, args.paths)
     if args.command == "scan":
         return _run_scan()
     if args.command is None:
@@ -71,13 +58,6 @@ def _run_doctor() -> int:
 
     print(yaml.safe_dump(cfg, sort_keys=False), end="")
     print(_gates_report(cfg.get("gates") or []))
-
-    problems = k0ntrol.backends.cursor.cursor_problems(cfg)
-    if problems:
-        for problem in problems:
-            print(f"cursor: {problem}", file=sys.stderr)
-        return 1
-
     return 0
 
 
@@ -102,63 +82,15 @@ def _run_session() -> int:
         print,
         root=root,
         config=config,
-        invoke=k0ntrol.backends.invoke.invoke,
-        bulk_read=bulk_read,
-        run_suite=lambda project_root: run_configured_suite(
-            project_root,
-            config["test_cmd"],
-        ),
         color=color_enabled(sys.stdout),
         echo_input=False,
     )
 
 
 def _run_scan() -> int:
-    root = Path.cwd()
     try:
-        config = load_config(root)
-        status = run_scan(
-            root=root,
-            config=config,
-            bulk_read=bulk_read,
-            invoke=k0ntrol.backends.invoke.invoke,
-            read_line=input,
-            write=print,
-        )
-    except ConfigError as error:
-        print(f"config error: {error}", file=sys.stderr)
-        return 1
-    except (BulkReadError, ScanError) as error:
+        run_scan(Path.cwd())
+    except ScanError as error:
         print(f"scan error: {error}", file=sys.stderr)
         return 1
-    except k0ntrol.backends.invoke.BackendError as error:
-        print(f"backend error: {error}", file=sys.stderr)
-        return 1
-    return 0 if status == "scanned" else 1
-
-
-def _run_bulk_read(question: str, paths: list[str]) -> int:
-    root = Path.cwd()
-    try:
-        config = load_config(root)
-        mode = load_mode("bulk_reader", config)
-        result = bulk_read(
-            question,
-            [root / path for path in paths],
-            root=root,
-            repo=root.name,
-            mode=mode,
-            invoke=k0ntrol.backends.invoke.invoke,
-        )
-    except ConfigError as error:
-        print(f"config error: {error}", file=sys.stderr)
-        return 1
-    except BulkReadError as error:
-        print(f"bulk-read error: {error}", file=sys.stderr)
-        return 1
-    except k0ntrol.backends.invoke.BackendError as error:
-        print(f"backend error: {error}", file=sys.stderr)
-        return 1
-
-    print(result, end="" if result.endswith("\n") else "\n")
     return 0

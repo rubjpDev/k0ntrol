@@ -1,14 +1,14 @@
+"""The bulk_read helper: wrap files in XML and ask a chat model about them."""
+
 from collections.abc import Callable
 from pathlib import Path
 
-from k0ntrol.modespec import ModeSpec
-
 
 class BulkReadError(Exception):
-    """Raised when bulk-read cannot prepare a file for the mode."""
+    """Raised when bulk-read cannot prepare a file for the model."""
 
 
-Invoke = Callable[[ModeSpec, str], str]
+Invoke = Callable[[str], str]
 
 
 def bulk_read(
@@ -17,17 +17,16 @@ def bulk_read(
     *,
     root: Path,
     repo: str,
-    mode: ModeSpec,
     invoke: Invoke,
 ) -> str:
-    """Read files, wrap them in XML, and invoke the bulk-reader mode."""
+    """Read files, wrap them in XML, and invoke the model with the question."""
     root_path = root.resolve()
     wrapped_files = [
         _wrap_file(path, root_path, repo)
         for path in paths
     ]
     prompt = f"{question}\n\n" + "\n".join(wrapped_files)
-    return invoke(mode, prompt)
+    return invoke(prompt)
 
 
 def _wrap_file(path: Path, root: Path, repo: str) -> str:

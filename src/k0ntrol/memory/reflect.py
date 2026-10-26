@@ -5,39 +5,29 @@ from __future__ import annotations
 from collections.abc import Callable
 from pathlib import Path
 
-from k0ntrol.backends.invoke import current_event_context, set_event_context
-from k0ntrol.harness.session_memory import (
-    add_episode,
+from k0ntrol.memory.session import (
     add_fact,
     add_mem_proposal,
     decide_mem_proposal,
     list_decided_mem_proposals,
     list_pending_mem_proposals,
 )
-from k0ntrol.modespec import ModeSpec, load_mode
 
-Invoke = Callable[[ModeSpec, str], str]
+Invoke = Callable[[str], str]
 MEM_RELATIVE = Path(".k0-mem") / "General_mem" / "Mem.md"
 
 
 def run_reflect(
     *,
     root: Path,
-    config: dict,
     invoke: Invoke,
     transcript: Path | None = None,
-    run: str = "",
 ) -> None:
-    """Invoke reflect; store facts, episodes, and pending Mem.md proposals. D22."""
-    run = run or current_event_context()["run"]
-    set_event_context(run=run, step="reflect")
-    mode = load_mode("reflect", config)
-    raw = invoke(mode, _reflect_prompt(root, transcript))
-    facts, episodes, mems = _parse_reflect(raw)
+    """Invoke the reflect helper; store facts and pending Mem.md proposals."""
+    raw = invoke(_reflect_prompt(root, transcript))
+    facts, mems = _parse_reflect(raw)
     for body in facts:
         add_fact(root, body)
-    for body in episodes:
-        add_episode(root, body)
     for body in mems:
         add_mem_proposal(root, body)
 
@@ -98,21 +88,18 @@ def _transcript_text(transcript: Path | None) -> str:
     return transcript.read_text(encoding="utf-8")
 
 
-def _parse_reflect(raw: str) -> tuple[list[str], list[str], list[str]]:
+def _parse_reflect(raw: str) -> tuple[list[str], list[str]]:
     facts: list[str] = []
-    episodes: list[str] = []
     mems: list[str] = []
     for line in raw.splitlines():
-        _append_parsed(line, facts, episodes, mems)
-    return facts, episodes, mems
+        _append_parsed(line, facts, mems)
+    return facts, mems
 
 
-def _append_parsed(
-    line: str, facts: list[str], episodes: list[str], mems: list[str]
-) -> None:
+def _append_parsed(line: str, facts: list[str], mems: list[str]) -> None:
     stripped = line.strip()
     lower = stripped.lower()
-    for prefix, bucket in (("fact:", facts), ("episode:", episodes), ("mem:", mems)):
+    for prefix, bucket in (("fact:", facts), ("mem:", mems)):
         if lower.startswith(prefix):
             _append_value(bucket, stripped)
             return

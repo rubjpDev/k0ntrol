@@ -17,8 +17,8 @@ def test_logo_is_the_decided_art():
 
 def test_plain_banner_has_logo_fields_and_no_ansi():
     text = render_banner(
-        version="0.0.1.dev0",
-        backend="cursor",
+        version="0.1.0.dev0",
+        provider="ollama",
         cwd="/work/repo",
         color=False,
     )
@@ -26,23 +26,34 @@ def test_plain_banner_has_logo_fields_and_no_ansi():
     assert "▄█████▙" in text
     assert "/work/repo" in text
     assert "\x1b" not in text
-    version_rows = [line for line in text.splitlines() if "k0ntrol v0.0.1.dev0" in line]
+    version_rows = [line for line in text.splitlines() if "k0ntrol v0.1.0.dev0" in line]
     assert len(version_rows) == 1
     assert "▟" in version_rows[0]
     assert "▄█████▙" not in version_rows[0]
     body = "\n".join(line for line in text.splitlines() if line.startswith("│"))
-    assert "k0ntrol v0.0.1.dev0" in body
-    assert "cursor" in body
-    start = body.index("k0ntrol v0.0.1.dev0")
-    middle = body.index("cursor", start)
+    assert "k0ntrol v0.1.0.dev0" in body
+    assert "ollama" in body
+    start = body.index("k0ntrol v0.1.0.dev0")
+    middle = body.index("ollama", start)
     end = body.index("/work/repo", middle)
     assert "\n\n" not in body[start:end]
 
 
+def test_banner_without_a_provider_skips_the_line():
+    text = render_banner(
+        version="0.1.0.dev0",
+        provider=None,
+        cwd="/work/repo",
+        color=False,
+    )
+    assert "k0ntrol v0.1.0.dev0" in text
+    assert "/work/repo" in text
+
+
 def test_color_banner_uses_the_decided_palette():
     text = render_banner(
-        version="0.0.1.dev0",
-        backend="cursor",
+        version="0.1.0.dev0",
+        provider="ollama",
         cwd="/work",
         color=True,
     )

@@ -45,7 +45,6 @@ def _init_entries(
         (memory_root / "General_mem" / "Mem.md", MEM),
         (memory_root / "General_mem" / "Rules.md", RULES),
         (memory_root / "config.yaml", PROJECT_CONFIG),
-        (memory_root / "modes", None),
     )
 
 
