@@ -61,3 +61,7 @@ _Avoid_: Summarize, consolidate
 **Provider**:
 Where a model runs: a local runtime (Ollama, LM Studio), a lab API, an aggregator or a cloud.
 _Avoid_: Backend, vendor
+
+**Effort**:
+How hard an agent's or helper's model reasons on each call: low, medium or high, or the provider's default when unset or when the model offers no such setting.
+_Avoid_: Tier, thinking budget, reasoning level
