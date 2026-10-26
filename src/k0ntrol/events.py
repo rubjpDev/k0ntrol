@@ -11,11 +11,12 @@ or tool arguments other than `path` are ever written.
 helper model call — emits the `model` and `tool` events through the same
 writer.
 
-Shared contract for tool refusals (`denied` field), consumed by the tools
-ticket: a tool refuses a call by raising an exception that carries a
-`denied` attribute with value `"allowlist"` or `"path_guard"`.
-`ToolDeniedError` is the canonical class; the handler accepts any exception
-with a truthy `denied` attribute.
+Shared contract for tool refusals (the `denied` field): a tool refuses a
+call by raising an exception that carries a `denied` attribute with value
+`"allowlist"` or `"path_guard"`. The canonical class is
+`k0ntrol.tools.errors.ToolError` (raised with `denied="path_guard"` /
+`denied="allowlist"`); the handler accepts any exception with a truthy
+`denied` attribute, so tool code never depends on this module.
 """
 
 import json
@@ -28,10 +29,7 @@ from pathlib import Path
 from typing import Any, Literal
 from uuid import uuid4
 
-from langchain_core.tools import ToolException
 from langgraph.callbacks import GraphCallbackHandler, GraphInterruptEvent
-
-DeniedReason = Literal["allowlist", "path_guard"]
 
 ERR_MAX_CHARS = 500
 MASKED = "***"
@@ -80,20 +78,6 @@ def secret_env_values(env: Mapping[str, str] | None = None) -> list[str]:
 
 class EventWriteError(Exception):
     """A JSONL write failed. The run treats this as `stuck`."""
-
-
-class ToolDeniedError(ToolException):
-    """A k0 tool refused a call. `denied` is the reason for the event.
-
-    Values: `"allowlist"` when the tool is not in the agent's allowlist,
-    `"path_guard"` when the path guard refuses the path. Any exception with
-    a truthy `denied` attribute is recognised; this class is the canonical
-    one for tools to raise.
-    """
-
-    def __init__(self, denied: DeniedReason, message: str) -> None:
-        super().__init__(message)
-        self.denied: DeniedReason = denied
 
 
 def _now_iso() -> str:

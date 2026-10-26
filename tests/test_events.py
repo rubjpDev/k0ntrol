@@ -24,11 +24,11 @@ from k0ntrol.events import (
     EventWriteError,
     K0EventHandler,
     ProgressRenderer,
-    ToolDeniedError,
     events_path,
     new_run_id,
     render_event,
 )
+from k0ntrol.tools.errors import ToolError
 
 RUN = "a" * 32
 
@@ -315,7 +315,7 @@ def read_file(path: str) -> str:
 @tool
 def write_file(path: str, content: str) -> str:
     """Write a file. Always refused by the path guard in these tests."""
-    raise ToolDeniedError("path_guard", "path outside root")
+    raise ToolError("path outside root", denied="path_guard")
 
 
 @tool
@@ -437,7 +437,7 @@ def test_tool_event_ok_with_path_only(tmp_path):
 
 def test_tool_event_denied_on_path_guard_refusal(tmp_path):
     handler, path = make_handler(tmp_path)
-    with pytest.raises(ToolDeniedError):
+    with pytest.raises(ToolError):
         write_file.invoke(
             {"path": "../escape.py", "content": "secret source"},
             config={"callbacks": [handler], "metadata": {"k0_agent": "coder"}},
@@ -501,10 +501,33 @@ def test_interrupt_without_a_gate_payload_emits_nothing(tmp_path):
     assert not path.exists() or read_events(path) == []
 
 
-def test_tool_denied_error_is_the_shared_refusal_contract():
-    err = ToolDeniedError("allowlist", "tool not allowed")
+def test_denied_contract_accepts_any_error_with_a_denied_attr(tmp_path):
+    """The contract is duck-typed: any exception with `denied` works."""
+
+    class CustomRefusal(Exception):
+        denied = "allowlist"
+
+    @tool
+    def secret_tool(path: str) -> str:
+        """A tool refused outside the allowlist."""
+        raise CustomRefusal("not in allowlist")
+
+    handler, path = make_handler(tmp_path)
+    with pytest.raises(CustomRefusal):
+        secret_tool.invoke(
+            {"path": "x"},
+            config={"callbacks": [handler], "metadata": {"k0_agent": "coder"}},
+        )
+    (event,) = read_events(path)
+    assert event["denied"] == "allowlist"
+    assert event["ok"] is False
+
+
+def test_tool_error_is_the_canonical_refusal_class():
+    err = ToolError("tool not allowed", denied="allowlist")
     assert err.denied == "allowlist"
     assert str(err) == "tool not allowed"
+    assert ToolError("ordinary failure").denied is None
 
 
 def test_model_name_falls_back_to_llm_output_and_response_metadata(tmp_path):
