@@ -30,6 +30,10 @@ _Avoid_: Mode, stage, agent
 One execution of the workflow graph for one work item, or for one `/fast` task, from start to its outcome: `done`, `stuck` or `rejected`.
 _Avoid_: Job, session, attempt
 
+**Event**:
+One line of k0's event log recording a model call, a tool call, a gate, or the start or end of a run.
+_Avoid_: Log entry, span, trace
+
 **Harness**:
 The deterministic program that owns the workflow graph, its gates and its tool allowlists. It is not an agent.
 _Avoid_: Orchestrator, supervisor
