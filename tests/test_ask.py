@@ -24,7 +24,8 @@ def _repo(root, files=None):
 
 def _cfg(model_calls=15):
     return cfg_with(
-        {"chatty": {"provider": "anthropic", "model": "m", "model_calls": model_calls}}
+        {"chatty": {"provider": "anthropic", "model": "m", "model_calls": model_calls}},
+        helpers={"bulk_read": {"provider": "anthropic", "model": "m"}},
     )
 
 
@@ -34,6 +35,10 @@ def _init(model):
 
 def _ok_checks(cfg, **_kw):
     return [Check("config", "ok", "valid")]
+
+
+def _no_refresh(root, **kwargs):
+    return "scanned"
 
 
 def _events(root):
@@ -65,6 +70,7 @@ def test_ask_refuses_when_doctor_checks_error(tmp_path):
         on_text=deltas.append,
         init=_init(FakeChatModel(messages=[])),
         check=bad_checks,
+        refresh=_no_refresh,
     )
 
     assert result is None
@@ -90,6 +96,7 @@ def test_ask_streams_the_answer(tmp_path):
         on_text=deltas.append,
         init=_init(model),
         check=_ok_checks,
+        refresh=_no_refresh,
     )
 
     assert result is not None and not result.limit_hit
@@ -120,6 +127,7 @@ def test_ask_writes_chat_scoped_events_and_progress(tmp_path):
         on_text=deltas.append,
         init=_init(model),
         check=_ok_checks,
+        refresh=_no_refresh,
     )
 
     events = _events(tmp_path)
@@ -147,6 +155,7 @@ def test_ask_mentions_pass_relative_paths_only(tmp_path):
         on_text=deltas.append,
         init=_init(model),
         check=_ok_checks,
+        refresh=_no_refresh,
     )
 
     prompt_messages = model.invocations[0]
@@ -168,6 +177,7 @@ def test_ask_bad_mention_refuses(tmp_path):
         on_text=deltas.append,
         init=_init(FakeChatModel(messages=[])),
         check=_ok_checks,
+        refresh=_no_refresh,
     )
 
     assert result is None
@@ -195,6 +205,7 @@ def test_ask_model_failure_shows_the_error(tmp_path):
         on_text=deltas.append,
         init=_init(_BrokenChatModel(messages=[])),
         check=_ok_checks,
+        refresh=_no_refresh,
     )
 
     assert result is None
@@ -229,6 +240,7 @@ def test_ask_at_limit_prints_partial_answer_and_limit_line(tmp_path):
         on_text=deltas.append,
         init=_init(model),
         check=_ok_checks,
+        refresh=_no_refresh,
     )
 
     assert result is not None and result.limit_hit
@@ -267,6 +279,7 @@ def test_ask_partial_answer_streams_before_the_limit_line(tmp_path):
         on_text=deltas.append,
         init=_init(model),
         check=_ok_checks,
+        refresh=_no_refresh,
     )
 
     assert "Working on it" in "".join(deltas)
@@ -274,3 +287,153 @@ def test_ask_partial_answer_streams_before_the_limit_line(tmp_path):
         i for i, line in enumerate(shown) if "model-call limit" in line
     )
     assert limit_index >= 0
+
+
+# --- memory refresh -----------------------------------------------------------
+
+
+def test_ask_refreshes_memory_and_rebuilds_the_index_once(tmp_path, monkeypatch):
+    """One refresh at ask start: rescan, then a single index rebuild — not
+    one per search_memory call."""
+    import k0ntrol.memory.refresh as refresh_module
+
+    _repo(tmp_path, {"note.txt": "hi\n"})
+    rebuilds = []
+    original = refresh_module.rebuild_index
+
+    def counting(root):
+        rebuilds.append(root)
+        return original(root)
+
+    monkeypatch.setattr(refresh_module, "rebuild_index", counting)
+    model = FakeChatModel(
+        messages=[
+            AIMessage(content="- FILE note.txt\n  - desc: a note\n"),
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {"name": "search_memory", "args": {"query": "sky"}, "id": "t1"}
+                ],
+            ),
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {"name": "search_memory", "args": {"query": "sky"}, "id": "t2"}
+                ],
+            ),
+            AIMessage(content="done"),
+        ]
+    )
+
+    result = answer_ask(
+        "q?",
+        root=tmp_path,
+        config=_cfg(),
+        write=lambda _line: None,
+        init=_init(model),
+        check=_ok_checks,
+    )
+
+    assert result is not None and result.text == "done"
+    assert rebuilds == [tmp_path]
+
+
+def test_ask_search_memory_sees_memory_written_before_the_ask(tmp_path):
+    _repo(tmp_path, {"note.txt": "hi\n"})
+    mem = tmp_path / ".k0-mem" / "General_mem" / "Mem.md"
+    mem.parent.mkdir(parents=True, exist_ok=True)
+    mem.write_text("- the sky is blue\n", encoding="utf-8")
+    model = FakeChatModel(
+        messages=[
+            AIMessage(content="- FILE note.txt\n  - desc: a note\n"),
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {"name": "search_memory", "args": {"query": "sky"}, "id": "t1"}
+                ],
+            ),
+            AIMessage(content="blue, per memory"),
+        ]
+    )
+
+    result = answer_ask(
+        "what color is the sky?",
+        root=tmp_path,
+        config=_cfg(),
+        write=lambda _line: None,
+        init=_init(model),
+        check=_ok_checks,
+    )
+
+    assert result is not None
+    # the search result came back into CHATTY's context
+    final_messages = model.invocations[-1]
+    tool_texts = " ".join(str(m.content) for m in final_messages)
+    assert "the sky is blue" in tool_texts
+
+
+def test_ask_rescan_helper_call_writes_a_chat_scoped_helper_event(tmp_path):
+    _repo(tmp_path, {"note.txt": "hi\n"})
+    model = FakeChatModel(
+        messages=[
+            AIMessage(content="- FILE note.txt\n  - desc: a note\n"),
+            AIMessage(content="done"),
+        ]
+    )
+
+    answer_ask(
+        "q?",
+        root=tmp_path,
+        config=_cfg(),
+        write=lambda _line: None,
+        init=_init(model),
+        check=_ok_checks,
+    )
+
+    events = _events(tmp_path)
+    assert events[0]["kind"] == "model"
+    assert events[0]["helper"] == "bulk_read"
+    assert "chat" in events[0]
+    assert "agent" not in events[0]
+
+
+def test_ask_doctor_gates_on_chatty_and_the_bulk_read_helper(tmp_path):
+    _repo(tmp_path)
+    seen = {}
+
+    def spy(cfg, *, names=None, root=None):
+        seen["names"] = tuple(names)
+        return [Check("config", "ok", "valid")]
+
+    answer_ask(
+        "q?",
+        root=tmp_path,
+        config=_cfg(),
+        write=lambda _line: None,
+        init=_init(FakeChatModel(messages=[AIMessage(content="ok")])),
+        check=spy,
+        refresh=_no_refresh,
+    )
+
+    assert seen["names"] == ("agents.chatty", "helpers.bulk_read")
+
+
+def test_ask_refuses_when_memory_refresh_fails(tmp_path):
+    _repo(tmp_path)
+    shown = []
+
+    def bad_refresh(root, **kwargs):
+        raise RuntimeError("git is dead")
+
+    result = answer_ask(
+        "q?",
+        root=tmp_path,
+        config=_cfg(),
+        write=shown.append,
+        init=_init(FakeChatModel(messages=[])),
+        check=_ok_checks,
+        refresh=bad_refresh,
+    )
+
+    assert result is None
+    assert any("git is dead" in line for line in shown)

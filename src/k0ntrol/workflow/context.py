@@ -47,10 +47,19 @@ class RunContext:
         if name not in self._agents:
             names = allowlist_for(name, tracker=self.tracker is not None)
             tools = agent_tools(
-                name, root=self.root, cfg=self.cfg, tracker=self.tracker
+                name,
+                root=self.root,
+                cfg=self.cfg,
+                tracker=self.tracker,
+                init=self.init,
             )
             self._agents[name] = build_agent(
-                name, self.cfg, tools, init=self.init, allowlist=names
+                name,
+                self.cfg,
+                tools,
+                root=self.root,
+                init=self.init,
+                allowlist=names,
             )
         return self._agents[name]
 

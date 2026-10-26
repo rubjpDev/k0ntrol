@@ -122,9 +122,19 @@ def _connect(root: Path) -> sqlite3.Connection:
 
 
 def _ensure_schema(conn: sqlite3.Connection) -> None:
+    # 0.1.0 session memory is trimmed: episodes are gone and facts.body is
+    # unique — enforced even on a session.sqlite a 0.0.x k0 left behind.
+    conn.execute("DROP TABLE IF EXISTS episodes")
     conn.execute(
         "CREATE TABLE IF NOT EXISTS facts ("
         "id INTEGER PRIMARY KEY, body TEXT NOT NULL UNIQUE)"
+    )
+    conn.execute(
+        "DELETE FROM facts WHERE id NOT IN ("
+        "SELECT MIN(id) FROM facts GROUP BY body)"
+    )
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS facts_body ON facts (body)"
     )
     conn.execute(
         "CREATE TABLE IF NOT EXISTS mem_proposals ("

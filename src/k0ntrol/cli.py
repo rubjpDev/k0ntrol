@@ -2,16 +2,26 @@ import argparse
 import sys
 from pathlib import Path
 
+from langchain.chat_models import init_chat_model
+
 from k0ntrol import __version__
 from k0ntrol.config import ConfigError, load_config
+from k0ntrol.events import (
+    EventWriter,
+    K0EventHandler,
+    ProgressRenderer,
+    events_path,
+    new_run_id,
+)
 from k0ntrol.frontends.banner import color_enabled
 from k0ntrol.frontends.session import run_session
+from k0ntrol.helpers import helper_invoker
 from k0ntrol.init_flow import run_init
-from k0ntrol.memory.scan import ScanError, run_scan
+from k0ntrol.memory.refresh import refresh_memory
 from k0ntrol.providers import free_checks, has_errors, live_checks, report_lines
 
 
-def main(argv: list[str] | None = None) -> int:
+def main(argv: list[str] | None = None, *, init=init_chat_model) -> int:
     parser = argparse.ArgumentParser(
         prog="k0",
         description="Local harness for coding agents.",
@@ -52,7 +62,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "init":
         return _run_init(args.directory, tracker=args.tracker, provider=args.provider)
     if args.command == "scan":
-        return _run_scan()
+        return _run_scan(init=init)
     if args.command is None:
         return _run_session()
     return 0
@@ -95,10 +105,30 @@ def _run_session() -> int:
     )
 
 
-def _run_scan() -> int:
+def _run_scan(*, init=init_chat_model) -> int:
+    """Rescan in place: changed files get notes from the bulk_read helper,
+    then the FTS index is rebuilt — run-scoped events as it works."""
+    root = Path.cwd()
     try:
-        run_scan(Path.cwd())
-    except ScanError as error:
+        config = load_config(root)
+        handler = _scan_handler(root)
+        invoke = helper_invoker(
+            config, "bulk_read", init=init, config={"callbacks": [handler]}
+        )
+        refresh_memory(root, config=config, invoke=invoke)
+    except ConfigError as error:
+        print(f"config error: {error}", file=sys.stderr)
+        return 1
+    except Exception as error:
         print(f"scan error: {error}", file=sys.stderr)
         return 1
     return 0
+
+
+def _scan_handler(root: Path) -> K0EventHandler:
+    path = events_path(root)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    writer = EventWriter(
+        path, run=new_run_id(), progress=ProgressRenderer(print)
+    )
+    return K0EventHandler(writer)

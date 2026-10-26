@@ -66,3 +66,35 @@ def test_facts_survive_in_the_index_after_rebuild(tmp_path):
     rebuild_index(tmp_path)
     matches = query_index(tmp_path, "sqlite", 5)
     assert [item["id"] for item in matches] == ["session:fact:1"]
+
+
+def test_old_session_db_is_trimmed(tmp_path):
+    """A 0.0.x session.sqlite loses its episodes table and gains the
+    facts.body uniqueness the trimmed session memory requires."""
+    import sqlite3
+
+    db = session_db_path(tmp_path)
+    db.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(db)
+    conn.execute("CREATE TABLE episodes (id INTEGER PRIMARY KEY, body TEXT)")
+    conn.execute("INSERT INTO episodes (body) VALUES ('asked about x')")
+    conn.execute("CREATE TABLE facts (id INTEGER PRIMARY KEY, body TEXT NOT NULL)")
+    conn.execute("INSERT INTO facts (body) VALUES ('dup')")
+    conn.execute("INSERT INTO facts (body) VALUES ('dup')")
+    conn.commit()
+    conn.close()
+
+    assert [item["body"] for item in list_facts(tmp_path)] == ["dup"]
+    assert add_fact(tmp_path, "dup") is None
+    assert add_fact(tmp_path, "new") is not None
+
+    conn = sqlite3.connect(db)
+    tables = {
+        row[0]
+        for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table'"
+        )
+    }
+    conn.close()
+    assert "episodes" not in tables
+    assert [item["body"] for item in list_facts(tmp_path)] == ["dup", "new"]
