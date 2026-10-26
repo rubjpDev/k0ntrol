@@ -25,6 +25,7 @@ from k0ntrol.events import (
     K0EventHandler,
     ProgressRenderer,
     events_path,
+    new_chat_id,
     new_run_id,
     render_event,
 )
@@ -171,6 +172,12 @@ def test_new_run_id_is_32_hex():
     run = new_run_id()
     assert len(run) == 32
     int(run, 16)
+
+
+def test_new_chat_id_is_32_hex():
+    chat = new_chat_id()
+    assert len(chat) == 32
+    int(chat, 16)
 
 
 def test_events_path_is_under_k0_mem():
