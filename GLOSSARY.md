@@ -34,6 +34,10 @@ _Avoid_: Mode, stage, agent
 One execution of the workflow graph for one work item, or for one `/fast` task, from start to its outcome: `done`, `stuck` or `rejected`.
 _Avoid_: Job, session, attempt
 
+**Limit**:
+A cap the harness enforces on how many model calls one agent run may make, or how many automatic attempts one loop of a run may take. Hitting one pauses the run until the human retries or stops it.
+_Avoid_: Budget, quota
+
 **Event**:
 One line of k0's event log recording a model call, a tool call, a gate, or the start or end of a run.
 _Avoid_: Log entry, span, trace
