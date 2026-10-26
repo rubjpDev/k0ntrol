@@ -21,12 +21,17 @@ def run_session(
     show(
         render_banner(
             version=__version__,
-            provider=config.get("provider"),
+            provider=_chatty_provider(config),
             cwd=str(root),
             color=color,
         )
     )
     return _session_loop(read_line, show, transcript, echo_input=echo_input, root=root)
+
+
+def _chatty_provider(config: dict) -> str | None:
+    chatty = (config.get("agents") or {}).get("chatty") or {}
+    return chatty.get("provider")
 
 
 def _session_loop(
