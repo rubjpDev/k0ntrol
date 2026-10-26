@@ -2,7 +2,7 @@
 
 From 0.1.0, the work item in the repo's tracker carries what an agent is asked to do, in place of the `spec.md` and `review.md` files in the repo root. In `/full`:
 
-- SPEC's output becomes the issue, and the spec gate is recorded on it.
+- SPEC's output is posted on the issue as an agent brief comment, which is the contract; the issue body stays the human's request. The spec gate is recorded on the issue.
 - TESTER, CODER and VALIDATOR work on a branch.
 - REVIEWER's review is posted on the pull request.
 - The human merges. k0 never does.
