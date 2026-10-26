@@ -33,7 +33,9 @@ def visible_files(root: Path) -> set[str]:
     return {line for line in result.stdout.splitlines() if line}
 
 
-def _guard_readable(path: str, root: Path) -> Path:
+def guard_readable(path: str, root: Path) -> Path:
+    """Resolve ``path`` under ``root`` and refuse anything the agent may not
+    read: escapes, protected dirs and files git does not see."""
     resolved = guard_path(path, root)
     relative = resolved.relative_to(root.resolve()).as_posix()
     if relative not in visible_files(root):
@@ -78,7 +80,7 @@ def make_read_file(root: Path) -> BaseTool:
     @tool
     def read_file(path: str) -> str:
         """Read one file in the repository. `path` is relative to the repo root."""
-        resolved = _guard_readable(path, root)
+        resolved = guard_readable(path, root)
         if not resolved.is_file():
             raise ToolError(f"not a readable file: {path}")
         lines = _read_lines(resolved)

@@ -37,6 +37,85 @@ def test_rebuild_index_covers_context_notes_with_node_ids(tmp_path):
     }
 
 
+def test_hits_carry_kind_for_notes_facts_and_mem(tmp_path):
+    repo = tmp_path.name
+    _write_note(tmp_path, f"{repo}/files/app.py.md", "# app\ncheckout code\n")
+    _write_note(tmp_path, f"{repo}/functions/pkg.helper.md", "# helper\ncheckout\n")
+    add_fact(tmp_path, "checkout uses sqlite")
+    mem = tmp_path / ".k0-mem" / "General_mem" / "Mem.md"
+    mem.parent.mkdir(parents=True, exist_ok=True)
+    mem.write_text("# Mem\n\n- checkout picked sqlite\n", encoding="utf-8")
+
+    rebuild_index(tmp_path)
+    kinds = {item["id"]: item["kind"] for item in query_index(tmp_path, "checkout", 10)}
+
+    assert kinds[f"{repo}:file:app.py"] == "file"
+    assert kinds[f"{repo}:fn:pkg.helper"] == "fn"
+    assert kinds["session:fact:1"] == "fact"
+    assert kinds["mem:1"] == "mem"
+
+
+def test_index_indexes_mem_bullets(tmp_path):
+    mem = tmp_path / ".k0-mem" / "General_mem" / "Mem.md"
+    mem.parent.mkdir(parents=True, exist_ok=True)
+    mem.write_text(
+        "# Mem\n\nProject facts. One fact per bullet.\n\n"
+        "- prefer sqlite for checkout state\n"
+        "- tests run through pytest\n",
+        encoding="utf-8",
+    )
+
+    rebuild_index(tmp_path)
+    hits = query_index(tmp_path, "sqlite", 5)
+
+    assert hits == [
+        {
+            "id": "mem:1",
+            "kind": "mem",
+            "path": "General_mem/Mem.md",
+            "body": "prefer sqlite for checkout state",
+        }
+    ]
+
+
+def test_symbol_hits_list_calls_and_called_by(tmp_path):
+    import json
+
+    repo = tmp_path.name
+    _write_note(tmp_path, f"{repo}/functions/pkg.util.helper.md", "# helper\ncheckout\n")
+    _write_note(tmp_path, f"{repo}/functions/pkg.app.run.md", "# run\ncheckout\n")
+    graph = tmp_path / ".k0-mem" / "Project_context" / repo / "graph.json"
+    graph.write_text(
+        json.dumps(
+            {
+                "nodes": [],
+                "edges": [
+                    {
+                        "from": f"{repo}:fn:pkg.app.run",
+                        "to": f"{repo}:fn:pkg.util.helper",
+                        "kind": "calls",
+                    },
+                    {
+                        "from": f"{repo}:file:pkg/app.py",
+                        "to": f"{repo}:fn:pkg.app.run",
+                        "kind": "defines",
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    rebuild_index(tmp_path)
+    hits = {hit["id"]: hit for hit in query_index(tmp_path, "checkout", 10)}
+
+    assert hits[f"{repo}:fn:pkg.app.run"]["calls"] == [f"{repo}:fn:pkg.util.helper"]
+    assert hits[f"{repo}:fn:pkg.app.run"]["called_by"] == []
+    assert hits[f"{repo}:fn:pkg.util.helper"]["called_by"] == [
+        f"{repo}:fn:pkg.app.run"
+    ]
+
+
 def test_query_index_limits_and_falls_back_without_tokens(tmp_path):
     repo = tmp_path.name
     for name in ("a", "b", "c"):

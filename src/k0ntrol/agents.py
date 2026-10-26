@@ -26,18 +26,20 @@ from langchain_core.messages import AIMessage, AIMessageChunk, BaseMessage
 from langchain_core.tools import BaseTool
 
 from k0ntrol.events import META_AGENT, META_EFFORT
+from k0ntrol.memory.index import custom_rules_text, custom_topology_text
 from k0ntrol.providers import build_chat_model
+from k0ntrol.tools.bulk_read import make_bulk_read
 from k0ntrol.tools.errors import ToolError
 from k0ntrol.tools.read import make_grep, make_list_files, make_read_file
 from k0ntrol.tools.run_tests import make_run_tests
+from k0ntrol.tools.search_memory import make_search_memory
 from k0ntrol.tools.tracker import tracker_read_tools
 from k0ntrol.tools.write import make_edit_file, make_write_file
 
-_BASE_READ_TOOLS = ("read_file", "list_files", "grep")
+_BASE_READ_TOOLS = ("read_file", "list_files", "grep", "bulk_read", "search_memory")
 
-# The roster's tool allowlists (issue #12). `bulk_read` and `search_memory`
-# join every list in #40 once those tools exist; CHATTY's `read_work_item`
-# too.
+# The roster's tool allowlists (issue #12). CHATTY's `read_work_item`
+# joins when the tracker lands (#43).
 ALLOWLISTS: dict[str, tuple[str, ...]] = {
     "chatty": _BASE_READ_TOOLS,
     "spec": _BASE_READ_TOOLS + ("read_work_item",),
@@ -65,18 +67,22 @@ def agent_tools(
     root: Path,
     cfg: dict | None = None,
     tracker=None,
+    init: Callable = init_chat_model,
 ) -> list[BaseTool]:
     """The tools on agent ``name``'s allowlist, bound to the run context.
 
     ``cfg`` supplies ``test_cmd``/``test_timeout`` for ``run_tests`` and
-    ``tracker`` the tracker reads; both are needed only by agents whose
-    allowlist contains those tools.
+    ``helpers.*`` for ``bulk_read``; ``tracker`` feeds the tracker reads;
+    ``init`` builds helper models. Each is needed only by tools that use
+    it, and only when the tool runs.
     """
     try:
         names = ALLOWLISTS[name]
     except KeyError:
         raise ValueError(f"unknown agent: {name!r}") from None
-    factories = _tool_factories(name, root=root, cfg=cfg, tracker=tracker)
+    factories = _tool_factories(
+        name, root=root, cfg=cfg, tracker=tracker, init=init
+    )
     return [factories[tool_name]() for tool_name in names]
 
 
@@ -85,13 +91,15 @@ def build_agent(
     cfg: dict,
     tools: Sequence[BaseTool],
     *,
+    root: Path,
     init: Callable = init_chat_model,
 ) -> "K0Agent":
     """Build agent ``name`` behind the fresh-context wrapper.
 
     ``tools`` must be exactly the agent's allowlist; the model comes from
     the ``agents.<name>`` config entry, and the prompt from
-    ``prompts/<name>.md``.
+    ``prompts/<name>.md`` plus the project's `Rules.md` and topology when
+    someone has edited them.
     """
     entry = cfg["agents"][name]
     checked = _check_allowlist(name, tools)
@@ -99,7 +107,7 @@ def build_agent(
     graph = create_agent(
         model,
         tools=checked,
-        system_prompt=_prompt(name),
+        system_prompt=_system_prompt(name, root),
         middleware=[
             ModelCallLimitMiddleware(
                 run_limit=entry["model_calls"], exit_behavior="end"
@@ -139,14 +147,29 @@ def _prompt(name: str) -> str:
     )
 
 
+def _system_prompt(name: str, root: Path) -> str:
+    """The agent's prompt file plus edited memory: `Rules.md` and topology
+    go in when someone has changed them from the init template."""
+    parts = [_prompt(name)]
+    rules = custom_rules_text(root)
+    if rules:
+        parts.append(rules)
+    topology = custom_topology_text(root)
+    if topology:
+        parts.append(topology)
+    return "\n\n".join(parts)
+
+
 def _tool_factories(
-    agent: str, *, root: Path, cfg: dict | None, tracker
+    agent: str, *, root: Path, cfg: dict | None, tracker, init: Callable
 ) -> dict[str, Callable[[], BaseTool]]:
     scope = _WRITE_SCOPES.get(agent)
     return {
         "read_file": lambda: make_read_file(root),
         "list_files": lambda: make_list_files(root),
         "grep": lambda: make_grep(root),
+        "bulk_read": lambda: make_bulk_read(root, cfg, init=init),
+        "search_memory": lambda: make_search_memory(root),
         "write_file": lambda: make_write_file(root, scope),
         "edit_file": lambda: make_edit_file(root, scope),
         "run_tests": lambda: make_run_tests(root, _need_cfg(cfg)),
