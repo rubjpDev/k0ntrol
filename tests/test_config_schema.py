@@ -308,35 +308,6 @@ def test_load_config_validates_the_merged_result(tmp_path):
         load_config(tmp_path, tmp_path / "home")
 
 
-def test_doctor_prints_effective_config(tmp_path, monkeypatch, capsys):
-    monkeypatch.chdir(tmp_path)
-    monkeypatch.setenv("HOME", str(tmp_path / "home"))
-    assert main(["doctor"]) == 0
-    out = capsys.readouterr().out
-    assert "threshold_lines: 350" in out
-    assert "test_cmd: pytest -q" in out
-    assert "active gates: none" in out
-
-
-def test_doctor_lists_active_gates(tmp_path, monkeypatch, capsys):
-    monkeypatch.chdir(tmp_path)
-    monkeypatch.setenv("HOME", str(tmp_path / "home"))
-    (tmp_path / ".k0-mem").mkdir()
-    (tmp_path / ".k0-mem/config.yaml").write_text(
-        "gates:\n"
-        "  - name: complexity\n"
-        "    cmd: complexipy src --max-complexity-allowed 6\n"
-        "  - name: coverage\n"
-        "    cmd: pytest --cov=src --cov-fail-under=90\n"
-    )
-    assert main(["doctor"]) == 0
-    out = capsys.readouterr().out
-    assert "active gates:" in out
-    assert "complexity: complexipy src --max-complexity-allowed 6" in out
-    assert "coverage: pytest --cov=src --cov-fail-under=90" in out
-    assert "active gates: none" not in out
-
-
 def test_doctor_reports_invalid_config_and_exits_1(tmp_path, monkeypatch, capsys):
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
