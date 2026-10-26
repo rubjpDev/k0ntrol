@@ -208,3 +208,73 @@ def test_no_effort_configured_means_nothing_is_dropped():
     entry = {"provider": "anthropic", "model": "m"}
     profile = {"reasoning_effort_levels": ["low", "medium", "high"]}
     assert dropped_effort(entry, profile) is None
+
+
+# --- tool_calling_models: installed models that can call tools (#50) ---------
+
+
+def test_tool_calling_models_is_empty_for_hosted_providers():
+    from k0ntrol.providers import tool_calling_models
+
+    assert tool_calling_models("openai") == []
+
+
+def test_tool_calling_models_ollama_filters_on_show_capabilities():
+    from k0ntrol.providers import tool_calling_models
+
+    def fetch(url, payload=None):
+        if url.endswith("/api/tags"):
+            return {"models": [{"name": "qwen3:8b"}, {"name": "llama3"}]}
+        if url.endswith("/api/show"):
+            caps = {"qwen3:8b": ["completion", "tools"]}.get(
+                payload["model"], ["completion"]
+            )
+            return {"capabilities": caps}
+        raise AssertionError(url)
+
+    models = tool_calling_models("ollama", fetch=fetch)
+    assert models == ["qwen3:8b"]
+
+
+def test_tool_calling_models_ollama_skips_a_model_when_show_fails():
+    from k0ntrol.providers import tool_calling_models
+
+    def fetch(url, payload=None):
+        if url.endswith("/api/tags"):
+            return {"models": [{"name": "gone"}, {"name": "qwen3:8b"}]}
+        if url.endswith("/api/show") and payload["model"] == "gone":
+            raise ConnectionError("model vanished")
+        return {"capabilities": ["tools"]}
+
+    models = tool_calling_models("ollama", fetch=fetch)
+    assert models == ["qwen3:8b"]
+
+
+def test_tool_calling_models_lmstudio_filters_on_tool_use():
+    from k0ntrol.providers import tool_calling_models
+
+    def fetch(url, payload=None):
+        return {"data": [
+            {"id": "qwen3-8b", "capabilities": ["tool_use"]},
+            {"id": "embed-x", "capabilities": ["embeddings"]},
+            {"id": "plain-y"},
+        ]}
+
+    models = tool_calling_models("lmstudio", fetch=fetch)
+    assert models == ["qwen3-8b"]
+
+
+def test_tool_calling_models_uses_the_project_base_url():
+    from k0ntrol.providers import tool_calling_models
+
+    urls = []
+
+    def fetch(url, payload=None):
+        urls.append(url)
+        return {"data": [{"id": "m", "capabilities": ["tool_use"]}]}
+
+    models = tool_calling_models(
+        "lmstudio", "http://gpu-box:1234/v1", fetch=fetch
+    )
+    assert models == ["m"]
+    assert urls == ["http://gpu-box:1234/v1/models"]
