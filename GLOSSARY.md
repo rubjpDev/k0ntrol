@@ -54,8 +54,16 @@ _Avoid_: PR (when meaning the tracker-neutral concept), patch
 The scanner's typed nodes and edges of the codebase, stored as `graph.json` in `.k0-mem/`.
 _Avoid_: Graph (alone), knowledge graph
 
+**Project memory**:
+The committed memory every agent can read: the code graph, file notes, `Mem.md`, `Rules.md` and topology. Only humans and the scanner change it.
+_Avoid_: Knowledge base, context (alone)
+
+**Session memory**:
+The facts reflect distills from transcripts. It stays local and is never committed.
+_Avoid_: History, chat log
+
 **Reflect**:
-The background pass that turns session transcripts into session memory and proposes additions to project memory.
+The background pass after each run that turns its transcript into session memory and proposes additions to `Mem.md`.
 _Avoid_: Summarize, consolidate
 
 **Provider**:
