@@ -2,7 +2,9 @@
 
 Provider/doctor fakes: ``FakeChatModel`` is a scripted ``BaseChatModel``
 stand-in and ``recording_init`` a fake ``init_chat_model``; ``cfg_with``
-builds a 0.1.0 config dict.
+builds a 0.1.0 config dict. Agent tests script ``FakeChatModel`` with
+``messages=[AIMessage(...), ...]`` — one entry per model call — which
+works through ``create_agent`` (invoke and stream).
 
 ``FakeTracker`` is the in-memory ``Tracker`` implementation graph and E2E
 tests use (spec #33, "Testing Decisions"). It records every public call
@@ -15,7 +17,15 @@ act on real git state; otherwise those calls are only recorded.
 
 from __future__ import annotations
 
+import json
+import re
 import subprocess
+from typing import Any, Iterator
+
+from langchain_core.language_models.fake_chat_models import GenericFakeChatModel
+from langchain_core.messages import AIMessage, AIMessageChunk
+from langchain_core.outputs import ChatGeneration, ChatGenerationChunk, ChatResult
+from pydantic import ConfigDict, Field
 
 from k0ntrol.tracker import (
     Change,
@@ -26,36 +36,108 @@ from k0ntrol.tracker import (
 )
 
 
-class FakeChatModel:
+class FakeChatModel(GenericFakeChatModel):
     """Scripted stand-in for a ``BaseChatModel``.
 
-    ``profile`` mirrors ``model.profile`` (a ``ModelProfile`` TypedDict or
-    ``None``); ``bind_tools`` records and returns self so ``--live`` tests can
-    drive ``invoke`` through the same object.
+    Two roles:
+
+    - The ``init_chat_model`` seam (provider/doctor tests): built by
+      ``recording_init`` with ``(model, model_provider, init_kwargs)``;
+      ``profile`` mirrors ``model.profile`` and ``reply`` is the answer
+      every invoke gives when no script is left.
+    - The scripted tool-calling fake for agent tests: ``messages`` is the
+      script — ``AIMessage`` (with ``tool_calls``), ``FakeReply`` or ``str``
+      entries consumed in order, one per model call. It works through
+      ``create_agent`` on both ``invoke`` and ``stream``: ``_stream`` emits
+      text in word chunks and tool calls as ``tool_call_chunks``, like a
+      real provider.
     """
 
-    def __init__(self, model, model_provider, kwargs, profile=None, reply=None):
-        self.model = model
-        self.model_provider = model_provider
-        self.kwargs = kwargs
-        self.profile = profile
-        self.reply = reply
-        self.bound_tools = None
-        self.bind_kwargs = None
-        self.invocations = []
+    model_config = ConfigDict(protected_namespaces=(), arbitrary_types_allowed=True)
 
-    def bind_tools(self, tools, **kwargs):
+    messages: Iterator = Field(default_factory=iter)
+    model: str | None = None
+    model_provider: str | None = None
+    init_kwargs: dict = Field(default_factory=dict)
+    reply: Any = None
+    bound_tools: list | None = None
+    bind_kwargs: dict | None = None
+    invocations: list = Field(default_factory=list)
+
+    def __init__(
+        self,
+        model=None,
+        model_provider=None,
+        init_kwargs=None,
+        *,
+        profile=None,
+        reply=None,
+        messages=None,
+        **fields,
+    ):
+        super().__init__(
+            messages=iter(messages or []),
+            profile=profile,
+            model=model,
+            model_provider=model_provider,
+            init_kwargs=init_kwargs or {},
+            reply=reply,
+            **fields,
+        )
+
+    def bind_tools(self, tools, *, tool_choice=None, **kwargs):
         self.bound_tools = list(tools)
         self.bind_kwargs = kwargs
         return self
 
-    def invoke(self, messages):
+    def _generate(self, messages, stop=None, run_manager=None, **kwargs):
         self.invocations.append(list(messages))
-        return self.reply
+        return ChatResult(generations=[ChatGeneration(message=self._next())])
+
+    def _stream(self, messages, stop=None, run_manager=None, **kwargs):
+        self.invocations.append(list(messages))
+        yield from _reply_chunks(self._next())
+
+    def _next(self) -> AIMessage:
+        item = next(self.messages, self.reply)
+        if item is None:
+            raise AssertionError(
+                "FakeChatModel script exhausted; script one message per model call"
+            )
+        return _to_ai_message(item)
+
+
+def _to_ai_message(item) -> AIMessage:
+    if isinstance(item, AIMessage):
+        return item
+    if isinstance(item, str):
+        return AIMessage(content=item)
+    tool_calls = [
+        {
+            "name": call["name"],
+            "args": call.get("args", {}),
+            "id": call.get("id") or f"call_{index}",
+        }
+        for index, call in enumerate(getattr(item, "tool_calls", None) or [])
+    ]
+    return AIMessage(content=getattr(item, "content", ""), tool_calls=tool_calls)
+
+
+def _reply_chunks(message: AIMessage) -> Iterator[ChatGenerationChunk]:
+    if isinstance(message.content, str):
+        for token in re.split(r"(\s)", message.content):
+            if token:
+                yield ChatGenerationChunk(message=AIMessageChunk(content=token))
+    for index, call in enumerate(message.tool_calls or []):
+        chunk = {"name": call["name"], "args": json.dumps(call["args"]),
+                 "id": call["id"], "index": index}
+        yield ChatGenerationChunk(
+            message=AIMessageChunk(content="", tool_call_chunks=[chunk])
+        )
 
 
 class FakeReply:
-    """The message a fake chat model returns; ``tool_calls`` like AIMessage."""
+    """A scripted reply shorthand; ``tool_calls`` like ``AIMessage``."""
 
     def __init__(self, tool_calls=None, content=""):
         self.tool_calls = tool_calls or []
@@ -74,6 +156,7 @@ def recording_init(calls, profiles=None, replies=None):
         profile = (profiles or {}).get(model_provider, (profiles or {}).get("any"))
         reply = (replies or {}).get(model)
         return FakeChatModel(model, model_provider, kwargs, profile=profile, reply=reply)
+
 
     return init
 
