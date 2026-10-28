@@ -1,3 +1,4 @@
+import threading
 from pathlib import Path
 
 from k0ntrol.frontends.session import run_session
@@ -314,3 +315,197 @@ def test_session_n_at_prompt_drops_mem_proposal(tmp_path):
     assert rules.read_text(encoding="utf-8") == RULES
     assert topology.read_text(encoding="utf-8") == "human owned\n"
     assert list_pending_mem_proposals(tmp_path) == []
+
+
+# --- reflect after each run ---------------------------------------------------
+
+
+class _RecordingReflector:
+    def __init__(self, shown: list[str] | None = None):
+        self.calls: list = []
+        self._shown = shown
+
+    def ask_turn(self) -> None:
+        self.calls.append("ask")
+
+    def after_run(self, run: str) -> None:
+        snapshot = None if self._shown is None else list(self._shown)
+        self.calls.append(("run", run, snapshot))
+
+    def finish(self) -> None:
+        self.calls.append("finish")
+
+
+def test_an_ended_run_is_reflected_after_the_outcome(tmp_path):
+    from k0ntrol.workflow import Outcome
+
+    shown = []
+    reflector = _RecordingReflector(shown)
+    lines = iter(["/fast fix bug", "/quit"])
+    code = run_session(
+        lambda: next(lines),
+        shown.append,
+        root=tmp_path,
+        config=config(),
+        start=lambda *a, **k: Outcome(run="r1", outcome="done"),
+        reflector=reflector,
+    )
+    assert code == 0
+    (call, *rest) = reflector.calls
+    kind, run, snapshot = call
+    assert kind == "run"
+    assert run == "r1"
+    assert "run done" in snapshot  # the outcome was already shown
+    assert rest == ["finish"]  # /quit waited
+
+
+def test_every_outcome_kind_is_reflected(tmp_path):
+    from k0ntrol.workflow import Outcome
+
+    reflector = _RecordingReflector()
+    starts = iter(
+        [
+            Outcome(run="r1", outcome="done"),
+            Outcome(run="r2", outcome="stuck", reason="no spec"),
+            Outcome(run="r3", outcome="rejected", reason="gate n"),
+        ]
+    )
+    lines = iter(["/fast a", "/fast b", "/fast c", "/quit"])
+    code = run_session(
+        lambda: next(lines),
+        lambda _line: None,
+        root=tmp_path,
+        config=config(),
+        start=lambda *a, **k: next(starts),
+        reflector=reflector,
+    )
+    assert code == 0
+    assert [call[1] for call in reflector.calls[:-1]] == ["r1", "r2", "r3"]
+    assert reflector.calls[-1] == "finish"
+
+
+def test_a_paused_run_is_not_reflected(tmp_path):
+    from k0ntrol.workflow import Pending
+
+    reflector = _RecordingReflector()
+    inputs = iter(["/fast fix", KeyboardInterrupt(), "/quit"])
+
+    def read_line():
+        item = next(inputs)
+        if isinstance(item, BaseException):
+            raise item
+        return item
+
+    pending = Pending(run="r1", gate="diff", question="keep?", answers=("y", "n"))
+    code = run_session(
+        read_line,
+        lambda _line: None,
+        root=tmp_path,
+        config=config(),
+        start=lambda *a, **k: pending,
+        reflector=reflector,
+    )
+    assert code == 0
+    assert reflector.calls == ["finish"]
+
+
+def test_a_refused_or_failed_start_is_not_reflected(tmp_path):
+    reflector = _RecordingReflector()
+
+    def boom(*a, **k):
+        raise RuntimeError("kaput")
+
+    lines = iter(["/fast fix", "/quit"])
+    code = run_session(
+        lambda: next(lines),
+        lambda _line: None,
+        root=tmp_path,
+        config=config(),
+        start=boom,
+        reflector=reflector,
+    )
+    assert code == 0
+    assert reflector.calls == ["finish"]
+
+
+def test_quit_reflects_pending_ask_turns_once(tmp_path):
+    reflector = _RecordingReflector()
+
+    def fake_ask(question, **kwargs):
+        kwargs["on_text"]("an answer")
+        return object()  # a completed CHATTY turn
+
+    lines = iter(["/ask one", "/ask two", "/quit"])
+    code = run_session(
+        lambda: next(lines),
+        lambda _line: None,
+        root=tmp_path,
+        config=config(),
+        ask=fake_ask,
+        reflector=reflector,
+    )
+    assert code == 0
+    assert reflector.calls == ["ask", "ask", "finish"]
+
+
+def test_a_refused_ask_is_not_a_pending_turn(tmp_path):
+    reflector = _RecordingReflector()
+
+    def refusing_ask(question, **kwargs):
+        kwargs["write"]("doctor said no")
+        return None
+
+    lines = iter(["/ask one", "/quit"])
+    code = run_session(
+        lambda: next(lines),
+        lambda _line: None,
+        root=tmp_path,
+        config=config(),
+        ask=refusing_ask,
+        reflector=reflector,
+    )
+    assert code == 0
+    assert reflector.calls == ["finish"]
+
+
+def test_quit_waits_for_a_running_reflect(tmp_path):
+    from k0ntrol.workflow import Outcome
+
+    entered = threading.Event()
+    release = threading.Event()
+    inside_finish = threading.Event()
+
+    class SlowReflector(_RecordingReflector):
+        def after_run(self, run):
+            super().after_run(run)
+            entered.set()
+
+        def finish(self):
+            inside_finish.set()
+            release.wait(5)
+            super().finish()
+
+    reflector = SlowReflector()
+    lines = iter(["/fast fix", "/quit"])
+    done = []
+
+    def session():
+        done.append(
+            run_session(
+                lambda: next(lines),
+                lambda _line: None,
+                root=tmp_path,
+                config=config(),
+                start=lambda *a, **k: Outcome(run="r1", outcome="done"),
+                reflector=reflector,
+            )
+        )
+
+    thread = threading.Thread(target=session)
+    thread.start()
+    assert entered.wait(5)
+    assert inside_finish.wait(5)
+    assert done == []  # /quit is blocked on the running reflect
+    release.set()
+    thread.join(5)
+    assert done == [0]
