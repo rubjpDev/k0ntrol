@@ -61,8 +61,8 @@ def test_ensure_work_item_uses_creation_marker(existing):
     marker = comment_marker("r1", "create_issue")
     runner, tracker = _tracker(issue=_issue({"body": f"request\n\n{marker}"}))
     runner.script(
-        ["gh", "api", "--paginate", "repos/{owner}/{repo}/issues?state=all&per_page=100"],
-        stdout=json.dumps([_issue({"body": marker})] if existing else []),
+        ["gh", "api", "--paginate", "--slurp", "repos/{owner}/{repo}/issues?state=all&per_page=100"],
+        stdout=json.dumps([[ISSUE], [_issue({"body": marker})]] if existing else [[]]),
     )
     runner.script(["gh", "issue", "create"], stdout="https://github.com/o/r/issues/42")
     item = tracker.ensure_work_item("Task", "request", run="r1", node="create_issue")
