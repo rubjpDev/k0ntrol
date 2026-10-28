@@ -286,6 +286,22 @@ def writing_scan(root):
     return "scanned"
 
 
+def test_resume_rebuilds_configured_tracker(tmp_path, monkeypatch):
+    import importlib
+
+    runner = importlib.import_module("k0ntrol.workflow.run")
+    git_repo(tmp_path)
+    tracker = FakeTracker(git_runner=git_runner_for(tmp_path))
+    first = run_full(tmp_path, full_cfg(), tracker, spec_model())
+    monkeypatch.setattr(runner, "GhTracker", lambda runner: tracker)
+    result = resume(
+        first.run, "ok", root=tmp_path, cfg=full_cfg(),
+        init=models_init(write_red_tests()), scan=writing_scan,
+    )
+    assert isinstance(result, Pending)
+    assert result.gate == "test"
+
+
 def full_to_test_gate(tmp_path, *, tester=None, scan=writing_scan):
     """``/full <text>`` past an approved spec gate, up to the test gate."""
     git_repo(tmp_path)

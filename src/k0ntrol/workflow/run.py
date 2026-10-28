@@ -174,6 +174,7 @@ def resume(
         kind = _run_kind(saver, run_id)
         if kind is None or kind not in _BUILDERS:
             raise RunRefused(f"no run {run_id} in this checkout")
+        tracker = _tracker_for(kind, cfg, root, tracker)
         ctx = RunContext(
             root=root, cfg=cfg, kind=kind, init=init, tracker=tracker, scan=scan
         )
