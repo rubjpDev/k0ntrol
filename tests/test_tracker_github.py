@@ -56,6 +56,23 @@ def test_read_work_item_parses_issue_and_comments():
     assert [c.author for c in item.comments] == ["octo"]
 
 
+@pytest.mark.parametrize("existing", [False, True])
+def test_ensure_work_item_uses_creation_marker(existing):
+    marker = comment_marker("r1", "create_issue")
+    runner, tracker = _tracker(issue=_issue({"body": f"request\n\n{marker}"}))
+    runner.script(
+        ["gh", "api", "--paginate", "repos/{owner}/{repo}/issues?state=all&per_page=100"],
+        stdout=json.dumps([_issue({"body": marker})] if existing else []),
+    )
+    runner.script(["gh", "issue", "create"], stdout="https://github.com/o/r/issues/42")
+    item = tracker.ensure_work_item("Task", "request", run="r1", node="create_issue")
+    assert item.ref == "42"
+    creates = [c for c in runner.calls if c[:3] == ["gh", "issue", "create"]]
+    assert len(creates) == (0 if existing else 1)
+    if creates:
+        assert creates[0][-1] == f"request\n\n{marker}"
+
+
 def test_create_work_item_posts_and_reads_back():
     runner = FakeRunner()
     runner.script(["gh", "issue", "create"], stdout="https://github.com/o/r/issues/7\n")

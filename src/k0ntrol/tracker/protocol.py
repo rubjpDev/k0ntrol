@@ -69,6 +69,10 @@ class WorkItems(Protocol):
         """Create a work item and return it."""
         ...
 
+    def ensure_work_item(self, title: str, body: str, *, run: str, node: str) -> WorkItem:
+        """Create a marked work item, or recover the one already created."""
+        ...
+
     def comment_work_item(self, ref: str, body: str, *, run: str, node: str) -> None:
         """Post a marked comment; a no-op when the marker already exists."""
         ...

@@ -141,8 +141,9 @@ def make_create_issue(ctx: RunContext):
     """``/full <text>``: the issue exists only after the spec gate approves."""
 
     def node(state: dict) -> dict:
-        item = ctx.tracker.create_work_item(
-            state["brief"]["title"], state["task"]
+        item = ctx.tracker.ensure_work_item(
+            state["brief"]["title"], state["task"],
+            run=ctx.run_id, node="create_issue",
         )
         return {"item_ref": item.ref, "item_title": item.title}
 

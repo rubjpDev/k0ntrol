@@ -302,6 +302,31 @@ def test_resume_rebuilds_configured_tracker(tmp_path, monkeypatch):
     assert result.gate == "test"
 
 
+def test_issue_creation_recovers_after_readback_failure(tmp_path):
+    from k0ntrol.tracker import TrackerError
+
+    class FailingReadTracker(FakeTracker):
+        fail = True
+
+        def read_work_item(self, ref):
+            if self.fail:
+                self.fail = False
+                raise TrackerError("read-back failed after creation")
+            return super().read_work_item(ref)
+
+    git_repo(tmp_path)
+    tracker = FailingReadTracker(git_runner=git_runner_for(tmp_path))
+    first = run_full(tmp_path, full_cfg(), tracker, spec_model())
+    with pytest.raises(TrackerError, match="read-back failed"):
+        resume(first.run, "ok", root=tmp_path, cfg=full_cfg(), tracker=tracker)
+    result = resume(
+        first.run, "", root=tmp_path, cfg=full_cfg(), tracker=tracker,
+        init=models_init(write_red_tests()), scan=writing_scan,
+    )
+    assert result.gate == "test"
+    assert len([c for c in tracker.calls if c[0] == "create_work_item"]) == 1
+
+
 def full_to_test_gate(tmp_path, *, tester=None, scan=writing_scan):
     """``/full <text>`` past an approved spec gate, up to the test gate."""
     git_repo(tmp_path)
@@ -331,7 +356,7 @@ def test_approving_the_spec_gate_publishes_and_cuts_the_branch(tmp_path):
 
     item = tracker.read_work_item("1")
     assert item.title == "Calc answers 42"
-    assert item.body == TASK  # body = the task text, never edited
+    assert item.body == f"{TASK}\n\n<!-- k0:run={result.run} node=create_issue -->"
     brief_comment, spec_comment = item.comments[0].body, item.comments[1].body
     assert "## Agent Brief" in brief_comment
     assert "- [ ] answer() returns 42" in brief_comment
