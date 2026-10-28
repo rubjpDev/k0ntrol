@@ -52,7 +52,7 @@ def _read_lines(path: Path) -> list[str] | None:
 
 def _filtered_glob(pattern: str, root: Path) -> list[str]:
     try:
-        candidates = root.glob(pattern)
+        candidates = list(root.glob(pattern))
     except (NotImplementedError, ValueError) as error:
         raise ToolError(f"bad glob pattern: {pattern}") from error
     visible = visible_files(root)
