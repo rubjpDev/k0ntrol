@@ -18,6 +18,23 @@ from fakes import FakeChatModel, FakeTracker, cfg_with
 from k0ntrol.workflow import Outcome, Pending, RunRefused, resume, start
 
 TASK = "add a calc module that answers 42"
+
+
+def test_full_public_functions_have_complete_annotations():
+    import inspect
+    from k0ntrol.workflow import full
+
+    for name, function in inspect.getmembers(full, inspect.isfunction):
+        if name.startswith("_") or function.__module__ != full.__name__:
+            continue
+        signature = inspect.signature(function)
+        assert signature.return_annotation is not inspect.Signature.empty, name
+        assert all(
+            parameter.annotation is not inspect.Parameter.empty
+            for parameter in signature.parameters.values()
+        ), name
+
+
 BRIEF = {
     "title": "Calc answers 42",
     "category": "feature",

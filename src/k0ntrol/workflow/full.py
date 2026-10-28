@@ -15,11 +15,14 @@ side effect is its own node, marker-idempotent (carrier contract, #13).
 Everything after — CODER, VALIDATOR, the draft PR, REVIEWER — is #45.
 """
 
+from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Any
 
 from langchain_core.messages import HumanMessage
+from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.graph import END, START, StateGraph
+from langgraph.graph.state import CompiledStateGraph
 from langgraph.types import interrupt
 
 from k0ntrol.workflow.change import decider, slugify, worktree_summary
@@ -42,7 +45,9 @@ from k0ntrol.workflow.routers import (
 from k0ntrol.workflow.state import RunState
 
 
-def build_full_graph(ctx: RunContext, checkpointer):
+def build_full_graph(
+    ctx: RunContext, checkpointer: BaseCheckpointSaver | None,
+) -> CompiledStateGraph:
     """Compile the ``/full`` graph for one run context."""
     graph = StateGraph(RunState)
     graph.add_node("spec", make_spec_node(ctx))
@@ -78,7 +83,7 @@ def build_full_graph(ctx: RunContext, checkpointer):
 # --- spec side -----------------------------------------------------------------
 
 
-def make_spec_node(ctx: RunContext):
+def make_spec_node(ctx: RunContext) -> Callable[[dict], dict]:
     """SPEC drafts the brief; the structured AgentBrief lands on ``brief``."""
 
     def node(state: dict) -> dict:
@@ -111,7 +116,7 @@ def _brief_dict(response) -> dict | None:
     return dict(response)
 
 
-def make_spec_gate(ctx: RunContext):
+def make_spec_gate(ctx: RunContext) -> Callable[[dict], dict]:
     """The spec gate: ``ok`` publishes, ``redo [feedback]`` loops back."""
 
     def node(state: dict) -> dict:
@@ -137,7 +142,7 @@ def make_spec_gate(ctx: RunContext):
     return node
 
 
-def make_create_issue(ctx: RunContext):
+def make_create_issue(ctx: RunContext) -> Callable[[dict], dict]:
     """``/full <text>``: the issue exists only after the spec gate approves."""
 
     def node(state: dict) -> dict:
@@ -150,7 +155,7 @@ def make_create_issue(ctx: RunContext):
     return node
 
 
-def make_post_brief(ctx: RunContext):
+def make_post_brief(ctx: RunContext) -> Callable[[dict], dict]:
     """The brief as an ``## Agent Brief`` comment; the body is never edited."""
 
     def node(state: dict) -> dict:
@@ -165,7 +170,7 @@ def make_post_brief(ctx: RunContext):
     return node
 
 
-def make_spec_comment(ctx: RunContext):
+def make_spec_comment(ctx: RunContext) -> Callable[[dict], dict]:
     """The spec gate's pass record on the issue."""
 
     def node(state: dict) -> dict:
@@ -182,7 +187,7 @@ def make_spec_comment(ctx: RunContext):
     return node
 
 
-def make_branch_setup(ctx: RunContext):
+def make_branch_setup(ctx: RunContext) -> Callable[[dict], dict]:
     """Cut ``k0/<n>-<slug>`` from the base, rescan, commit ``.k0-mem/``."""
 
     def node(state: dict) -> dict:
@@ -199,7 +204,7 @@ def make_branch_setup(ctx: RunContext):
 # --- test side -----------------------------------------------------------------
 
 
-def make_test_gate(ctx: RunContext):
+def make_test_gate(ctx: RunContext) -> Callable[[dict], dict]:
     """The test gate: show the diff; ``redo`` resets TESTER's counter."""
 
     def node(state: dict) -> dict:
@@ -227,7 +232,7 @@ def make_test_gate(ctx: RunContext):
     return node
 
 
-def make_commit_tests(ctx: RunContext):
+def make_commit_tests(ctx: RunContext) -> Callable[[dict], dict]:
     """``#<n>: tests for <title>`` — the whole tree at test-gate approval."""
 
     def node(state: dict) -> dict:
@@ -239,7 +244,7 @@ def make_commit_tests(ctx: RunContext):
     return node
 
 
-def make_test_comment(ctx: RunContext):
+def make_test_comment(ctx: RunContext) -> Callable[[dict], dict]:
     """The test gate's pass record; then #44's slice is done."""
 
     def node(state: dict) -> dict:
