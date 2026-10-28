@@ -2,10 +2,9 @@
 
 Every node is a closure over the run context returning a state update —
 plain types only (strict msgpack). Routers stay pure, so each node that
-can lead to ``limit_hit`` also writes a ``limit`` field saying what that
-limit would mean; ``limit_hit`` reads it. Today ``limit_hit`` only ends
-the run ``stuck``; #42 turns it into a pause (`retry`/`stop` interrupt)
-without touching the routers.
+can lead to ``limit_hit`` also writes a ``limit`` field carrying
+everything the pause needs: the reason, the node to show, the node a
+``retry`` reruns, the limit description and the tail of the last output.
 """
 
 from collections.abc import Callable
@@ -16,10 +15,13 @@ from langgraph.types import interrupt
 
 from k0ntrol.tools.path_guard import is_test_path
 from k0ntrol.tools.runner import run_command
-from k0ntrol.workflow.change import worktree_summary
+from k0ntrol.workflow.change import diff_stat, worktree_summary
 from k0ntrol.workflow.context import RunContext
 
 _WRITE_TOOLS = ("write_file", "edit_file")
+
+# Chars of a failing output kept at the pause and in the retry context.
+_OUTPUT_TAIL = 2_000
 
 
 def make_agent_node(
@@ -29,25 +31,81 @@ def make_agent_node(
 
     The node counts the agent run (``<name>_attempts``), merges the files
     the agent actually wrote into ``files_key`` and flags
-    ``model_call_limit`` when the agent hit its limit.
+    ``model_call_limit`` when the agent hit its limit — a limited run
+    never falls through to a check and never uses up an attempt (#20).
     """
 
     def node(state: dict) -> dict:
         attempts_key = f"{name}_attempts"
         attempt = state.get(attempts_key, 0) + 1
         result = ctx.agent(name).invoke(
-            [HumanMessage(brief(state))], config=ctx.agent_config(attempt)
+            [HumanMessage(_brief_with_retry(brief, state))],
+            config=ctx.agent_config(attempt),
         )
         updates: dict[str, Any] = {
             attempts_key: attempt,
             files_key: _merge(state.get(files_key), _written(result)),
             "limit": None,
+            "retry_node": None,
+            "retry_context": None,
         }
         if result.limit_hit:
-            updates["limit"] = {"reason": "model_call_limit", "node": name}
+            updates[attempts_key] = state.get(attempts_key, 0)
+            updates["limit"] = _call_limit(ctx, name, result)
         return updates
 
     return node
+
+
+def _brief_with_retry(brief: Callable[[dict], str], state: dict) -> str:
+    """The agent's brief, plus the pause context on a ``limit_hit`` retry."""
+    text = brief(state)
+    if state.get("retry_context"):
+        text += f"\n\n{state['retry_context']}"
+    return text
+
+
+def _call_limit(ctx: RunContext, name: str, result) -> dict:
+    """The ``limit`` field for an agent that hit its model-call limit."""
+    calls = ctx.agent(name).model_calls
+    return {
+        "reason": "model_call_limit",
+        "node": name,
+        "retry_node": name,
+        "what": "model calls",
+        "used": calls,
+        "max": calls,
+        "output": _last_output(result),
+    }
+
+
+def _attempt_limit(state: dict, node: str, retry_node: str, output: str) -> dict:
+    """The ``limit`` field for a loop that ran out of ``max_attempts``."""
+    return {
+        "reason": "max_attempts",
+        "node": node,
+        "retry_node": retry_node,
+        "what": "attempts",
+        "used": state.get(f"{retry_node}_attempts", 0),
+        "max": state.get("max_attempts", 2),
+        "output": _tail(output),
+    }
+
+
+def _tail(text: str) -> str:
+    return text[-_OUTPUT_TAIL:]
+
+
+def _last_output(result) -> str:
+    """What the limited agent last produced: its answer, else its last
+    tool result — the closest thing to a failing output it has."""
+    if result.text:
+        return _tail(result.text)
+    for message in reversed(result.messages):
+        content = getattr(message, "content", "")
+        if isinstance(content, str) and content.strip():
+            return _tail(content)
+    return ""
 
 
 def make_red_check(ctx: RunContext) -> Callable[[dict], dict]:
@@ -63,16 +121,18 @@ def make_red_check(ctx: RunContext) -> Callable[[dict], dict]:
         )
         red = bool(files) and not result.ok
         ctx.writer.gate("red_check", "pass" if red else "fail")
-        return _red_update(red, result)
+        return _red_update(red, result, state)
 
     return node
 
 
-def _red_update(red: bool, result) -> dict:
+def _red_update(red: bool, result, state: dict) -> dict:
     return {
         "tests_red": red,
         "red_check_output": result.output,
-        "limit": None if red else _limit("max_attempts", "red_check"),
+        "limit": (
+            None if red else _attempt_limit(state, "red_check", "tester", result.output)
+        ),
     }
 
 
@@ -86,7 +146,11 @@ def make_validator(ctx: RunContext) -> Callable[[dict], dict]:
         return {
             "validator_ok": ok,
             "validator_output": _format(results),
-            "limit": None if ok else _limit("max_attempts", "validator"),
+            "limit": (
+                None
+                if ok
+                else _attempt_limit(state, "validator", "coder", _format(results))
+            ),
         }
 
     return node
@@ -96,10 +160,6 @@ def _emit_gate_events(ctx: RunContext, results: list[tuple[str, Any]], ok: bool)
     for name, result in results[1:]:
         ctx.writer.gate(name, "pass" if result.ok else "fail")
     ctx.writer.gate("validator", "pass" if ok else "fail")
-
-
-def _limit(reason: str, node: str) -> dict:
-    return {"reason": reason, "node": node}
 
 
 def make_diff_gate(ctx: RunContext) -> Callable[[dict], dict]:
@@ -120,19 +180,76 @@ def make_diff_gate(ctx: RunContext) -> Callable[[dict], dict]:
     return node
 
 
-def limit_hit(state: dict) -> dict:
-    """Where a hit limit ends the run — a plain ``stuck`` for now.
+def make_limit_hit(ctx: RunContext) -> Callable[[dict], dict]:
+    """The ``limit_hit`` pause: an ``interrupt()``, never a gate (#20).
 
-    #42 turns this node into the ``limit_hit`` pause: an ``interrupt()``
-    offering ``retry [feedback]`` / ``stop``. Routers already send limits
-    here, so no edge changes are needed then.
+    Shown: the node, the limit (``model calls 60/60`` or
+    ``attempts 2/2``), the tail of the last failing output and
+    ``git diff --stat``. ``retry [feedback]`` reruns the node that hit
+    the limit — fresh context, same limit, counter reset, files kept —
+    and ``stop`` ends the run ``stuck``. Retries are unlimited.
     """
-    limit = state.get("limit") or {}
+
+    def node(state: dict) -> dict:
+        limit = state.get("limit") or {}
+        decision = interrupt(
+            {
+                "gate": "limit_hit",
+                "question": (
+                    f"{limit.get('node', '?')} hit its limit "
+                    f"({_limit_desc(limit)}) — retry or stop?"
+                ),
+                "answers": ["retry", "stop"],
+                "detail": _limit_detail(ctx, limit),
+            }
+        )
+        verb, _, feedback = str(decision).strip().partition(" ")
+        if verb.lower() == "retry":
+            return _retry_update(limit, feedback.strip())
+        return {
+            "outcome": "stuck",
+            "reason": limit.get("reason"),
+            "node": limit.get("node"),
+            "retry_node": None,
+        }
+
+    return node
+
+
+def _limit_desc(limit: dict) -> str:
+    return f"{limit.get('what', 'attempts')} {limit.get('used', '?')}/{limit.get('max', '?')}"
+
+
+def _limit_detail(ctx: RunContext, limit: dict) -> str:
+    parts = []
+    output = str(limit.get("output") or "").rstrip()
+    if output:
+        parts.append(f"last output:\n{output}")
+    parts.append(diff_stat(ctx.root))
+    return "\n\n".join(parts)
+
+
+def _retry_update(limit: dict, feedback: str) -> dict:
+    retry_node = str(limit.get("retry_node") or "tester")
     return {
-        "outcome": "stuck",
-        "reason": limit.get("reason"),
-        "node": limit.get("node"),
+        "limit": None,
+        "retry_node": retry_node,
+        "retry_context": _retry_context(limit, feedback),
+        f"{retry_node}_attempts": 0,
     }
+
+
+def _retry_context(limit: dict, feedback: str) -> str:
+    parts = [
+        f"The previous run stopped at its limit: {_limit_desc(limit)} "
+        f"at {limit.get('node', '?')}. Files written so far are kept."
+    ]
+    output = str(limit.get("output") or "").rstrip()
+    if output:
+        parts.append(f"Last output:\n{output}")
+    if feedback:
+        parts.append(f"Human feedback: {feedback}")
+    return "\n\n".join(parts)
 
 
 def _run_checks(ctx: RunContext) -> list[tuple[str, Any]]:

@@ -11,15 +11,16 @@ from langgraph.graph import END, START, StateGraph
 
 from k0ntrol.workflow.context import RunContext
 from k0ntrol.workflow.nodes import (
-    limit_hit,
     make_agent_node,
     make_diff_gate,
+    make_limit_hit,
     make_red_check,
     make_validator,
 )
 from k0ntrol.workflow.routers import (
     route_after_coder,
     route_after_tester,
+    route_limit_hit,
     route_red_check,
     route_validator,
 )
@@ -34,14 +35,14 @@ def build_fast_graph(ctx: RunContext, checkpointer):
     graph.add_node("coder", make_agent_node(ctx, "coder", "code_files", coder_brief))
     graph.add_node("validator", make_validator(ctx))
     graph.add_node("diff_gate", make_diff_gate(ctx))
-    graph.add_node("limit_hit", limit_hit)
+    graph.add_node("limit_hit", make_limit_hit(ctx))
     graph.add_edge(START, "tester")
     graph.add_conditional_edges("tester", route_after_tester)
     graph.add_conditional_edges("red_check", route_red_check)
     graph.add_conditional_edges("coder", route_after_coder)
     graph.add_conditional_edges("validator", route_validator)
+    graph.add_conditional_edges("limit_hit", route_limit_hit)
     graph.add_edge("diff_gate", END)
-    graph.add_edge("limit_hit", END)
     return graph.compile(checkpointer=checkpointer)
 
 
