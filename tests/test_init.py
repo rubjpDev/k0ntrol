@@ -22,7 +22,7 @@ PROJECT_CONFIG = (
     "#     cmd: pytest --cov=src --cov-fail-under=90\n"
     "{}\n"
 )
-MEMORY_GITIGNORE = "sessions/\nevents.jsonl\n*.sqlite\n"
+MEMORY_GITIGNORE = "sessions/\nevents.jsonl\n*.sqlite\n*.sqlite-*\n"
 
 
 def test_init_creates_the_project_memory_layout(tmp_path):

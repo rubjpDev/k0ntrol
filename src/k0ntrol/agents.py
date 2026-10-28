@@ -18,12 +18,14 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from importlib.resources import files
 from pathlib import Path
+from typing import Any
 
 from langchain.agents import create_agent
 from langchain.agents.middleware import ModelCallLimitMiddleware
 from langchain.chat_models import init_chat_model
 from langchain_core.messages import AIMessage, AIMessageChunk, BaseMessage
 from langchain_core.tools import BaseTool
+from pydantic import BaseModel
 
 from k0ntrol.events import META_AGENT, META_EFFORT
 from k0ntrol.memory.index import custom_rules_text, custom_topology_text
@@ -69,6 +71,25 @@ _WRITE_SCOPES = {"tester": "test", "coder": "non_test"}
 # and hitting a recursion limit means a k0 bug (#20).
 _STEPS_PER_CALL = 4
 _STEPS_SLACK = 8
+
+
+class AgentBrief(BaseModel):
+    """SPEC's structured output: the contract the rest of the run works from."""
+
+    title: str
+    category: str
+    summary: str
+    current_behavior: str
+    desired_behavior: str
+    key_interfaces: str
+    acceptance_criteria: list[str]
+    out_of_scope: str
+
+
+# Agents whose ``create_agent`` gets a structured ``response_format`` (spec
+# #33): the schema becomes a tool the model calls; the validated value lands
+# on ``AgentResult.structured_response``.
+_RESPONSE_FORMATS = {"spec": AgentBrief}
 
 
 def allowlist_for(name: str, *, tracker: bool) -> tuple[str, ...]:
@@ -134,6 +155,7 @@ def build_agent(
         model,
         tools=checked,
         system_prompt=_system_prompt(name, root),
+        response_format=_RESPONSE_FORMATS.get(name),
         middleware=[
             ModelCallLimitMiddleware(
                 run_limit=entry["model_calls"], exit_behavior="end"
@@ -230,6 +252,7 @@ class AgentResult:
 
     messages: list[BaseMessage]
     limit_hit: bool
+    structured_response: Any = None
 
     @property
     def text(self) -> str:
@@ -346,6 +369,7 @@ class K0Agent:
         return AgentResult(
             messages=messages,
             limit_hit=_limit_hit(messages, self.model_calls),
+            structured_response=(output or {}).get("structured_response"),
         )
 
 

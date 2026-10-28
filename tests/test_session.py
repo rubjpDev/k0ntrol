@@ -60,7 +60,16 @@ def test_blank_and_unknown_stay_in_session(tmp_path):
     assert "unknown command: /nope" in "\n".join(shown)
 
 
-def test_full_is_not_available_yet(tmp_path):
+def test_full_routes_to_the_work_seam(tmp_path):
+    """/full drives the same start→Pending→resume loop as /fast."""
+    from k0ntrol.workflow import Outcome
+
+    calls = []
+
+    def fake_start(kind, task, **kwargs):
+        calls.append(("start", kind, task))
+        return Outcome(run="r1", outcome="done")
+
     lines = iter(["/full add checkout", "/quit"])
     shown = []
     code = run_session(
@@ -68,9 +77,10 @@ def test_full_is_not_available_yet(tmp_path):
         shown.append,
         root=tmp_path,
         config=config(),
+        start=fake_start,
     )
     assert code == 0
-    assert "/full is not available yet" in "\n".join(shown)
+    assert calls == [("start", "full", "add checkout")]
 
 
 def test_fast_drives_the_pending_gate_to_done(tmp_path):

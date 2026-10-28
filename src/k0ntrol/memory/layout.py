@@ -6,7 +6,7 @@ RULES = "# Rules\n\nGlobal rules for every agent.\n"
 ARCHITECTURE = "# Architecture\n\nSystem shape. Layers, boundaries, key modules.\n"
 STRATEGY = "# Strategy\n\nHow we change this codebase.\n"
 CODE_RULES = "# Code rules\n\nLocal coding constraints.\n"
-MEMORY_GITIGNORE = "sessions/\nevents.jsonl\n*.sqlite\n"
+MEMORY_GITIGNORE = "sessions/\nevents.jsonl\n*.sqlite\n*.sqlite-*\n"
 PROJECT_CONFIG_HEAD = (
     "# Project overrides. An empty mapping inherits the package defaults.\n"
     "#\n"

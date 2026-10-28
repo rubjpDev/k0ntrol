@@ -17,7 +17,9 @@ from langchain.chat_models import init_chat_model
 
 from k0ntrol.agents import K0Agent, agent_tools, allowlist_for, build_agent
 from k0ntrol.events import META_ATTEMPT, EventWriter, K0EventHandler
+from k0ntrol.memory.scan import run_scan
 from k0ntrol.tools.run_tests import DEFAULT_TEST_TIMEOUT
+from k0ntrol.workflow.change import default_base_branch
 
 
 @dataclass
@@ -29,6 +31,7 @@ class RunContext:
     kind: str
     init: Callable = init_chat_model
     tracker: Any = None
+    scan: Callable = run_scan
     writer: EventWriter | None = None
     handler: K0EventHandler | None = None
     _agents: dict[str, K0Agent] = field(default_factory=dict)
@@ -41,6 +44,16 @@ class RunContext:
     @property
     def timeout(self) -> float:
         return self.cfg.get("test_timeout", DEFAULT_TEST_TIMEOUT)
+
+    @property
+    def run_id(self) -> str:
+        """The run id the bound event writer carries."""
+        return self.writer.run
+
+    @property
+    def base_branch(self) -> str:
+        """The branch k0/<n>-<slug> cuts from: configured or origin's HEAD."""
+        return self.cfg.get("base_branch") or default_base_branch(self.root)
 
     def agent(self, name: str) -> K0Agent:
         """The named agent, built once per run on first use."""

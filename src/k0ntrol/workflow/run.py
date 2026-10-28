@@ -39,14 +39,20 @@ from k0ntrol.events import (  # noqa: E402
 )
 from k0ntrol.memory.scan import ScanError, run_scan  # noqa: E402
 from k0ntrol.providers import free_checks, has_errors, report_lines  # noqa: E402
-from k0ntrol.workflow.change import current_branch  # noqa: E402
+from k0ntrol.tracker import TRUSTED_ASSOCIATIONS, TrackerError  # noqa: E402
+from k0ntrol.tracker.github import GhTracker, subprocess_runner  # noqa: E402
+from k0ntrol.workflow.change import current_branch, dirty_paths  # noqa: E402
 from k0ntrol.workflow.context import RunContext  # noqa: E402
 from k0ntrol.workflow.fast import build_fast_graph  # noqa: E402
+from k0ntrol.workflow.full import build_full_graph  # noqa: E402
 
-_BUILDERS = {"fast": build_fast_graph}
+_BUILDERS = {"fast": build_fast_graph, "full": build_full_graph}
 
 # The roster each run kind uses; the free doctor checks gate start on it.
-_ROSTER = {"fast": ("agents.tester", "agents.coder")}
+_ROSTER = {
+    "fast": ("agents.tester", "agents.coder"),
+    "full": ("agents.spec", "agents.tester"),
+}
 
 # Outer recursion limit: each loop iteration costs two super-steps at most.
 _OUTER_STEPS_PER_ATTEMPT = 4
@@ -102,31 +108,41 @@ def start(
     scan: Callable = run_scan,
     tracker=None,
 ) -> Result:
-    """Start a run of ``kind`` (``"fast"`` today) for ``input``.
+    """Start a run of ``kind`` for ``input``.
 
-    Refuses — ``RunRefused`` — on bad usage, failed doctor checks, a
-    failed rescan or another run open in the checkout.
+    ``/full <text>`` drafts a brief; ``/full #<n>`` refines issue ``n``.
+    Refuses — ``RunRefused`` — on bad usage, a missing tracker or work
+    item, an untrusted issue body, a dirty tree (``.k0-mem/`` ignored),
+    failed doctor checks, a failed rescan or another open run.
     """
     if kind not in _BUILDERS:
         raise RunRefused(f"unknown run: {kind}")
-    if not str(input).strip():
-        raise RunRefused(f"usage: /{kind} <task>")
+    input_text = _checked_input(kind, input)
+    tracker = _tracker_for(kind, cfg, root, tracker)
     conn, saver = _open_checkpoints(root)
     try:
-        ctx = RunContext(root=root, cfg=cfg, kind=kind, init=init, tracker=tracker)
+        ctx = RunContext(
+            root=root, cfg=cfg, kind=kind, init=init, tracker=tracker, scan=scan
+        )
         graph = _BUILDERS[kind](ctx, saver)
         _refuse_if_busy(saver, graph)
         _doctor_gate(check, cfg, kind, root)
         _rescan(scan, root)
+        item = _full_preflight(kind, input_text, tracker, root)
         run_id = new_run_id()
         _bind_events(ctx, root, run_id, write)
         config = _runnable(run_id, ctx)
         try:
             ctx.writer.run_start(
-                kind, branch=current_branch(root), version=__version__
+                kind,
+                work_item=item.qualified_ref if item else None,
+                branch=current_branch(root),
+                version=__version__,
             )
             graph.invoke(
-                _initial_state(kind, input, cfg), config=config, durability="sync"
+                _initial_state(kind, input_text, cfg, item),
+                config=config,
+                durability="sync",
             )
             return _finish(ctx, graph, run_id, config)
         except EventWriteError:
@@ -144,6 +160,7 @@ def resume(
     cfg: dict,
     write: Callable[[str], None] | None = None,
     init: Callable = init_chat_model,
+    scan: Callable = run_scan,
     tracker=None,
 ) -> Result:
     """Continue run ``run_id`` with the human's ``decision``.
@@ -157,7 +174,9 @@ def resume(
         kind = _run_kind(saver, run_id)
         if kind is None or kind not in _BUILDERS:
             raise RunRefused(f"no run {run_id} in this checkout")
-        ctx = RunContext(root=root, cfg=cfg, kind=kind, init=init, tracker=tracker)
+        ctx = RunContext(
+            root=root, cfg=cfg, kind=kind, init=init, tracker=tracker, scan=scan
+        )
         graph = _BUILDERS[kind](ctx, saver)
         state = graph.get_state(_thread(run_id))
         _refuse_finished(state, run_id)
@@ -234,10 +253,72 @@ def _bind_events(
     ctx.bind(writer)
 
 
-def _initial_state(kind: str, input: str, cfg: dict) -> dict:
-    return {
+def _checked_input(kind: str, input) -> str:
+    """Non-empty input in the kind's accepted forms, or a usage refusal."""
+    text = str(input).strip()
+    if not text or (kind == "full" and not _full_usage_ok(text)):
+        raise RunRefused(_usage(kind))
+    return text
+
+
+def _usage(kind: str) -> str:
+    if kind == "full":
+        return "usage: /full <task> | /full #<issue>"
+    return f"usage: /{kind} <task>"
+
+
+def _full_usage_ok(input_text: str) -> bool:
+    """``/full``'s two forms: free text, or ``#`` plus an issue number."""
+    return not input_text.startswith("#") or input_text[1:].strip().isdigit()
+
+
+def _tracker_for(kind: str, cfg: dict, root: Path, tracker):
+    """``/full`` cannot run trackerless: build the configured adapter."""
+    if kind != "full" or tracker is not None:
+        return tracker
+    if cfg.get("tracker") != "github":
+        raise RunRefused("/full needs a tracker; run k0 init --tracker github")
+    return GhTracker(subprocess_runner(root))
+
+
+def _full_preflight(kind: str, input_text: str, tracker, root: Path):
+    """``/full``'s last refusals: a dirty tree, then the work item read."""
+    if kind != "full":
+        return None
+    _refuse_dirty(root)
+    return _work_item(input_text, tracker)
+
+
+def _refuse_dirty(root: Path) -> None:
+    dirty = dirty_paths(root)
+    if dirty:
+        raise RunRefused(
+            ["refusing to run /full on a dirty working tree:", *dirty]
+        )
+
+
+def _work_item(input_text: str, tracker):
+    """``/full #<n>``'s issue: must exist and come from a trusted author."""
+    if not input_text.startswith("#"):
+        return None
+    ref = input_text[1:].strip()
+    try:
+        item = tracker.read_work_item(ref)
+    except TrackerError as error:
+        raise RunRefused(str(error)) from error
+    if item.author_association not in TRUSTED_ASSOCIATIONS:
+        raise RunRefused(
+            f"work item #{ref} was written by {item.author} "
+            f"({item.author_association}), not a trusted author — restate "
+            "the work yourself: /full <task>"
+        )
+    return item
+
+
+def _initial_state(kind: str, input_text: str, cfg: dict, item=None) -> dict:
+    state = {
         "kind": kind,
-        "task": str(input).strip(),
+        "task": str(input_text).strip(),
         "start_ms": _now_ms(),
         "max_attempts": cfg.get("max_attempts", 2),
         "test_files": [],
@@ -248,6 +329,32 @@ def _initial_state(kind: str, input: str, cfg: dict) -> dict:
         "validator_ok": False,
         "limit": None,
     }
+    if kind == "full":
+        state.update(_full_state(state["task"], item))
+    return state
+
+
+def _full_state(task: str, item) -> dict:
+    """The ``/full`` fields layered over the shared run state."""
+    state = {
+        "task": task,
+        "item_ref": None,
+        "item_title": "",
+        "branch": "",
+        "brief": None,
+        "spec_attempts": 0,
+        "spec_approved": False,
+        "spec_rejections": [],
+        "spec_feedback": None,
+        "test_approved": False,
+        "test_rejections": [],
+        "test_feedback": None,
+    }
+    if item is not None:
+        state["task"] = item.body
+        state["item_ref"] = item.ref
+        state["item_title"] = item.title
+    return state
 
 
 def _runnable(run_id: str, ctx: RunContext) -> dict:
@@ -256,7 +363,8 @@ def _runnable(run_id: str, ctx: RunContext) -> dict:
     # Always explicit (langgraph's default is a safety net, not a budget):
     # each loop-back costs at most two super-steps per agent node.
     attempts = ctx.cfg.get("max_attempts", 2)
-    config["recursion_limit"] = _OUTER_STEPS_PER_ATTEMPT * attempts + _OUTER_STEPS_SLACK
+    slack = 16 if ctx.kind == "full" else _OUTER_STEPS_SLACK
+    config["recursion_limit"] = _OUTER_STEPS_PER_ATTEMPT * attempts + slack
     return config
 
 
@@ -291,17 +399,28 @@ def _advance(ctx: RunContext, graph, state, decision: str, config: dict) -> None
 
 
 def _check_decision(payload: dict, decision: str) -> None:
-    answers = [str(a) for a in payload.get("answers", [])]
-    if answers and str(decision).strip().lower() not in [a.lower() for a in answers]:
+    answers = [str(a).lower() for a in payload.get("answers", [])]
+    word = str(decision).strip().lower().split(" ", 1)[0]
+    if answers and word not in answers:
         raise RunRefused(
             f"answer {decision!r} is not one of: {', '.join(answers)}"
         )
 
 
+# The first word decides; the rest is feedback for the looping-back node.
+_DECISIONS = {
+    "y": "approve",
+    "yes": "approve",
+    "ok": "approve",
+    "n": "reject",
+    "no": "reject",
+    "redo": "reject",
+}
+
+
 def _gate_result(decision: str) -> str:
-    return {"y": "approve", "n": "reject"}.get(
-        str(decision).strip().lower(), str(decision)
-    )
+    word = str(decision).strip().lower().split(" ", 1)[0]
+    return _DECISIONS.get(word, word)
 
 
 def _finish(ctx: RunContext, graph, run_id: str, config: dict) -> Result:

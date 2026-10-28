@@ -116,6 +116,11 @@ class EventWriter:
         self._progress = progress
         self._lock = threading.Lock()
 
+    @property
+    def run(self) -> str | None:
+        """The run id this writer is bound to (`None` for a chat writer)."""
+        return self._run
+
     def emit(self, kind: str, **fields: Any) -> dict:
         """Append one event. `None` fields are omitted; `err` is masked."""
         event = {"ts": _now_iso(), "kind": kind}
