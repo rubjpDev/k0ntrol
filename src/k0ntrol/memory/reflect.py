@@ -63,9 +63,10 @@ def run_reflect(
     invoke: Invoke,
     transcript: Path | None = None,
     offset: int = 0,
+    end: int | None = None,
 ) -> None:
     """Invoke the reflect helper; store facts and pending Mem.md proposals."""
-    raw = invoke(_reflect_prompt(root, transcript, offset))
+    raw = invoke(_reflect_prompt(root, transcript, offset, end))
     for body in _output_bodies(raw, "facts"):
         add_fact(root, body)
     for body in _output_bodies(raw, "mem"):
@@ -113,13 +114,13 @@ def _append_mem(root: Path, body: str) -> None:
     path.write_text(f"{existing}{prefix}- {body}\n", encoding="utf-8")
 
 
-def _reflect_prompt(root: Path, transcript: Path | None, offset: int) -> str:
+def _reflect_prompt(root: Path, transcript: Path | None, offset: int, end: int | None) -> str:
     sections = [
         "You are the reflect helper. Distill this part of the session "
         "transcript into durable session facts and, only where a fact is "
         "worth keeping project-wide, Mem.md bullet proposals.\n"
         "\nSession transcript:\n"
-        + (_transcript_text(transcript, offset) or "(empty)")
+        + (_transcript_text(transcript, offset, end) or "(empty)")
     ]
     decided = _decided_mem_prompt(root)
     if decided:
@@ -136,14 +137,15 @@ def _decided_mem_prompt(root: Path) -> str:
     )
 
 
-def _transcript_text(transcript: Path | None, offset: int) -> str:
+def _transcript_text(transcript: Path | None, offset: int, end: int | None) -> str:
     if transcript is None or not transcript.is_file():
         return ""
     # Bytes, then a lossy decode: the offset can land mid-codepoint when a
     # reflect fired while the session was still writing the transcript.
     with transcript.open("rb") as file:
         file.seek(offset)
-        return file.read().decode("utf-8", errors="replace")
+        size = -1 if end is None else max(0, end - offset)
+        return file.read(size).decode("utf-8", errors="replace")
 
 
 class Reflector:
@@ -201,12 +203,12 @@ class Reflector:
         self._offset = _transcript_size(self._transcript)
         self._ask_turns = 0
         thread = threading.Thread(
-            target=self._run, args=(offset, run, chat), daemon=True, name="k0-reflect"
+            target=self._run, args=(offset, self._offset, run, chat), daemon=True, name="k0-reflect"
         )
         self._threads.append(thread)
         thread.start()
 
-    def _run(self, offset: int, run: str | None, chat: str | None) -> None:
+    def _run(self, offset: int, end: int, run: str | None, chat: str | None) -> None:
         try:
             handler = K0EventHandler(
                 EventWriter(
@@ -224,6 +226,7 @@ class Reflector:
                     invoke=invoke,
                     transcript=self._transcript,
                     offset=offset,
+                    end=end,
                 )
         except Exception as error:
             if self._write is not None:

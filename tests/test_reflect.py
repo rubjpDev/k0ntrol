@@ -171,6 +171,36 @@ def _recording_reflect(calls, body=lambda **_kw: None):
     return reflect
 
 
+def test_delayed_worker_reads_only_dispatched_range(tmp_path):
+    transcript = _transcript(tmp_path, "first run\n")
+    entered = threading.Event()
+    release = threading.Event()
+    prompts = []
+
+    def make_invoke(handler):
+        entered.set()
+        assert release.wait(5)
+        return lambda prompt: (prompts.append(prompt) or {"facts": [], "mem": []})
+
+    reflector = Reflector(
+        root=tmp_path, transcript=transcript, cfg={}, make_invoke=make_invoke,
+    )
+    reflector.after_run("run-1")
+    try:
+        assert entered.wait(5)
+        with transcript.open("a") as file:
+            file.write("later ask\n")
+        reflector.ask_turn()
+    finally:
+        release.set()
+        reflector.finish()
+    assert len(prompts) == 2
+    assert "first run" in prompts[0]
+    assert "later ask" not in prompts[0]
+    assert "later ask" in prompts[1]
+    assert "first run" not in prompts[1]
+
+
 def test_after_run_fires_reflect_on_a_background_thread(tmp_path):
     transcript = _transcript(tmp_path, "turn one\n")
     calls = []
