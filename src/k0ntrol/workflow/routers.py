@@ -41,9 +41,43 @@ def route_validator(state: dict) -> str:
     return "coder"
 
 
+# --- /full (#44): spec gate, then tester → red check → test gate ---------------
+
+
+def route_after_spec(state: dict) -> str:
+    """A SPEC run that hit its model-call limit never reaches the gate."""
+    if state.get("limit"):
+        return "limit_hit"
+    return "spec_gate"
+
+
+def route_spec_gate(state: dict) -> str:
+    """Redo → SPEC; approved → publish (create the issue for /full <text>)."""
+    if not state.get("spec_approved"):
+        return "spec"
+    if state.get("item_ref"):
+        return "post_brief"
+    return "create_issue"
+
+
+def route_full_red_check(state: dict) -> str:
+    """Red → the human test gate; still green → TESTER while attempts remain."""
+    if state.get("tests_red"):
+        return "test_gate"
+    if _exhausted(state, "tester_attempts"):
+        return "limit_hit"
+    return "tester"
+
+
+def route_test_gate(state: dict) -> str:
+    """Approve → commit the tests; redo → TESTER with the feedback."""
+    return "commit_tests" if state.get("test_approved") else "tester"
+
+
 def route_limit_hit(state: dict) -> str:
     """``stop`` ends the run; ``retry`` goes back to the limited node."""
     return state.get("retry_node") or END
+
 
 
 def _exhausted(state: dict, key: str) -> bool:

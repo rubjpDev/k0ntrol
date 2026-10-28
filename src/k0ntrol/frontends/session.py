@@ -306,7 +306,7 @@ def _handle_command(
         work("fast", argument)
         return False
     if command == "/full":
-        write("/full is not available yet")
+        work("full", argument)
         return False
     write(f"unknown command: {command}")
     return False

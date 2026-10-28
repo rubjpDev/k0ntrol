@@ -105,7 +105,7 @@ def test_start_without_a_task_is_refused(tmp_path):
 
 def test_unknown_run_kind_is_refused(tmp_path):
     with pytest.raises(RunRefused, match="unknown"):
-        start("full", "add a feature", root=tmp_path, cfg=fast_cfg())
+        start("wat", "add a feature", root=tmp_path, cfg=fast_cfg())
 
 
 def test_doctor_errors_refuse_the_run(tmp_path):
