@@ -20,7 +20,7 @@ def dirty_paths(root: Path, *, ignored_prefix: str = ".k0-mem/") -> list[str]:
     Local memory is the harness's own scratch space — it never makes the
     tree dirty for ``/full``.
     """
-    status = _git(root, "status", "--porcelain", "-uall").stdout
+    status = _status(root)
     return [
         line
         for line in status.splitlines()
@@ -64,13 +64,38 @@ def current_branch(root: Path) -> str | None:
     return result.stdout.strip() or None
 
 
+def diff_stat(root: Path) -> str:
+    """``git diff --stat HEAD`` plus untracked paths, for gate details.
+
+    Agent-written files are untracked and never appear in ``--stat``, so
+    they are listed as ``(new)`` lines — otherwise the stat would show
+    nothing while the tree is full of new work. ``.k0-mem/`` is runtime
+    state, not part of the change, so it is left out.
+    """
+    stat = _git(root, "diff", "--stat", "HEAD", "--").stdout.strip()
+    lines = [stat] if stat else []
+    lines += [f" {path} | (new)" for path in _new_files(root)]
+    return "\n".join(lines) or "no changes"
+
+
+def _new_files(root: Path) -> list[str]:
+    """Untracked, non-ignored file paths, without ``.k0-mem/``."""
+    out = _git(root, "ls-files", "--others", "--exclude-standard").stdout
+    return [p for p in out.splitlines() if p and not p.startswith(".k0-mem/")]
+
+
+def _status(root: Path) -> str:
+    """``git status --porcelain`` with ``-uall``: every untracked file."""
+    return _git(root, "status", "--porcelain", "-uall").stdout
+
+
 def worktree_summary(root: Path) -> str:
     """Status plus the tracked diff and excerpts of new untracked files.
 
     ``git diff`` never shows untracked files — which is exactly what
     agents write — so new files get a ``--- /dev/null``-style excerpt.
     """
-    status = _git(root, "status", "--porcelain", "-uall").stdout
+    status = _status(root)
     parts = [status.rstrip(), _git(root, "diff", "HEAD", "--").stdout.rstrip()]
     for path in _untracked(status):
         parts.append(_new_file_excerpt(root, path))

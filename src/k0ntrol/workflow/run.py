@@ -399,12 +399,21 @@ def _advance(ctx: RunContext, graph, state, decision: str, config: dict) -> None
 
 
 def _check_decision(payload: dict, decision: str) -> None:
-    answers = [str(a).lower() for a in payload.get("answers", [])]
-    word = str(decision).strip().lower().split(" ", 1)[0]
-    if answers and word not in answers:
+    """The decision's verb must be one of the payload's answers.
+
+    Matching is on the first word so ``retry [feedback]`` answers the
+    ``limit_hit`` pause with its feedback intact (#42).
+    """
+    answers = [str(a) for a in payload.get("answers", [])]
+    if answers and _decision_verb(decision) not in [a.lower() for a in answers]:
         raise RunRefused(
             f"answer {decision!r} is not one of: {', '.join(answers)}"
         )
+
+
+def _decision_verb(decision: str) -> str:
+    parts = str(decision).strip().split(maxsplit=1)
+    return parts[0].lower() if parts else ""
 
 
 # The first word decides; the rest is feedback for the looping-back node.
@@ -419,8 +428,7 @@ _DECISIONS = {
 
 
 def _gate_result(decision: str) -> str:
-    word = str(decision).strip().lower().split(" ", 1)[0]
-    return _DECISIONS.get(word, word)
+    return _DECISIONS.get(_decision_verb(decision), _decision_verb(decision))
 
 
 def _finish(ctx: RunContext, graph, run_id: str, config: dict) -> Result:

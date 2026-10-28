@@ -41,6 +41,8 @@ class RunState(TypedDict, total=False):
     test_feedback: str | None  # the feedback of the last test-gate reject
 
     limit: dict[str, Any] | None  # set when the last node can hit a limit
+    retry_node: str | None  # the node a limit_hit retry sends back to
+    retry_context: str | None  # limit note + output tail + human feedback
     outcome: str  # "done" | "stuck" | "rejected", set at the run's end
     reason: str | None  # "model_call_limit" | "max_attempts" on stuck
     node: str | None  # the node a stuck run came from

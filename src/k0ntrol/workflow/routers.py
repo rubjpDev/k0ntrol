@@ -1,9 +1,11 @@
 """The graph's routers: pure functions of state, no side effects.
 
-``limit_hit`` is already a routing target for every limit (agent
-model-call limit, loop out of ``max_attempts``); #42 makes the node a
-pause without touching these routers.
+``limit_hit`` is the routing target for every limit (agent model-call
+limit, loop out of ``max_attempts``); the pause's ``retry`` routes back
+through ``retry_node`` (#42).
 """
+
+from langgraph.graph import END
 
 DEFAULT_MAX_ATTEMPTS = 2
 
@@ -70,6 +72,12 @@ def route_full_red_check(state: dict) -> str:
 def route_test_gate(state: dict) -> str:
     """Approve → commit the tests; redo → TESTER with the feedback."""
     return "commit_tests" if state.get("test_approved") else "tester"
+
+
+def route_limit_hit(state: dict) -> str:
+    """``stop`` ends the run; ``retry`` goes back to the limited node."""
+    return state.get("retry_node") or END
+
 
 
 def _exhausted(state: dict, key: str) -> bool:

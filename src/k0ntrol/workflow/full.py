@@ -24,11 +24,18 @@ from langgraph.types import interrupt
 
 from k0ntrol.workflow.change import decider, slugify, worktree_summary
 from k0ntrol.workflow.context import RunContext
-from k0ntrol.workflow.nodes import limit_hit, make_agent_node, make_red_check
+from k0ntrol.workflow.nodes import (
+    _brief_with_retry,
+    _call_limit,
+    make_agent_node,
+    make_limit_hit,
+    make_red_check,
+)
 from k0ntrol.workflow.routers import (
     route_after_spec,
     route_after_tester,
     route_full_red_check,
+    route_limit_hit,
     route_spec_gate,
     route_test_gate,
 )
@@ -51,7 +58,7 @@ def build_full_graph(ctx: RunContext, checkpointer):
     graph.add_node("test_gate", make_test_gate(ctx))
     graph.add_node("commit_tests", make_commit_tests(ctx))
     graph.add_node("test_comment", make_test_comment(ctx))
-    graph.add_node("limit_hit", limit_hit)
+    graph.add_node("limit_hit", make_limit_hit(ctx))
     graph.add_edge(START, "spec")
     graph.add_conditional_edges("spec", route_after_spec)
     graph.add_conditional_edges("spec_gate", route_spec_gate)
@@ -64,7 +71,7 @@ def build_full_graph(ctx: RunContext, checkpointer):
     graph.add_conditional_edges("test_gate", route_test_gate)
     graph.add_edge("commit_tests", "test_comment")
     graph.add_edge("test_comment", END)
-    graph.add_edge("limit_hit", END)
+    graph.add_conditional_edges("limit_hit", route_limit_hit)
     return graph.compile(checkpointer=checkpointer)
 
 
@@ -77,11 +84,18 @@ def make_spec_node(ctx: RunContext):
     def node(state: dict) -> dict:
         attempt = state.get("spec_attempts", 0) + 1
         result = ctx.agent("spec").invoke(
-            [HumanMessage(spec_brief(state))], config=ctx.agent_config(attempt)
+            [HumanMessage(_brief_with_retry(spec_brief, state))],
+            config=ctx.agent_config(attempt),
         )
-        updates: dict[str, Any] = {"spec_attempts": attempt, "limit": None}
+        updates: dict[str, Any] = {
+            "spec_attempts": attempt,
+            "limit": None,
+            "retry_node": None,
+            "retry_context": None,
+        }
         if result.limit_hit:
-            updates["limit"] = {"reason": "model_call_limit", "node": "spec"}
+            updates["spec_attempts"] = state.get("spec_attempts", 0)
+            updates["limit"] = _call_limit(ctx, "spec", result)
             return updates
         updates["brief"] = _brief_dict(result.structured_response)
         return updates
