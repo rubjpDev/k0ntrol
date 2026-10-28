@@ -12,33 +12,17 @@ def write(path: Path, text: str) -> None:
 
 
 def test_deep_merge_nested_override_keeps_siblings_and_does_not_mutate():
-    base = {"agents": {"coder": {"model": "a", "temperature": 0.2}}, "threshold_lines": 350}
+    base = {"agents": {"coder": {"model": "a", "effort": "medium"}}, "threshold_lines": 350}
     out = deep_merge(base, {"agents": {"coder": {"model": "b"}}})
-    assert out == {"agents": {"coder": {"model": "b", "temperature": 0.2}}, "threshold_lines": 350}
+    assert out == {"agents": {"coder": {"model": "b", "effort": "medium"}}, "threshold_lines": 350}
     assert base["agents"]["coder"]["model"] == "a"
 
 
 def test_defaults_only(tmp_path):
     cfg = load_config(tmp_path, tmp_path / "home")
     assert cfg["threshold_lines"] == 350
-    assert cfg["scan_confirm_over"] == 50
-    assert cfg["retrieval_top_k"] == 5
-    assert cfg["reflect_every"] == 10
-
-
-def test_default_agent_models_match_selected_cursor_models(tmp_path):
-    cfg = load_config(tmp_path, tmp_path / "home")
-    assert cfg["agents"]["spec"]["model"] == "claude-opus-5-5-high"
-    assert cfg["agents"]["reviewer"]["model"] == "claude-opus-5-5-high"
-    for name in (
-        "tester",
-        "coder",
-        "validator",
-        "bulk_reader",
-        "retrieval_gate",
-        "reflect",
-    ):
-        assert cfg["agents"][name]["model"] == "gpt-5.6-luna-max"
+    assert cfg["test_cmd"] == "pytest -q"
+    assert cfg["gates"] == []
 
 
 def test_home_overrides_defaults(tmp_path):

@@ -6,21 +6,33 @@ from typing import Any
 import yaml
 
 
-AGENTS = (
-    "spec",
-    "tester",
-    "coder",
-    "validator",
-    "reviewer",
-    "bulk_reader",
-    "retrieval_gate",
-    "reflect",
-)
-BACKENDS = ("cursor",)
-
-
 class ConfigError(Exception):
     """Raised when configuration cannot be read or is invalid."""
+
+
+AGENTS = ("spec", "tester", "coder", "reviewer", "chatty")
+HELPERS = ("bulk_read", "reflect")
+
+_AGENT_KEYS = {"provider", "model", "effort", "params", "model_calls"}
+_HELPER_KEYS = {"provider", "model", "effort", "params"}
+_EFFORT_LEVELS = {"low", "medium", "high"}
+
+# 0.0.x keys that are gone in 0.1.0, mapped to their replacement.
+_RETIRED_KEYS = {
+    "backend": "set provider on each agents:/helpers: entry",
+    "max_retries": "max_attempts",
+    "retrieval_top_k": "the search_memory tool's limit argument",
+    "reflect_every": "nothing; reflect runs after each run",
+    "validator": "VALIDATOR is a deterministic code gate now; use test_cmd and gates",
+    "retrieval_gate": "the search_memory tool",
+    "bulk_reader": "helpers.bulk_read",
+}
+
+# Keys that must never appear in config: secrets belong in vendor env vars.
+_SECRET_MARKERS = ("api_key", "token", "secret", "password")
+
+# Keys that would inject tool definitions through params.
+_TOOL_MARKERS = ("tool", "function")
 
 
 def deep_merge(base: dict, override: dict) -> dict:
@@ -45,23 +57,145 @@ def load_config(project_dir: Path, home_dir: Path | None = None) -> dict:
 
 def validate_config(cfg: dict) -> None:
     errors = _validate_top_level(cfg)
-    errors.extend(_validate_agents(cfg.get("agents")))
     if errors:
         raise ConfigError("; ".join(errors))
 
 
+def resolved_params(cfg: dict, entry: dict) -> dict:
+    """Merge an agent or helper's params over its provider's params."""
+    providers = cfg.get("providers") or {}
+    provider = providers.get(entry.get("provider")) or {}
+    return deep_merge(provider.get("params") or {}, entry.get("params") or {})
+
+
 def _validate_top_level(cfg: dict) -> list[str]:
-    errors = []
-    if cfg.get("backend") not in BACKENDS:
-        errors.append("backend: must be cursor")
+    errors = _check_keys(cfg)
     errors.extend(_validate_integer("threshold_lines", cfg.get("threshold_lines"), 1))
-    errors.extend(_validate_integer("scan_confirm_over", cfg.get("scan_confirm_over"), 0))
-    errors.extend(_validate_integer("retrieval_top_k", cfg.get("retrieval_top_k"), 1))
-    errors.extend(_validate_integer("reflect_every", cfg.get("reflect_every"), 1))
     errors.extend(_validate_text("test_cmd", cfg.get("test_cmd")))
-    errors.extend(_validate_integer("max_retries", cfg.get("max_retries"), 0))
     errors.extend(_validate_gates(cfg.get("gates")))
+    errors.extend(_validate_optional_text("tracker", cfg.get("tracker")))
+    errors.extend(_validate_optional_text("base_branch", cfg.get("base_branch")))
+    errors.extend(_validate_integer("max_attempts", cfg.get("max_attempts"), 1))
+    errors.extend(_validate_integer("test_timeout", cfg.get("test_timeout"), 1))
+    errors.extend(_validate_roster("agents", cfg.get("agents")))
+    errors.extend(_validate_roster("helpers", cfg.get("helpers")))
+    errors.extend(_validate_providers(cfg.get("providers")))
     return errors
+
+
+def _validate_providers(value: object) -> list[str]:
+    if value is None:
+        return []
+    if not isinstance(value, Mapping):
+        return ["providers: must be a mapping"]
+    errors = []
+    for name, entry in value.items():
+        errors.extend(_validate_provider(f"providers.{name}", entry))
+    return errors
+
+
+def _validate_provider(path: str, value: object) -> list[str]:
+    if not isinstance(value, Mapping):
+        return [f"{path}: must be a mapping"]
+    errors = []
+    if "base_url" in value:
+        errors.extend(_validate_text(f"{path}.base_url", value["base_url"]))
+    errors.extend(_validate_params(f"{path}.params", value.get("params")))
+    errors.extend(
+        f"{path}.{key}: unknown key" for key in value if key not in {"base_url", "params"}
+    )
+    return errors
+
+
+def _validate_roster(kind: str, value: object) -> list[str]:
+    names = AGENTS if kind == "agents" else HELPERS
+    if not isinstance(value, Mapping):
+        return [f"{kind}: must be a mapping"]
+    errors = _unknown_roster_names(kind, names, value)
+    for name in names:
+        errors.extend(_validate_entry(f"{kind}.{name}", value.get(name), kind))
+    return errors
+
+
+def _unknown_roster_names(kind: str, names: tuple, value: Mapping) -> list[str]:
+    return [
+        f"{kind}.{name}: unknown {kind} entry"
+        for name in value
+        if name not in names and str(name).lower() not in _RETIRED_KEYS
+    ]
+
+
+def _check_keys(node: object, path: str = "", in_params: bool = False) -> list[str]:
+    if isinstance(node, Mapping):
+        return _check_mapping_keys(node, path, in_params)
+    if isinstance(node, list):
+        return _check_list_keys(node, path, in_params)
+    return []
+
+
+def _check_mapping_keys(node: Mapping, path: str, in_params: bool) -> list[str]:
+    errors = []
+    for key, value in node.items():
+        key_path = f"{path}.{key}" if path else str(key)
+        errors.extend(_check_key(key, key_path, in_params))
+        errors.extend(
+            _check_keys(value, key_path, in_params or str(key).lower() == "params")
+        )
+    return errors
+
+
+def _check_list_keys(node: list, path: str, in_params: bool) -> list[str]:
+    errors = []
+    for index, item in enumerate(node):
+        errors.extend(_check_keys(item, f"{path}[{index}]", in_params))
+    return errors
+
+
+def _check_key(key: object, path: str, in_params: bool) -> list[str]:
+    if not isinstance(key, str):
+        return [f"{path}: keys must be strings"]
+    lowered = key.lower()
+    if lowered in _RETIRED_KEYS:
+        return [f"{path}: retired in 0.1.0; {_RETIRED_KEYS[lowered]}"]
+    if any(marker in lowered for marker in _SECRET_MARKERS):
+        return [f"{path}: secrets are not allowed in config; use the provider's env vars"]
+    if in_params and any(marker in lowered for marker in _TOOL_MARKERS):
+        return [f"{path}: tool definitions are not allowed in params"]
+    return []
+
+
+def _validate_entry(path: str, value: object, kind: str) -> list[str]:
+    if not isinstance(value, Mapping):
+        return [f"{path}: must be a mapping"]
+    errors = _validate_text(f"{path}.provider", value.get("provider"))
+    errors.extend(_validate_text(f"{path}.model", value.get("model")))
+    errors.extend(_validate_effort(f"{path}.effort", value.get("effort")))
+    errors.extend(_validate_params(f"{path}.params", value.get("params")))
+    errors.extend(_unknown_entry_keys(path, value, kind))
+    if kind == "agents":
+        errors.extend(_validate_integer(f"{path}.model_calls", value.get("model_calls"), 1))
+    return errors
+
+
+def _unknown_entry_keys(path: str, entry: Mapping, kind: str) -> list[str]:
+    allowed = _AGENT_KEYS if kind == "agents" else _HELPER_KEYS
+    return [f"{path}.{key}: unknown key" for key in entry if key not in allowed]
+
+
+def _validate_effort(name: str, value: object) -> list[str]:
+    if value is None:
+        return []
+    if value not in _EFFORT_LEVELS:
+        return [f"{name}: must be one of low, medium, high"]
+    return []
+
+
+def _validate_params(name: str, value: object) -> list[str]:
+    if value is None:
+        return []
+    if not isinstance(value, Mapping):
+        return [f"{name}: must be a mapping"]
+    return []
 
 
 def _validate_gates(value: object) -> list[str]:
@@ -95,21 +229,10 @@ def _validate_text(name: str, value: object) -> list[str]:
     return []
 
 
-def _validate_agents(value: object) -> list[str]:
-    if not isinstance(value, Mapping):
-        return ["agents: must be a mapping"]
-    errors = []
-    for name in AGENTS:
-        errors.extend(_validate_agent(name, value.get(name)))
-    return errors
-
-
-def _validate_agent(name: str, agent: object) -> list[str]:
-    if not isinstance(agent, Mapping):
-        return [f"agents.{name}: must be a mapping"]
-    if not isinstance(agent.get("model"), str) or not agent["model"].strip():
-        return [f"agents.{name}.model: must be a non-empty string"]
-    return []
+def _validate_optional_text(name: str, value: object) -> list[str]:
+    if value is None:
+        return []
+    return _validate_text(name, value)
 
 
 def _read_config(path: Any) -> dict:

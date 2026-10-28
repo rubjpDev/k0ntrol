@@ -1,63 +1,100 @@
-from k0ntrol.harness.retrieve import agent_memory, query_index, rebuild_index
-from k0ntrol.harness.session_memory import (
-    add_episode,
+from k0ntrol.memory.index import query_index, rebuild_index
+from k0ntrol.memory.session import (
     add_fact,
+    add_mem_proposal,
+    decide_mem_proposal,
     fact_entry_id,
-    list_episodes,
+    has_facts,
+    list_decided_mem_proposals,
     list_facts,
+    list_pending_mem_proposals,
+    session_db_path,
 )
-from k0ntrol.modespec import load_mode
 
 
 def test_add_fact_is_retrievable_from_session_sqlite(tmp_path):
     fact_id = add_fact(tmp_path, "checkout uses sqlite")
-    assert (tmp_path / ".k0-mem" / "session.sqlite").is_file()
+    assert session_db_path(tmp_path).is_file()
     assert list_facts(tmp_path) == [{"id": fact_id, "body": "checkout uses sqlite"}]
     assert fact_id == 1
 
 
-def test_episodes_stay_separate_from_facts(tmp_path):
+def test_fact_bodies_are_unique(tmp_path):
+    first = add_fact(tmp_path, "checkout uses sqlite")
+    duplicate = add_fact(tmp_path, "checkout uses sqlite")
+    assert first == 1
+    assert duplicate is None
+    assert [item["body"] for item in list_facts(tmp_path)] == ["checkout uses sqlite"]
+
+
+def test_has_facts(tmp_path):
+    assert has_facts(tmp_path) is False
     add_fact(tmp_path, "a fact")
-    episode_id = add_episode(tmp_path, "user asked about checkout")
-    assert list_episodes(tmp_path) == [
-        {"id": episode_id, "body": "user asked about checkout"}
+    assert has_facts(tmp_path) is True
+
+
+def test_mem_proposal_lifecycle(tmp_path):
+    assert list_pending_mem_proposals(tmp_path) == []
+    proposal_id = add_mem_proposal(tmp_path, "Prefer sqlite for checkout state")
+    assert add_mem_proposal(tmp_path, "Prefer sqlite for checkout state") is None
+    assert list_pending_mem_proposals(tmp_path) == [
+        {"id": proposal_id, "body": "Prefer sqlite for checkout state"}
     ]
-    assert [item["body"] for item in list_facts(tmp_path)] == ["a fact"]
+    body = decide_mem_proposal(tmp_path, proposal_id, approved=True)
+    assert body == "Prefer sqlite for checkout state"
+    assert list_pending_mem_proposals(tmp_path) == []
+    assert list_decided_mem_proposals(tmp_path) == [
+        {"status": "approved", "body": "Prefer sqlite for checkout state"}
+    ]
 
 
-def test_facts_are_in_fts_and_episodes_are_not(tmp_path):
+def test_facts_are_in_fts(tmp_path):
     fact_id = add_fact(tmp_path, "checkout uses sqlite")
-    add_episode(tmp_path, "asked about checkout")
+    other = add_fact(tmp_path, "deploys happen on fridays")
     rebuild_index(tmp_path)
-    matches = query_index(tmp_path, "checkout sqlite", 5)
+    matches = query_index(tmp_path, "checkout", 5)
     assert [item["id"] for item in matches] == [fact_entry_id(fact_id)]
+    assert matches[0]["path"] == "session.sqlite"
     assert matches[0]["body"] == "checkout uses sqlite"
-    assert all("asked about checkout" not in item["body"] for item in matches)
+    ids = {item["id"] for item in query_index(tmp_path, "fridays", 5)}
+    assert ids == {fact_entry_id(other)}
 
 
-def test_agent_memory_retrieves_facts_without_project_context(tmp_path):
-    fact_id = add_fact(tmp_path, "checkout uses sqlite")
-    node_id = fact_entry_id(fact_id)
-    seen = {}
+def test_facts_survive_in_the_index_after_rebuild(tmp_path):
+    add_fact(tmp_path, "checkout uses sqlite")
+    rebuild_index(tmp_path)
+    rebuild_index(tmp_path)
+    matches = query_index(tmp_path, "sqlite", 5)
+    assert [item["id"] for item in matches] == ["session:fact:1"]
 
-    def fake_invoke(mode, prompt):
-        seen["mode"] = mode.name
-        seen["prompt"] = prompt
-        return f"retrieve: yes\n- {node_id}\n"
 
-    config = {"retrieval_top_k": 5, "agents": {"retrieval_gate": {"model": "m"}}}
-    extra = agent_memory(
-        "how does checkout work",
-        root=tmp_path,
-        config=config,
-        invoke=fake_invoke,
-    )
-    assert extra == "checkout uses sqlite"
-    assert seen["mode"] == "retrieval_gate"
-    assert f"- {node_id}" in seen["prompt"]
-    assert node_id.startswith("session:fact:")
-    assert "needs code memory" not in seen["prompt"]
-    gate = load_mode("retrieval_gate", config).instructions.lower()
-    assert "session-fact" in gate or "session fact" in gate
-    assert not (tmp_path / ".k0-mem" / "Project_context").exists()
+def test_old_session_db_is_trimmed(tmp_path):
+    """A 0.0.x session.sqlite loses its episodes table and gains the
+    facts.body uniqueness the trimmed session memory requires."""
+    import sqlite3
 
+    db = session_db_path(tmp_path)
+    db.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(db)
+    conn.execute("CREATE TABLE episodes (id INTEGER PRIMARY KEY, body TEXT)")
+    conn.execute("INSERT INTO episodes (body) VALUES ('asked about x')")
+    conn.execute("CREATE TABLE facts (id INTEGER PRIMARY KEY, body TEXT NOT NULL)")
+    conn.execute("INSERT INTO facts (body) VALUES ('dup')")
+    conn.execute("INSERT INTO facts (body) VALUES ('dup')")
+    conn.commit()
+    conn.close()
+
+    assert [item["body"] for item in list_facts(tmp_path)] == ["dup"]
+    assert add_fact(tmp_path, "dup") is None
+    assert add_fact(tmp_path, "new") is not None
+
+    conn = sqlite3.connect(db)
+    tables = {
+        row[0]
+        for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table'"
+        )
+    }
+    conn.close()
+    assert "episodes" not in tables
+    assert [item["body"] for item in list_facts(tmp_path)] == ["dup", "new"]

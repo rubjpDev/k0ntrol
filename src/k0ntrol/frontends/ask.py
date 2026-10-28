@@ -1,76 +1,152 @@
-import re
+"""``/ask <question>``: CHATTY answers with its read-only tools.
+
+``/ask`` runs no graph: the free doctor checks for CHATTY and the
+``bulk_read`` helper gate the call, project memory is refreshed once
+(rescan + one index rebuild), the answer streams to the REPL, and every
+model and tool call writes a ``chat``-scoped event (never ``run``) —
+including the rescan's helper calls. ``@path`` mentions pass relative
+paths only — CHATTY reads the files itself; file contents are never
+inlined into the prompt.
+"""
+
 from collections.abc import Callable
 from pathlib import Path
 
-from k0ntrol.harness.delegate import should_delegate
-from k0ntrol.harness.retrieve import agent_memory, has_code_memory
-from k0ntrol.modespec import ModeSpec, load_mode
+from langchain.chat_models import init_chat_model
+from langchain_core.messages import HumanMessage
+
+from k0ntrol.agents import AgentResult, agent_tools, build_agent
+from k0ntrol.events import (
+    EventWriter,
+    K0EventHandler,
+    ProgressRenderer,
+    events_path,
+    new_chat_id,
+)
 from k0ntrol.frontends.mentions import MentionError, mention_paths
+from k0ntrol.helpers import helper_invoker
+from k0ntrol.memory.refresh import refresh_memory
+from k0ntrol.providers import free_checks, has_errors, report_lines
 
 
 def answer_ask(
-    text: str,
+    question: str,
     *,
     root: Path,
     config: dict,
-    invoke: Callable[[ModeSpec, str], str],
-    bulk_read: Callable,
-) -> str:
-    paths = mention_paths(text, root)
-    if not paths and not has_code_memory(root):
-        raise MentionError("ask requires at least one @file mention")
-    question = re.sub(r"@[^\s]+", "", text).strip()
-    prompt_question = _question_with_memory(question, root, config, invoke)
-    if not paths:
-        return invoke(load_mode("bulk_reader", config), prompt_question)
-    return _ask_with_files(prompt_question, paths, root, config, invoke, bulk_read)
+    write: Callable[[str], None],
+    on_text: Callable[[str], None] | None = None,
+    init: Callable = init_chat_model,
+    check: Callable = free_checks,
+    refresh: Callable = refresh_memory,
+) -> AgentResult | None:
+    """Answer ``question`` with CHATTY.
 
-
-def _question_with_memory(
-    question: str,
-    root: Path,
-    config: dict,
-    invoke: Callable[[ModeSpec, str], str],
-) -> str:
-    extra = agent_memory(question, root=root, config=config, invoke=invoke)
-    if not extra:
-        return question
-    return f"{question}\n\n{extra}"
-
-
-def _ask_with_files(
-    question: str,
-    paths: list[Path],
-    root: Path,
-    config: dict,
-    invoke: Callable[[ModeSpec, str], str],
-    bulk_read: Callable,
-) -> str:
-    delegated = [path for path in paths if should_delegate(path, config["threshold_lines"])]
-    direct = [path for path in paths if path not in delegated]
-    mode = load_mode("bulk_reader", config)
-    results = []
-    if delegated:
-        results.append(
-            bulk_read(
-                question,
-                delegated,
-                root=root,
-                repo=root.name,
-                mode=mode,
-                invoke=invoke,
-            )
+    ``write`` takes progress lines and errors; ``on_text`` takes the
+    streamed answer deltas (defaults to ``write``). Returns the agent
+    result, or ``None`` when the doctor checks, a bad ``@mention`` or the
+    memory refresh refuse the run.
+    """
+    prompt = _prepare(question, root, config, write, check)
+    if prompt is None:
+        return None
+    writer, handler = _chat_events(root, write)
+    if not _refresh(root, config, init, handler, write, refresh):
+        return None
+    agent = build_agent(
+        "chatty",
+        config,
+        agent_tools("chatty", root=root, cfg=config, init=init),
+        root=root,
+        init=init,
+    )
+    try:
+        result = _run_chatty(agent, prompt, handler, write, on_text or write)
+    except Exception as error:
+        write(f"CHATTY failed: {error}")
+        return None
+    if result.limit_hit:
+        write(
+            f"CHATTY hit its {agent.model_calls} model-call limit; "
+            "ask again or narrow the question."
         )
-    if direct:
-        results.append(invoke(mode, _direct_prompt(question, direct, root)))
-    return "".join(results)
+    return result
 
 
-def _direct_prompt(question: str, paths: list[Path], root: Path) -> str:
-    sections = [_file_section(path, root) for path in paths]
-    return "\n".join([question, "", *sections])
+def _prepare(
+    question: str,
+    root: Path,
+    config: dict,
+    write: Callable[[str], None],
+    check: Callable,
+) -> str | None:
+    """Usage check, the free doctor gate, then the prompt; None = refuse."""
+    if not question.strip():
+        write("usage: /ask <question>")
+        return None
+    checks = check(
+        config, names=("agents.chatty", "helpers.bulk_read"), root=root
+    )
+    if has_errors(checks):
+        for line in report_lines(checks):
+            write(line)
+        return None
+    try:
+        return _build_prompt(question, root)
+    except MentionError as error:
+        write(str(error))
+        return None
 
 
-def _file_section(path: Path, root: Path) -> str:
-    relative = path.relative_to(root).as_posix()
-    return f"{relative}\n{path.read_text(encoding='utf-8')}"
+def _build_prompt(question: str, root: Path) -> str:
+    """The question plus the mentioned files as root-relative paths."""
+    mentions = mention_paths(question, root)
+    if not mentions:
+        return question
+    relative = [
+        path.relative_to(root.resolve()).as_posix() for path in mentions
+    ]
+    return (
+        question
+        + "\n\nMentioned files (read them with your tools):\n"
+        + "\n".join(relative)
+    )
+
+
+def _chat_events(root: Path, write: Callable[[str], None]):
+    """One chat-scoped writer + handler shared by the refresh and CHATTY."""
+    path = events_path(root)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    writer = EventWriter(
+        path, chat=new_chat_id(), progress=ProgressRenderer(write)
+    )
+    return writer, K0EventHandler(writer)
+
+
+def _refresh(
+    root: Path,
+    config: dict,
+    init: Callable,
+    handler: K0EventHandler,
+    write: Callable[[str], None],
+    refresh: Callable,
+) -> bool:
+    """Rescan + one index rebuild; the rescan's helper calls are
+    chat-scoped ``model`` events. Returns False when refresh fails."""
+    invoke = helper_invoker(
+        config, "bulk_read", init=init, config={"callbacks": [handler]}
+    )
+    try:
+        refresh(root, config=config, invoke=invoke)
+    except Exception as error:
+        write(f"memory refresh failed: {error}")
+        return False
+    return True
+
+
+def _run_chatty(agent, prompt, handler, write, on_text) -> AgentResult:
+    return agent.stream(
+        [HumanMessage(prompt)],
+        config={"callbacks": [handler]},
+        on_text=on_text,
+    )

@@ -1,371 +1,439 @@
+"""/ask answers questions with CHATTY: doctor gate, streamed answer,
+@path mentions as relative paths, the model-call limit line."""
+
 import json
-import stat
-import sys
-from pathlib import Path
+import subprocess
 
 import pytest
+from langchain_core.messages import AIMessage
 
-from k0ntrol.backends.invoke import invoke
+from fakes import FakeChatModel, cfg_with
 from k0ntrol.frontends.ask import answer_ask
-from k0ntrol.frontends.mentions import MentionError
-from k0ntrol.harness.init import RULES
+from k0ntrol.providers import Check
 
 
-def config(threshold=350):
-    return {
-        "backend": "cursor",
-        "threshold_lines": threshold,
-        "agents": {"bulk_reader": {"model": "m"}},
-    }
+def _repo(root, files=None):
+    (root / ".k0-mem").mkdir(exist_ok=True)
+    for name, text in (files or {}).items():
+        path = root / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+    subprocess.run(["git", "init"], cwd=root, check=True, capture_output=True)
+    subprocess.run(["git", "add", "-A"], cwd=root, check=True, capture_output=True)
 
 
-def memory_config(threshold=350):
-    return {
-        "backend": "cursor",
-        "threshold_lines": threshold,
-        "retrieval_top_k": 5,
-        "agents": {
-            "bulk_reader": {"model": "m"},
-            "retrieval_gate": {"model": "m"},
-        },
-    }
-
-
-def write_file_memory(root, relative, body):
-    path = (
-        root
-        / ".k0-mem"
-        / "Project_context"
-        / root.name
-        / "files"
-        / f"{relative}.md"
+def _cfg(model_calls=15):
+    return cfg_with(
+        {"chatty": {"provider": "anthropic", "model": "m", "model_calls": model_calls}},
+        helpers={"bulk_read": {"provider": "anthropic", "model": "m"}},
     )
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(body, encoding="utf-8")
-    return f"{root.name}:file:{relative}"
 
 
-def write_agent(path: Path, body: str) -> None:
-    path.write_text(f"#!{sys.executable}\n{body}")
-    path.chmod(path.stat().st_mode | stat.S_IEXEC)
+def _init(model):
+    return lambda _model, *, model_provider=None, **kwargs: model
 
 
-def test_small_file_is_inlined_and_nothing_is_written(tmp_path):
-    source = tmp_path / "src"
-    source.mkdir()
-    target = source / "app.py"
-    target.write_text("def checkout():\n    return 1\n")
-    before = sorted(path.relative_to(tmp_path) for path in tmp_path.rglob("*"))
-    seen = {}
+def _ok_checks(cfg, **_kw):
+    return [Check("config", "ok", "valid")]
 
-    def fake_invoke(mode, prompt):
-        seen["mode"] = mode.name
-        seen["prompt"] = prompt
-        return "- checkout (function) line 1: returns 1\n"
 
-    def fake_bulk(*args, **kwargs):
-        raise AssertionError("small file must stay out of bulk_read")
+def _no_refresh(root, **kwargs):
+    return "scanned"
 
-    out = answer_ask(
-        "what does checkout return? @src/app.py",
+
+def _events(root):
+    path = root / ".k0-mem" / "events.jsonl"
+    if not path.exists():
+        return []
+    return [json.loads(line) for line in path.read_text().splitlines()]
+
+
+def _read_event_shown(shown):
+    return "\n".join(shown)
+
+
+# --- doctor gate --------------------------------------------------------------
+
+
+def test_ask_refuses_when_doctor_checks_error(tmp_path):
+    _repo(tmp_path)
+    shown, deltas = [], []
+
+    def bad_checks(cfg, **_kw):
+        return [Check("provider anthropic", "error", "missing credential")]
+
+    result = answer_ask(
+        "what is x?",
         root=tmp_path,
-        config=config(),
-        invoke=fake_invoke,
-        bulk_read=fake_bulk,
+        config=_cfg(),
+        write=shown.append,
+        on_text=deltas.append,
+        init=_init(FakeChatModel(messages=[])),
+        check=bad_checks,
+        refresh=_no_refresh,
     )
-    assert out == "- checkout (function) line 1: returns 1\n"
-    assert seen["mode"] == "bulk_reader"
-    assert seen["prompt"] == (
-        "what does checkout return?\n"
-        "\n"
-        "src/app.py\n"
-        "def checkout():\n"
-        "    return 1\n"
-    )
-    after = sorted(path.relative_to(tmp_path) for path in tmp_path.rglob("*"))
-    assert after == before
+
+    assert result is None
+    assert not deltas
+    text = _read_event_shown(shown)
+    assert "missing credential" in text
+    assert not _events(tmp_path)
 
 
-def test_three_large_files_go_through_bulk_read(tmp_path):
-    paths = []
-    for name in ("a.py", "b.py", "c.py"):
-        path = tmp_path / name
-        path.write_text("x\n" * 351)
-        paths.append(path)
-    seen = {}
+# --- answering -----------------------------------------------------------------
 
-    def fake_bulk(question, bulk_paths, **kwargs):
-        seen["question"] = question
-        seen["paths"] = list(bulk_paths)
-        seen["repo"] = kwargs["repo"]
-        return "- a (file) line 1: x\n"
 
-    def fake_invoke(mode, prompt):
-        raise AssertionError("delegated files must not be inlined")
+def test_ask_streams_the_answer(tmp_path):
+    _repo(tmp_path, {"note.txt": "the sky is blue\n"})
+    model = FakeChatModel(messages=[AIMessage(content="The note says the sky is blue.")])
+    shown, deltas = [], []
 
-    out = answer_ask(
-        "what is on line 1? @a.py @b.py @c.py",
+    result = answer_ask(
+        "what does the note say?",
         root=tmp_path,
-        config=config(),
-        invoke=fake_invoke,
-        bulk_read=fake_bulk,
+        config=_cfg(),
+        write=shown.append,
+        on_text=deltas.append,
+        init=_init(model),
+        check=_ok_checks,
+        refresh=_no_refresh,
     )
-    assert out == "- a (file) line 1: x\n"
-    assert seen["question"] == "what is on line 1?"
-    assert seen["paths"] == paths
-    assert seen["repo"] == tmp_path.name
+
+    assert result is not None and not result.limit_hit
+    assert "".join(deltas) == "The note says the sky is blue."
+    assert "The note says the sky is blue." == result.text
 
 
-def test_mixed_threshold_splits_the_call(tmp_path):
-    (tmp_path / "small.py").write_text("small\n")
-    (tmp_path / "big.py").write_text("x\n" * 351)
-    seen = {}
-
-    def fake_bulk(question, bulk_paths, **kwargs):
-        seen["bulk"] = list(bulk_paths)
-        return "BULK\n"
-
-    def fake_invoke(mode, prompt):
-        seen["prompt"] = prompt
-        return "DIRECT\n"
-
-    out = answer_ask(
-        "q @small.py @big.py",
-        root=tmp_path,
-        config=config(),
-        invoke=fake_invoke,
-        bulk_read=fake_bulk,
+def test_ask_writes_chat_scoped_events_and_progress(tmp_path):
+    _repo(tmp_path, {"note.txt": "hi\n"})
+    model = FakeChatModel(
+        messages=[
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {"name": "read_file", "args": {"path": "note.txt"}, "id": "t1"}
+                ],
+            ),
+            AIMessage(content="hi is the note"),
+        ]
     )
-    assert seen["bulk"] == [tmp_path / "big.py"]
-    assert "small.py" in seen["prompt"]
-    assert "big.py" not in seen["prompt"]
-    assert out == "BULK\nDIRECT\n"
-
-
-def test_missing_file_and_no_mention_do_not_call(tmp_path):
-    def boom(*args, **kwargs):
-        raise AssertionError("called")
-
-    with pytest.raises(MentionError, match="nope"):
-        answer_ask("@nope", root=tmp_path, config=config(), invoke=boom, bulk_read=boom)
-    with pytest.raises(MentionError, match="@"):
-        answer_ask(
-            "what does checkout return?",
-            root=tmp_path,
-            config=config(),
-            invoke=boom,
-            bulk_read=boom,
-        )
-
-
-def test_ask_without_file_injects_memory_when_gate_says_yes(tmp_path):
-    node_id = write_file_memory(
-        tmp_path,
-        "src/app.py",
-        "# src/app.py\n\n## hace\nreturns 1 from checkout\n\n## gotchas\nnone\n",
-    )
-    seen = {}
-
-    def fake_invoke(mode, prompt):
-        seen.setdefault("modes", []).append(mode.name)
-        if mode.name == "retrieval_gate":
-            seen["gate_prompt"] = prompt
-            return f"retrieve: yes\n- {node_id}\n"
-        seen["prompt"] = prompt
-        return "- checkout (function): returns 1\n"
-
-    def fake_bulk(*args, **kwargs):
-        raise AssertionError("no @file means no bulk_read")
-
-    out = answer_ask(
-        "what does checkout return?",
-        root=tmp_path,
-        config=memory_config(),
-        invoke=fake_invoke,
-        bulk_read=fake_bulk,
-    )
-    assert out == "- checkout (function): returns 1\n"
-    assert seen["modes"] == ["retrieval_gate", "bulk_reader"]
-    assert node_id in seen["gate_prompt"]
-    assert "returns 1 from checkout" in seen["prompt"]
-    assert "what does checkout return?" in seen["prompt"]
-    assert (tmp_path / ".k0-mem" / "index.sqlite").is_file()
-
-
-def test_ask_gate_no_adds_nothing_to_the_prompt(tmp_path):
-    write_file_memory(
-        tmp_path,
-        "src/app.py",
-        "# src/app.py\n\n## hace\nreturns 1 from checkout\n\n## gotchas\nnone\n",
-    )
-    seen = {}
-
-    def fake_invoke(mode, prompt):
-        if mode.name == "retrieval_gate":
-            return "retrieve: no\n"
-        seen["prompt"] = prompt
-        return "ok\n"
-
-    out = answer_ask(
-        "what does checkout return?",
-        root=tmp_path,
-        config=memory_config(),
-        invoke=fake_invoke,
-        bulk_read=lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("bulk")),
-    )
-    assert out == "ok\n"
-    assert seen["prompt"] == "what does checkout return?"
-    assert "returns 1 from checkout" not in seen["prompt"]
-
-
-def test_ask_injects_rules_outside_the_gate(tmp_path):
-    write_file_memory(
-        tmp_path,
-        "src/app.py",
-        "# src/app.py\n\n## hace\nreturns 1 from checkout\n\n## gotchas\nnone\n",
-    )
-    rules = tmp_path / ".k0-mem" / "General_mem" / "Rules.md"
-    rules.parent.mkdir(parents=True, exist_ok=True)
-    rules.write_text("# Rules\n\nNever log secrets.\n", encoding="utf-8")
-    seen = {}
-
-    def fake_invoke(mode, prompt):
-        if mode.name == "retrieval_gate":
-            return "retrieve: no\n"
-        seen["prompt"] = prompt
-        return "ok\n"
+    shown, deltas = [], []
 
     answer_ask(
-        "what does checkout return?",
+        "what?",
         root=tmp_path,
-        config=memory_config(),
-        invoke=fake_invoke,
-        bulk_read=lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("bulk")),
+        config=_cfg(),
+        write=shown.append,
+        on_text=deltas.append,
+        init=_init(model),
+        check=_ok_checks,
+        refresh=_no_refresh,
     )
-    assert seen["prompt"] == (
-        "what does checkout return?\n"
-        "\n"
-        "# Rules\n\nNever log secrets.\n"
-    )
-    assert "returns 1 from checkout" not in seen["prompt"]
+
+    events = _events(tmp_path)
+    assert events and all("chat" in e and "run" not in e for e in events)
+    assert [e["kind"] for e in events] == ["model", "tool", "model"]
+    # one progress line per event reaches the user
+    progress = [line for line in shown if line.startswith(("model ", "tool "))]
+    assert len(progress) == len(events)
 
 
-def test_ask_skips_template_rules(tmp_path):
-    write_file_memory(
-        tmp_path,
-        "src/app.py",
-        "# src/app.py\n\n## hace\nreturns 1 from checkout\n\n## gotchas\nnone\n",
-    )
-    rules = tmp_path / ".k0-mem" / "General_mem" / "Rules.md"
-    rules.parent.mkdir(parents=True, exist_ok=True)
-    rules.write_text(RULES, encoding="utf-8")
-    seen = {}
+# --- @path mentions --------------------------------------------------------------
 
-    def fake_invoke(mode, prompt):
-        if mode.name == "retrieval_gate":
-            return "retrieve: no\n"
-        seen["prompt"] = prompt
-        return "ok\n"
+
+def test_ask_mentions_pass_relative_paths_only(tmp_path):
+    secret = "TOP SECRET FILE CONTENTS"
+    _repo(tmp_path, {"src/a.py": f"{secret}\n"})
+    model = FakeChatModel(messages=[AIMessage(content="read it myself")])
+    shown, deltas = [], []
 
     answer_ask(
-        "what does checkout return?",
+        "what does @src/a.py do?",
         root=tmp_path,
-        config=memory_config(),
-        invoke=fake_invoke,
-        bulk_read=lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("bulk")),
+        config=_cfg(),
+        write=shown.append,
+        on_text=deltas.append,
+        init=_init(model),
+        check=_ok_checks,
+        refresh=_no_refresh,
     )
-    assert seen["prompt"] == "what does checkout return?"
-    assert "Global rules for every agent" not in seen["prompt"]
+
+    prompt_messages = model.invocations[0]
+    prompt_text = " ".join(str(m.content) for m in prompt_messages)
+    assert "src/a.py" in prompt_text
+    # contents are never inlined: CHATTY reads the file itself
+    assert secret not in prompt_text
 
 
-def test_ask_skips_custom_topology(tmp_path):
-    write_file_memory(
-        tmp_path,
-        "src/app.py",
-        "# src/app.py\n\n## hace\nreturns 1 from checkout\n\n## gotchas\nnone\n",
-    )
-    topo = tmp_path / ".k0-mem" / "Project_topology" / tmp_path.name
-    topo.mkdir(parents=True, exist_ok=True)
-    (topo / "architecture.md").write_text(
-        "# Architecture\n\nHexagonal core.\n",
-        encoding="utf-8",
-    )
-    seen = {}
+def test_ask_bad_mention_refuses(tmp_path):
+    _repo(tmp_path)
+    shown, deltas = [], []
 
-    def fake_invoke(mode, prompt):
-        if mode.name == "retrieval_gate":
-            return "retrieve: no\n"
-        seen["prompt"] = prompt
-        return "ok\n"
+    result = answer_ask(
+        "what does @missing.py do?",
+        root=tmp_path,
+        config=_cfg(),
+        write=shown.append,
+        on_text=deltas.append,
+        init=_init(FakeChatModel(messages=[])),
+        check=_ok_checks,
+        refresh=_no_refresh,
+    )
+
+    assert result is None
+    assert any("missing.py" in line for line in shown)
+    assert not deltas
+
+
+# --- the model-call limit ---------------------------------------------------------
+
+
+class _BrokenChatModel(FakeChatModel):
+    def _next(self):
+        raise ConnectionError("provider unreachable")
+
+
+def test_ask_model_failure_shows_the_error(tmp_path):
+    _repo(tmp_path)
+    shown, deltas = [], []
+
+    result = answer_ask(
+        "q?",
+        root=tmp_path,
+        config=_cfg(),
+        write=shown.append,
+        on_text=deltas.append,
+        init=_init(_BrokenChatModel(messages=[])),
+        check=_ok_checks,
+        refresh=_no_refresh,
+    )
+
+    assert result is None
+    assert any("provider unreachable" in line for line in shown)
+
+
+def test_ask_at_limit_prints_partial_answer_and_limit_line(tmp_path):
+    _repo(tmp_path, {"note.txt": "x\n"})
+    model = FakeChatModel(
+        messages=[
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {"name": "read_file", "args": {"path": "note.txt"}, "id": "t1"}
+                ],
+            ),
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {"name": "read_file", "args": {"path": "note.txt"}, "id": "t2"}
+                ],
+            ),
+        ]
+    )
+    shown, deltas = [], []
+
+    result = answer_ask(
+        "q?",
+        root=tmp_path,
+        config=_cfg(model_calls=2),
+        write=shown.append,
+        on_text=deltas.append,
+        init=_init(model),
+        check=_ok_checks,
+        refresh=_no_refresh,
+    )
+
+    assert result is not None and result.limit_hit
+    assert any(
+        "CHATTY hit its 2 model-call limit; ask again or narrow the question."
+        == line
+        for line in shown
+    )
+
+
+def test_ask_partial_answer_streams_before_the_limit_line(tmp_path):
+    _repo(tmp_path, {"note.txt": "x\n"})
+    model = FakeChatModel(
+        messages=[
+            AIMessage(
+                content="Working on it... ",
+                tool_calls=[
+                    {"name": "read_file", "args": {"path": "note.txt"}, "id": "t1"}
+                ],
+            ),
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {"name": "read_file", "args": {"path": "note.txt"}, "id": "t2"}
+                ],
+            ),
+        ]
+    )
+    shown, deltas = [], []
 
     answer_ask(
-        "what does checkout return?",
+        "q?",
         root=tmp_path,
-        config=memory_config(),
-        invoke=fake_invoke,
-        bulk_read=lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("bulk")),
+        config=_cfg(model_calls=2),
+        write=shown.append,
+        on_text=deltas.append,
+        init=_init(model),
+        check=_ok_checks,
+        refresh=_no_refresh,
     )
-    assert seen["prompt"] == "what does checkout return?"
-    assert "Hexagonal core" not in seen["prompt"]
+
+    assert "Working on it" in "".join(deltas)
+    limit_index = next(
+        i for i, line in enumerate(shown) if "model-call limit" in line
+    )
+    assert limit_index >= 0
 
 
-def test_ask_with_file_injects_rules_and_skips_retrieval(tmp_path):
-    (tmp_path / "app.py").write_text("def checkout():\n    return 1\n")
-    rules = tmp_path / ".k0-mem" / "General_mem" / "Rules.md"
-    rules.parent.mkdir(parents=True, exist_ok=True)
-    rules.write_text("# Rules\n\nKeep it small.\n", encoding="utf-8")
+# --- memory refresh -----------------------------------------------------------
+
+
+def test_ask_refreshes_memory_and_rebuilds_the_index_once(tmp_path, monkeypatch):
+    """One refresh at ask start: rescan, then a single index rebuild — not
+    one per search_memory call."""
+    import k0ntrol.memory.refresh as refresh_module
+
+    _repo(tmp_path, {"note.txt": "hi\n"})
+    rebuilds = []
+    original = refresh_module.rebuild_index
+
+    def counting(root):
+        rebuilds.append(root)
+        return original(root)
+
+    monkeypatch.setattr(refresh_module, "rebuild_index", counting)
+    model = FakeChatModel(
+        messages=[
+            AIMessage(content="- FILE note.txt\n  - desc: a note\n"),
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {"name": "search_memory", "args": {"query": "sky"}, "id": "t1"}
+                ],
+            ),
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {"name": "search_memory", "args": {"query": "sky"}, "id": "t2"}
+                ],
+            ),
+            AIMessage(content="done"),
+        ]
+    )
+
+    result = answer_ask(
+        "q?",
+        root=tmp_path,
+        config=_cfg(),
+        write=lambda _line: None,
+        init=_init(model),
+        check=_ok_checks,
+    )
+
+    assert result is not None and result.text == "done"
+    assert rebuilds == [tmp_path]
+
+
+def test_ask_search_memory_sees_memory_written_before_the_ask(tmp_path):
+    _repo(tmp_path, {"note.txt": "hi\n"})
+    mem = tmp_path / ".k0-mem" / "General_mem" / "Mem.md"
+    mem.parent.mkdir(parents=True, exist_ok=True)
+    mem.write_text("- the sky is blue\n", encoding="utf-8")
+    model = FakeChatModel(
+        messages=[
+            AIMessage(content="- FILE note.txt\n  - desc: a note\n"),
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {"name": "search_memory", "args": {"query": "sky"}, "id": "t1"}
+                ],
+            ),
+            AIMessage(content="blue, per memory"),
+        ]
+    )
+
+    result = answer_ask(
+        "what color is the sky?",
+        root=tmp_path,
+        config=_cfg(),
+        write=lambda _line: None,
+        init=_init(model),
+        check=_ok_checks,
+    )
+
+    assert result is not None
+    # the search result came back into CHATTY's context
+    final_messages = model.invocations[-1]
+    tool_texts = " ".join(str(m.content) for m in final_messages)
+    assert "the sky is blue" in tool_texts
+
+
+def test_ask_rescan_helper_call_writes_a_chat_scoped_helper_event(tmp_path):
+    _repo(tmp_path, {"note.txt": "hi\n"})
+    model = FakeChatModel(
+        messages=[
+            AIMessage(content="- FILE note.txt\n  - desc: a note\n"),
+            AIMessage(content="done"),
+        ]
+    )
+
+    answer_ask(
+        "q?",
+        root=tmp_path,
+        config=_cfg(),
+        write=lambda _line: None,
+        init=_init(model),
+        check=_ok_checks,
+    )
+
+    events = _events(tmp_path)
+    assert events[0]["kind"] == "model"
+    assert events[0]["helper"] == "bulk_read"
+    assert "chat" in events[0]
+    assert "agent" not in events[0]
+
+
+def test_ask_doctor_gates_on_chatty_and_the_bulk_read_helper(tmp_path):
+    _repo(tmp_path)
     seen = {}
 
-    def fake_invoke(mode, prompt):
-        seen["mode"] = mode.name
-        seen["prompt"] = prompt
-        return "ok\n"
+    def spy(cfg, *, names=None, root=None):
+        seen["names"] = tuple(names)
+        return [Check("config", "ok", "valid")]
 
-    out = answer_ask(
-        "what does checkout return? @app.py",
+    answer_ask(
+        "q?",
         root=tmp_path,
-        config=config(),
-        invoke=fake_invoke,
-        bulk_read=lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("bulk")),
+        config=_cfg(),
+        write=lambda _line: None,
+        init=_init(FakeChatModel(messages=[AIMessage(content="ok")])),
+        check=spy,
+        refresh=_no_refresh,
     )
-    assert out == "ok\n"
-    assert seen["mode"] == "bulk_reader"
-    assert "# Rules\n\nKeep it small.\n" in seen["prompt"]
-    assert "app.py\ndef checkout():" in seen["prompt"]
+
+    assert seen["names"] == ("agents.chatty", "helpers.bulk_read")
 
 
-def test_ask_gate_emits_one_jsonl_event(tmp_path, monkeypatch):
-    write_file_memory(
-        tmp_path,
-        "src/app.py",
-        "# src/app.py\n\n## hace\nreturns 1 from checkout\n\n## gotchas\nnone\n",
-    )
-    monkeypatch.chdir(tmp_path)
-    agent = tmp_path / "cursor-agent"
-    write_agent(
-        agent,
-        "import json, sys\n"
-        "prompt = sys.argv[-1]\n"
-        "if 'Pick at most' in prompt:\n"
-        "    result = 'retrieve: no\\n'\n"
-        "else:\n"
-        "    result = 'ok\\n'\n"
-        "print(json.dumps({'type':'result','subtype':'success','is_error':False,"
-        "'result': result}))\n",
-    )
-    monkeypatch.setenv("K0_CURSOR_AGENT", str(agent))
-    out = answer_ask(
-        "what does checkout return?",
+def test_ask_refuses_when_memory_refresh_fails(tmp_path):
+    _repo(tmp_path)
+    shown = []
+
+    def bad_refresh(root, **kwargs):
+        raise RuntimeError("git is dead")
+
+    result = answer_ask(
+        "q?",
         root=tmp_path,
-        config=memory_config(),
-        invoke=invoke,
-        bulk_read=lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("bulk")),
+        config=_cfg(),
+        write=shown.append,
+        init=_init(FakeChatModel(messages=[])),
+        check=_ok_checks,
+        refresh=bad_refresh,
     )
-    assert out == "ok\n"
-    events = [
-        json.loads(line)
-        for line in (tmp_path / ".k0-mem" / "events.jsonl").read_text().splitlines()
-    ]
-    gate_events = [event for event in events if event["mode"] == "retrieval_gate"]
-    assert len(gate_events) == 1
-    assert gate_events[0]["ok"] is True
+
+    assert result is None
+    assert any("git is dead" in line for line in shown)

@@ -1,16 +1,14 @@
-import threading
 from collections.abc import Callable
 from pathlib import Path
 from uuid import uuid4
 
-from k0ntrol.backends.invoke import BackendError, set_event_context
+from k0ntrol import __version__
 from k0ntrol.frontends.ask import answer_ask
 from k0ntrol.frontends.banner import render_banner
-from k0ntrol.frontends.mentions import MentionError
-from k0ntrol.harness.loop import run_fast, run_full
-from k0ntrol.harness.reflect import offer_mem_proposals, run_reflect
-from k0ntrol.harness.scan import rescan_changed
-from k0ntrol import __version__
+from k0ntrol.memory.reflect import offer_mem_proposals
+from k0ntrol.workflow import Outcome, Pending, RunRefused
+from k0ntrol.workflow import resume as resume_run
+from k0ntrol.workflow import start as start_run
 
 
 def run_session(
@@ -19,28 +17,18 @@ def run_session(
     *,
     root: Path,
     config: dict,
-    invoke: Callable,
-    bulk_read: Callable,
-    run_suite: Callable[[Path], tuple[int, str]] | None = None,
     color: bool = False,
     echo_input: bool = True,
+    ask: Callable = answer_ask,
+    start: Callable = start_run,
+    resume: Callable = resume_run,
 ) -> int:
-    session_run = uuid4().hex
-    set_event_context(run=session_run, step="")
     transcript = _new_transcript(root)
     show = _transcript_writer(write, transcript)
-    hinted = {"scan": False}
-    reflect = _ReflectScheduler(
-        root=root,
-        config=config,
-        invoke=invoke,
-        transcript=transcript,
-        run=session_run,
-    )
     show(
         render_banner(
             version=__version__,
-            backend=config["backend"],
+            provider=_chatty_provider(config),
             cwd=str(root),
             color=color,
         )
@@ -50,15 +38,32 @@ def run_session(
         show,
         transcript,
         echo_input=echo_input,
-        session_run=session_run,
         root=root,
-        config=config,
-        invoke=invoke,
-        bulk_read=bulk_read,
-        run_suite=run_suite,
-        hinted=hinted,
-        reflect=reflect,
+        ask=lambda question: _run_ask(
+            question,
+            ask=ask,
+            root=root,
+            config=config,
+            write=write,
+            show=show,
+            transcript=transcript,
+        ),
+        work=lambda kind, task: _run_work(
+            kind,
+            task,
+            read_line=read_line,
+            show=show,
+            root=root,
+            config=config,
+            start=start,
+            resume=resume,
+        ),
     )
+
+
+def _chatty_provider(config: dict) -> str | None:
+    chatty = (config.get("agents") or {}).get("chatty") or {}
+    return chatty.get("provider")
 
 
 def _session_loop(
@@ -67,14 +72,9 @@ def _session_loop(
     transcript: Path,
     *,
     echo_input: bool,
-    session_run: str,
     root: Path,
-    config: dict,
-    invoke: Callable,
-    bulk_read: Callable,
-    run_suite: Callable[[Path], tuple[int, str]] | None,
-    hinted: dict[str, bool],
-    reflect: "_ReflectScheduler",
+    ask: Callable[[str], None],
+    work: Callable[[str, str], None],
 ) -> int:
     while True:
         if _session_should_quit(
@@ -82,14 +82,9 @@ def _session_loop(
             show,
             transcript,
             echo_input=echo_input,
-            session_run=session_run,
             root=root,
-            config=config,
-            invoke=invoke,
-            bulk_read=bulk_read,
-            run_suite=run_suite,
-            hinted=hinted,
-            reflect=reflect,
+            ask=ask,
+            work=work,
         ):
             return 0
 
@@ -100,14 +95,9 @@ def _session_should_quit(
     transcript: Path,
     *,
     echo_input: bool,
-    session_run: str,
     root: Path,
-    config: dict,
-    invoke: Callable,
-    bulk_read: Callable,
-    run_suite: Callable[[Path], tuple[int, str]] | None,
-    hinted: dict[str, bool],
-    reflect: "_ReflectScheduler",
+    ask: Callable[[str], None],
+    work: Callable[[str, str], None],
 ) -> bool:
     line = _read_session_line(read_line, show, root)
     if line is None:
@@ -115,19 +105,116 @@ def _session_should_quit(
     _echo_session_input(line, show, transcript, echo_input)
     if not line:
         return False
-    return _handle_command(
-        line,
-        show,
-        read_line=read_line,
-        session_run=session_run,
+    return _handle_command(line, show, ask=ask, work=work)
+
+
+def _run_ask(
+    question: str,
+    *,
+    ask: Callable,
+    root: Path,
+    config: dict,
+    write: Callable[[str], None],
+    show: Callable[[str], None],
+    transcript: Path,
+) -> None:
+    """Stream CHATTY's answer live; the transcript keeps one entry."""
+    deltas: list[str] = []
+    ask(
+        question,
         root=root,
         config=config,
-        invoke=invoke,
-        bulk_read=bulk_read,
-        run_suite=run_suite,
-        hinted=hinted,
-        reflect=reflect,
+        write=show,
+        on_text=lambda delta: (write(delta), deltas.append(delta)),
     )
+    if deltas:
+        _append_transcript(transcript, "".join(deltas))
+
+
+def _run_work(
+    kind: str,
+    task: str,
+    *,
+    read_line: Callable[[], str],
+    show: Callable[[str], None],
+    root: Path,
+    config: dict,
+    start: Callable,
+    resume: Callable,
+) -> None:
+    """Drive one run: start, then Pending → answer → resume until it ends."""
+    result = _try_start(kind, task, show=show, root=root, config=config, start=start)
+    if result is None:
+        return
+    while isinstance(result, Pending):
+        _show_pending(result, show)
+        answer = _gate_answer(read_line, show, result)
+        if answer is None:
+            return
+        result = _try_resume(result, answer, show=show, root=root, config=config, resume=resume)
+        if result is None:
+            return
+    show(_outcome_text(result))
+
+
+def _try_start(kind, task, *, show, root, config, start):
+    try:
+        return start(kind, task, root=root, cfg=config, write=show)
+    except RunRefused as error:
+        _show_refusal(error, show)
+        return None
+    except Exception as error:
+        # A mid-run failure leaves a resumable checkpoint, never stuck.
+        show(f"run failed: {error}")
+        return None
+
+
+def _try_resume(result: Pending, answer: str, *, show, root, config, resume):
+    try:
+        return resume(result.run, answer, root=root, cfg=config, write=show)
+    except RunRefused as error:
+        _show_refusal(error, show)
+        return result  # bad answer: re-ask the same gate
+    except Exception as error:
+        show(f"run {result.run} failed: {error}")
+        return None
+
+
+def _show_pending(pending: Pending, show: Callable[[str], None]) -> None:
+    if pending.detail:
+        show(pending.detail)
+    answers = "/".join(pending.answers)
+    show(f"{pending.question} [{answers}]")
+
+
+def _gate_answer(
+    read_line: Callable[[], str],
+    show: Callable[[str], None],
+    pending: Pending,
+) -> str | None:
+    try:
+        return read_line().strip()
+    except (KeyboardInterrupt, EOFError):
+        show(
+            f"run {pending.run} is paused at gate {pending.gate}; "
+            "resume it later"
+        )
+        return None
+
+
+def _show_refusal(error: RunRefused, show: Callable[[str], None]) -> None:
+    for line in error.lines:
+        show(line)
+
+
+def _outcome_text(result: Outcome) -> str:
+    text = f"run {result.outcome}"
+    if result.reason:
+        text += f" ({result.reason}"
+        if result.node:
+            text += f" at {result.node}"
+        text += ")"
+    return text
 
 
 def _read_session_line(
@@ -185,199 +272,23 @@ def _handle_command(
     line: str,
     write: Callable[[str], None],
     *,
-    read_line: Callable[[], str],
-    session_run: str,
-    root: Path,
-    config: dict,
-    invoke: Callable,
-    bulk_read: Callable,
-    run_suite: Callable[[Path], tuple[int, str]] | None,
-    hinted: dict[str, bool],
-    reflect: "_ReflectScheduler",
+    ask: Callable[[str], None],
+    work: Callable[[str, str], None],
 ) -> bool:
-    parts = line.split(maxsplit=1)
-    command = parts[0]
-    rest = parts[1] if len(parts) == 2 else ""
+    command, _, argument = line.partition(" ")
     if command == "/quit":
-        reflect.flush()
         return True
     if command == "/help":
         write("commands: /ask, /fast, /full, /quit")
         return False
-    if command in {"/ask", "/fast", "/full"}:
-        _refresh_memory(
-            write,
-            read_line=read_line,
-            root=root,
-            config=config,
-            invoke=invoke,
-            bulk_read=bulk_read,
-            hinted=hinted,
-        )
-        status = _run_work_command(
-            command,
-            rest,
-            write,
-            read_line=read_line,
-            session_run=session_run,
-            root=root,
-            config=config,
-            invoke=invoke,
-            bulk_read=bulk_read,
-            run_suite=run_suite,
-        )
-        reflect.note_turn(status)
+    if command == "/ask":
+        ask(argument)
+        return False
+    if command == "/fast":
+        work("fast", argument)
+        return False
+    if command == "/full":
+        write("/full is not available yet")
         return False
     write(f"unknown command: {command}")
     return False
-
-
-def _refresh_memory(
-    write: Callable[[str], None],
-    *,
-    read_line: Callable[[], str],
-    root: Path,
-    config: dict,
-    invoke: Callable,
-    bulk_read: Callable,
-    hinted: dict[str, bool],
-) -> None:
-    status = rescan_changed(
-        root=root,
-        config=config,
-        bulk_read=bulk_read,
-        invoke=invoke,
-        read_line=read_line,
-        write=write,
-    )
-    if status != "missing" or hinted["scan"]:
-        return
-    write("memory not built; run k0 scan")
-    hinted["scan"] = True
-
-
-def _run_work_command(
-    command: str,
-    rest: str,
-    write: Callable[[str], None],
-    *,
-    read_line: Callable[[], str],
-    session_run: str,
-    root: Path,
-    config: dict,
-    invoke: Callable,
-    bulk_read: Callable,
-    run_suite: Callable[[Path], tuple[int, str]] | None,
-) -> str | None:
-    if command == "/fast":
-        status = run_fast(
-            rest,
-            root=root,
-            config=config,
-            read_line=read_line,
-            write=write,
-            invoke=invoke,
-            bulk_read=bulk_read,
-            run_suite=run_suite,
-        )
-        write(_terminal_status(status))
-        return status
-    if command == "/full":
-        status = run_full(
-            rest,
-            root=root,
-            config=config,
-            read_line=read_line,
-            write=write,
-            invoke=invoke,
-            bulk_read=bulk_read,
-            run_suite=run_suite,
-        )
-        write(_terminal_status(status))
-        return status
-    set_event_context(run=session_run, step="ask")
-    _handle_ask(
-        rest,
-        write,
-        root=root,
-        config=config,
-        invoke=invoke,
-        bulk_read=bulk_read,
-    )
-    return None
-
-
-def _terminal_status(status: str) -> str:
-    return "done" if status == "tested" else status
-
-
-def _handle_ask(
-    text: str,
-    write: Callable[[str], None],
-    *,
-    root: Path,
-    config: dict,
-    invoke: Callable,
-    bulk_read: Callable,
-) -> None:
-    try:
-        answer = answer_ask(
-            text,
-            root=root,
-            config=config,
-            invoke=invoke,
-            bulk_read=bulk_read,
-        )
-    except MentionError as error:
-        write(str(error))
-    except BackendError as error:
-        write(f"backend error: {error}")
-    else:
-        write(answer)
-
-
-class _ReflectScheduler:
-    def __init__(
-        self,
-        *,
-        root: Path,
-        config: dict,
-        invoke: Callable,
-        transcript: Path,
-        run: str,
-    ) -> None:
-        self._root = root
-        self._config = config
-        self._invoke = invoke
-        self._transcript = transcript
-        self._run = run
-        self._every = config.get("reflect_every", 10)
-        self._pending = 0
-        self._threads: list[threading.Thread] = []
-
-    def note_turn(self, status: str | None) -> None:
-        self._pending += 1
-        if status == "done" or self._pending >= self._every:
-            self._pending = 0
-            self._spawn()
-
-    def flush(self) -> None:
-        if self._pending:
-            self._pending = 0
-            self._spawn()
-        for thread in self._threads:
-            thread.join()
-
-    def _spawn(self) -> None:
-        thread = threading.Thread(target=self._run_reflect, daemon=True)
-        self._threads.append(thread)
-        thread.start()
-
-    def _run_reflect(self) -> None:
-        run_reflect(
-            root=self._root,
-            config=self._config,
-            invoke=self._invoke,
-            transcript=self._transcript,
-            run=self._run,
-        )

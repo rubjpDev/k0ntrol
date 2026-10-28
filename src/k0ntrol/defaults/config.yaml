@@ -1,19 +1,15 @@
 # k0ntrol defaults. Override in ~/.k0ntrol/config.yaml, then .k0-mem/config.yaml.
-backend: cursor
 threshold_lines: 350
-scan_confirm_over: 50
-retrieval_top_k: 5
-reflect_every: 10
-test_cmd: "pytest -q"   # full suite, never only the new tests (D24)
-max_retries: 2
+test_cmd: "pytest -q"   # full suite, never only the new tests
 gates: []
+max_attempts: 2
+test_timeout: 600
 agents:
-  # temperature is advisory with the cursor backend (principle 9)
-  spec:        {model: "claude-opus-5-5-high"}
-  tester:      {model: "gpt-5.6-luna-max", temperature: 0.2}
-  coder:       {model: "gpt-5.6-luna-max", temperature: 0.2}
-  validator:   {model: "gpt-5.6-luna-max", temperature: 0.2}
-  reviewer:    {model: "claude-opus-5-5-high"}
-  bulk_reader: {model: "gpt-5.6-luna-max", temperature: 0.2}
-  retrieval_gate: {model: "gpt-5.6-luna-max", temperature: 0.2}
-  reflect: {model: "gpt-5.6-luna-max", temperature: 0.2}
+  spec:     {provider: anthropic, model: claude-opus-5-5,   effort: high,   model_calls: 25}
+  tester:   {provider: anthropic, model: claude-sonnet-5-5, effort: medium, model_calls: 40}
+  coder:    {provider: anthropic, model: claude-sonnet-5-5, effort: medium, model_calls: 60}
+  reviewer: {provider: anthropic, model: claude-opus-5-5,   effort: high,   model_calls: 25}
+  chatty:   {provider: anthropic, model: claude-haiku-5-5,  model_calls: 15}
+helpers:
+  bulk_read: {provider: anthropic, model: claude-haiku-5-5}
+  reflect:   {provider: anthropic, model: claude-haiku-5-5}
