@@ -64,7 +64,7 @@ def main(argv: list[str] | None = None, *, init=init_chat_model) -> int:
     if args.command == "scan":
         return _run_scan(init=init)
     if args.command is None:
-        return _run_session()
+        return _run_session(init=init)
     return 0
 
 
@@ -88,7 +88,7 @@ def _run_doctor(live: bool) -> int:
     return 1 if has_errors(checks) else 0
 
 
-def _run_session() -> int:
+def _run_session(*, init=init_chat_model) -> int:
     root = Path.cwd()
     try:
         config = load_config(root)
@@ -102,6 +102,7 @@ def _run_session() -> int:
         config=config,
         color=color_enabled(sys.stdout),
         echo_input=False,
+        init=init,
     )
 
 

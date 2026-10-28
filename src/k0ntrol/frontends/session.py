@@ -2,10 +2,12 @@ from collections.abc import Callable
 from pathlib import Path
 from uuid import uuid4
 
+from langchain.chat_models import init_chat_model
+
 from k0ntrol import __version__
 from k0ntrol.frontends.ask import answer_ask
 from k0ntrol.frontends.banner import render_banner
-from k0ntrol.memory.reflect import offer_mem_proposals
+from k0ntrol.memory.reflect import Reflector, offer_mem_proposals
 from k0ntrol.workflow import Outcome, Pending, RunRefused
 from k0ntrol.workflow import resume as resume_run
 from k0ntrol.workflow import start as start_run
@@ -22,9 +24,15 @@ def run_session(
     ask: Callable = answer_ask,
     start: Callable = start_run,
     resume: Callable = resume_run,
+    init: Callable = init_chat_model,
+    reflector=None,
 ) -> int:
     transcript = _new_transcript(root)
     show = _transcript_writer(write, transcript)
+    if reflector is None:
+        reflector = Reflector(
+            root=root, transcript=transcript, cfg=config, init=init, write=show
+        )
     show(
         render_banner(
             version=__version__,
@@ -33,32 +41,37 @@ def run_session(
             color=color,
         )
     )
-    return _session_loop(
-        read_line,
-        show,
-        transcript,
-        echo_input=echo_input,
-        root=root,
-        ask=lambda question: _run_ask(
-            question,
-            ask=ask,
+    try:
+        return _session_loop(
+            read_line,
+            show,
+            transcript,
+            echo_input=echo_input,
             root=root,
-            config=config,
-            write=write,
-            show=show,
-            transcript=transcript,
-        ),
-        work=lambda kind, task: _run_work(
-            kind,
-            task,
-            read_line=read_line,
-            show=show,
-            root=root,
-            config=config,
-            start=start,
-            resume=resume,
-        ),
-    )
+            ask=lambda question: _run_ask(
+                question,
+                ask=ask,
+                root=root,
+                config=config,
+                write=write,
+                show=show,
+                transcript=transcript,
+                reflector=reflector,
+            ),
+            work=lambda kind, task: _run_work(
+                kind,
+                task,
+                read_line=read_line,
+                show=show,
+                root=root,
+                config=config,
+                start=start,
+                resume=resume,
+                reflector=reflector,
+            ),
+        )
+    finally:
+        reflector.finish()
 
 
 def _chatty_provider(config: dict) -> str | None:
@@ -117,16 +130,19 @@ def _run_ask(
     write: Callable[[str], None],
     show: Callable[[str], None],
     transcript: Path,
+    reflector,
 ) -> None:
     """Stream CHATTY's answer live; the transcript keeps one entry."""
     deltas: list[str] = []
-    ask(
+    result = ask(
         question,
         root=root,
         config=config,
         write=show,
         on_text=lambda delta: (write(delta), deltas.append(delta)),
     )
+    if result is not None:
+        reflector.ask_turn()
     if deltas:
         _append_transcript(transcript, "".join(deltas))
 
@@ -141,6 +157,7 @@ def _run_work(
     config: dict,
     start: Callable,
     resume: Callable,
+    reflector,
 ) -> None:
     """Drive one run: start, then Pending → answer → resume until it ends."""
     result = _try_start(kind, task, show=show, root=root, config=config, start=start)
@@ -155,6 +172,7 @@ def _run_work(
         if result is None:
             return
     show(_outcome_text(result))
+    reflector.after_run(result.run)
 
 
 def _try_start(kind, task, *, show, root, config, start):
