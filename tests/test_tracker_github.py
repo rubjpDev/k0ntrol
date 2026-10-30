@@ -273,6 +273,39 @@ def test_read_change_returns_none_or_the_change():
     assert change.ref == "7" and change.state == "merged"
 
 
+def _pr(number, state):
+    return {
+        "number": number,
+        "title": f"PR {number}",
+        "state": state,
+        "isDraft": False,
+        "url": f"https://github.com/o/r/pull/{number}",
+    }
+
+
+@pytest.mark.parametrize(
+    "prs,ref,state",
+    [
+        # an open PR wins whatever the listing order is
+        ([_pr(9, "CLOSED"), _pr(7, "OPEN")], "7", "open"),
+        ([_pr(7, "OPEN"), _pr(9, "CLOSED")], "7", "open"),
+        # no open PR: the most recent one (highest number) speaks
+        ([_pr(7, "MERGED"), _pr(9, "CLOSED")], "9", "closed"),
+        ([_pr(9, "CLOSED"), _pr(7, "MERGED")], "9", "closed"),
+    ],
+)
+def test_read_change_does_not_depend_on_the_listing_order(prs, ref, state):
+    runner = FakeRunner()
+    runner.script(
+        ["gh", "pr", "list", "--head", "b", "--state", "all", "--json"],
+        stdout=json.dumps(prs),
+    )
+
+    change = GhTracker(runner).read_change("b")
+
+    assert (change.ref, change.state) == (ref, state)
+
+
 def test_open_change_reuses_open_pr_or_creates_a_draft():
     runner = FakeRunner()
     runner.script(

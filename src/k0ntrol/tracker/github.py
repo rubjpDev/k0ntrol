@@ -190,7 +190,7 @@ class GhTracker:
         )
         if not prs:
             return None
-        pr = prs[0]
+        pr = _preferred_pr(prs)
         return Change(
             ref=str(pr["number"]),
             branch=branch,
@@ -233,6 +233,15 @@ class GhTracker:
 
     def _gh_json(self, argv: list[str]):
         return json.loads(self._run(argv).stdout)
+
+
+def _preferred_pr(prs: list[dict]) -> dict:
+    """The branch's open PR, else its most recent one (highest number).
+
+    ``gh pr list`` order is not a contract, so the choice never leans on it.
+    """
+    open_prs = [pr for pr in prs if pr["state"].lower() == "open"]
+    return max(open_prs or prs, key=lambda pr: pr["number"])
 
 
 def _number_from_url(url: str) -> str:

@@ -382,10 +382,11 @@ class FakeTracker:
         return None
 
     def read_change(self, branch: str) -> Change | None:
-        for ref, change in self._changes.items():
-            if change["branch"] == branch:
-                return self._to_change(ref)
-        return None
+        refs = [r for r, c in self._changes.items() if c["branch"] == branch]
+        open_ = [r for r in refs if self._changes[r]["state"] == "open"]
+        # like the gh adapter: an open PR wins, else the most recent one
+        pick = open_ or refs
+        return self._to_change(max(pick, key=int)) if pick else None
 
     def read_change_diff(self, ref: str) -> str:
         return self._change(ref)["diff"]
