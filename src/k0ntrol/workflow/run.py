@@ -51,7 +51,7 @@ _BUILDERS = {"fast": build_fast_graph, "full": build_full_graph}
 # The roster each run kind uses; the free doctor checks gate start on it.
 _ROSTER = {
     "fast": ("agents.tester", "agents.coder"),
-    "full": ("agents.spec", "agents.tester"),
+    "full": ("agents.spec", "agents.tester", "agents.coder", "agents.reviewer"),
 }
 
 # Outer recursion limit: each loop iteration costs two super-steps at most.

@@ -220,12 +220,18 @@ class FakeTracker:
         self._item_labels: dict[str, set[str]] = {}
         self._next_item = 1
         self._changes: dict[str, dict] = {}
-        self._next_change = 1
+        self._next_change = 101  # pull refs share the issue namespace; offset so they never collide with _items
 
     # -- work items ------------------------------------------------------
 
     def read_work_item(self, ref: str) -> WorkItem:
-        item = self._item(ref)
+        try:
+            item = self._item(ref)
+        except TrackerError:
+            try:
+                return self._change_item(ref)
+            except TrackerError:
+                raise TrackerError(f"no work item: {ref}") from None
         comments = tuple(
             Comment(c["author"], c["author_association"], c["body"])
             for c in item["comments"]
@@ -337,6 +343,7 @@ class FakeTracker:
         self._changes[ref] = {
             "branch": branch,
             "title": title,
+            "body": body,
             "state": "open",
             "is_draft": True,
             "url": f"https://github.com/{self.repo}/pull/{ref}",
@@ -391,6 +398,17 @@ class FakeTracker:
     def reviews_on(self, ref: str) -> list[str]:
         return list(self._change(ref)["reviews"])
 
+    def change_body(self, ref: str) -> str:
+        return self._change(ref)["body"]
+
+    def add_change_comment(
+        self, ref: str, body: str, *, author: str = "rubenjp", author_association: str = "OWNER"
+    ) -> None:
+        """Seed a PR comment as if a human wrote it (no marker)."""
+        self._change(ref)["comments"].append(
+            {"author": author, "author_association": author_association, "body": body}
+        )
+
     def change_comments_on(self, ref: str) -> list[str]:
         return [c["body"] for c in self._change(ref)["comments"]]
 
@@ -430,6 +448,25 @@ class FakeTracker:
             if change["branch"] == ref:
                 return change
         raise TrackerError(f"no change: {ref}")
+
+    def _change_item(self, ref: str) -> WorkItem:
+        """A change (PR) viewed as a work item — pull refs live in the issue
+        namespace on GitHub, so `read_work_item <pr_ref>` returns the PR's
+        body and comments."""
+        change = self._change(ref)
+        return WorkItem(
+            ref=str(ref),
+            title=change["title"],
+            body=change["body"],
+            state=change["state"],
+            url=change["url"],
+            author="k0",
+            author_association="OWNER",
+            comments=tuple(
+                Comment(c["author"], c["author_association"], c["body"])
+                for c in change["comments"]
+            ),
+        )
 
     def _to_change(self, ref: str) -> Change:
         change = self._changes[ref]
