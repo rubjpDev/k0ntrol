@@ -1307,6 +1307,35 @@ def test_rerun_refuses_a_merged_or_closed_pr(tmp_path, state, word):
         rerun(tmp_path, tracker)
 
 
+def make_remote_only(root):
+    """As in a fresh clone: the branch lives on ``origin`` and not locally."""
+    git(root, "update-ref", f"refs/remotes/origin/{BRANCH}", "HEAD")
+    git(root, "checkout", "-q", "main")
+    git(root, "branch", "-q", "-D", BRANCH)
+
+
+def test_existing_branch_finds_a_remote_only_branch(tmp_path):
+    from k0ntrol.workflow.change import existing_branch
+
+    git_repo(tmp_path)
+    assert existing_branch(tmp_path, "1") is None
+    git(tmp_path, "update-ref", f"refs/remotes/origin/{BRANCH}", "HEAD")
+
+    assert existing_branch(tmp_path, "1") == BRANCH
+    assert existing_branch(tmp_path, "12") is None
+
+
+@pytest.mark.parametrize("state", ["merged", "closed"])
+def test_rerun_refuses_a_merged_or_closed_pr_on_a_remote_only_branch(tmp_path, state):
+    tracker = done_run(tmp_path)
+    change = tracker.read_change(BRANCH)
+    make_remote_only(tmp_path)
+    getattr(tracker, f"{'merge' if state == 'merged' else 'close'}_change")(change.ref)
+
+    with pytest.raises(RunRefused, match=f"pull request .* {state}"):
+        rerun(tmp_path, tracker)
+
+
 def test_rerun_refuses_a_closed_issue(tmp_path):
     tracker = done_run(tmp_path)
     tracker.close_work_item("1")

@@ -41,11 +41,25 @@ def slugify(title: str) -> str:
 
 
 def existing_branch(root: Path, ref: str) -> str | None:
-    """The local ``k0/<ref>-*`` branch an earlier run cut, if any."""
-    out = _git(
-        root, "for-each-ref", "--format=%(refname:short)", f"refs/heads/k0/{ref}-*"
-    ).stdout
-    return next(iter(out.split()), None)
+    """The ``k0/<ref>-*`` branch an earlier run cut, if any.
+
+    A local branch wins; a branch only on ``origin`` (a fresh clone) counts
+    too, named without the remote.
+    """
+    local = _branches(root, f"refs/heads/k0/{ref}-*")
+    remote = _branches(root, f"refs/remotes/origin/k0/{ref}-*")
+    return next(iter(local + [b.removeprefix("origin/") for b in remote]), None)
+
+
+def _branches(root: Path, pattern: str) -> list[str]:
+    out = _git(root, "for-each-ref", "--format=%(refname:short)", pattern).stdout
+    return out.split()
+
+
+def remote_tip(root: Path, branch: str) -> str | None:
+    """The commit ``origin/<branch>`` points at, if the branch was pushed."""
+    result = _git(root, "rev-parse", "--verify", "--quiet", f"refs/remotes/origin/{branch}")
+    return result.stdout.strip() or None
 
 
 def default_base_branch(root: Path) -> str:
@@ -91,10 +105,7 @@ def merge_base(root: Path, base: str) -> str:
 
 def _empty_tree(root: Path) -> str:
     """The empty tree object (written if missing): diff against it shows all."""
-    return subprocess.run(
-        ["git", "-C", str(root), "mktree"],
-        input="", capture_output=True, text=True, check=False,
-    ).stdout.strip()
+    return _git(root, "hash-object", "-w", "-t", "tree", "/dev/null").stdout.strip()
 
 
 def diff_since(root: Path, since: str, path: str) -> str:

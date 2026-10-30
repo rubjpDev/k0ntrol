@@ -178,10 +178,28 @@ def test_label_operations_use_gh_issue_edit_and_gh_label():
     assert len(creates) == 1 and "k0:stuck" in creates[0]
 
 
+def test_create_branch_checks_out_a_remote_only_branch_from_its_tip():
+    runner = FakeRunner()
+    runner.script(["git", "fetch", "origin", "main"])
+    runner.script(["git", "rev-parse", "--verify", "--quiet", "refs/heads/k0/1-x"], returncode=1)
+    runner.script(["git", "rev-parse", "--verify", "--quiet", "refs/remotes/origin/k0/1-x"])
+    runner.script(["git", "checkout"])
+    tracker = GhTracker(runner)
+
+    tracker.create_branch("k0/1-x", "main")
+
+    assert ["git", "checkout", "-b", "k0/1-x", "origin/k0/1-x"] in runner.calls
+    assert ["git", "checkout", "-b", "k0/1-x", "origin/main"] not in runner.calls
+
+
 def test_create_branch_fetches_and_checks_out_new_branch():
     runner = FakeRunner()
     runner.script(["git", "fetch", "origin", "main"])
     runner.script(["git", "rev-parse", "--verify", "--quiet", "refs/heads/k0/1-x"], returncode=1)
+    runner.script(
+        ["git", "rev-parse", "--verify", "--quiet", "refs/remotes/origin/k0/1-x"],
+        returncode=1,
+    )
     runner.script(["git", "checkout"])
     tracker = GhTracker(runner)
 
