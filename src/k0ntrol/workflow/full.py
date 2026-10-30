@@ -241,7 +241,7 @@ def make_branch_setup(ctx: RunContext) -> Callable[[dict], dict]:
 
 
 def make_test_gate(ctx: RunContext) -> Callable[[dict], dict]:
-    """The test gate: show the diff; ``redo`` resets TESTER's counter."""
+    """The test gate: diff plus red-check output; ``redo`` resets TESTER."""
 
     def node(state: dict) -> dict:
         decision = interrupt(
@@ -249,7 +249,14 @@ def make_test_gate(ctx: RunContext) -> Callable[[dict], dict]:
                 "gate": "test",
                 "question": "approve these tests?",
                 "answers": ["ok", "redo"],
-                "detail": worktree_summary(ctx.root),
+                "detail": (
+                    worktree_summary(ctx.root)
+                    + "\n\n## Red check output\n\n"
+                    + (
+                        state.get("red_check_output")
+                        or "(no red check output this round)"
+                    )
+                ),
             }
         )
         word, _, feedback = str(decision).strip().partition(" ")

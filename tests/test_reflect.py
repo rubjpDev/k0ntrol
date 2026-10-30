@@ -13,6 +13,7 @@ from k0ntrol.memory.reflect import (
     run_reflect,
 )
 from k0ntrol.memory.session import (
+    add_fact,
     add_mem_proposal,
     list_facts,
     list_pending_mem_proposals,
@@ -217,6 +218,53 @@ def test_after_run_fires_reflect_on_a_background_thread(tmp_path):
     assert calls[0]["offset"] == 0
 
 
+def test_workers_reflect_in_dispatch_order_when_invoker_setup_is_reordered(tmp_path):
+    transcript = _transcript(tmp_path, "first run\n")
+    first_entered = threading.Event()
+    release_first = threading.Event()
+    second_ready = threading.Event()
+    second_invoked = threading.Event()
+    prompts = []
+
+    def make_invoke(handler):
+        if not first_entered.is_set():
+            first_entered.set()
+            assert release_first.wait(5)
+            label = "first"
+        else:
+            label = "second"
+            second_ready.set()
+
+        def invoke(prompt):
+            prompts.append((label, prompt))
+            handler.on_llm_end(None, run_id=label)
+            if label == "second":
+                second_invoked.set()
+            return {"facts": [label], "mem": []}
+
+        return invoke
+
+    reflector = Reflector(
+        root=tmp_path, transcript=transcript, cfg={}, make_invoke=make_invoke,
+    )
+    reflector.after_run("run-A")
+    try:
+        assert first_entered.wait(5)
+        with transcript.open("a", encoding="utf-8") as file:
+            file.write("second run\n")
+        reflector.after_run("run-B")
+        assert second_ready.wait(5)
+        second_invoked.wait(0.3)
+    finally:
+        release_first.set()
+        reflector.finish()
+    assert [label for label, _ in prompts] == ["first", "second"]
+    assert "first run" in prompts[0][1] and "second run" not in prompts[0][1]
+    assert "second run" in prompts[1][1] and "first run" not in prompts[1][1]
+    assert [event["run"] for event in _events(tmp_path)] == ["run-A", "run-B"]
+    assert [item["body"] for item in list_facts(tmp_path)] == ["first", "second"]
+
+
 def test_after_run_returns_before_reflect_finishes(tmp_path):
     entered = threading.Event()
     release = threading.Event()
@@ -378,10 +426,12 @@ def test_finish_reflect_uses_the_chat_scope(tmp_path):
     assert "run" not in event
 
 
-def test_a_failed_reflect_never_raises_and_reports_once(tmp_path):
+def test_a_failed_reflect_is_retried_once_and_reports_each_failure(tmp_path):
+    calls = []
     shown = []
 
     def boom(**_kw):
+        calls.append(None)
         raise RuntimeError("kaput")
 
     reflector = Reflector(
@@ -392,5 +442,161 @@ def test_a_failed_reflect_never_raises_and_reports_once(tmp_path):
         write=shown.append,
     )
     reflector.after_run("run-1")
-    reflector.finish()  # no exception
+    reflector.finish()  # no exception; one retry at /quit, no more
+    assert len(calls) == 2
+    assert shown == ["reflect failed: kaput"] * 2
+
+
+def test_a_failed_range_is_retried_by_the_next_reflect(tmp_path):
+    transcript = _transcript(tmp_path, "first run\n")
+    prompts = []
+    shown = []
+
+    def make_invoke(handler):
+        def invoke(prompt):
+            prompts.append(prompt)
+            if len(prompts) == 1:
+                raise RuntimeError("kaput")
+            return {"facts": [], "mem": []}
+
+        return invoke
+
+    reflector = Reflector(
+        root=tmp_path,
+        transcript=transcript,
+        cfg={},
+        make_invoke=make_invoke,
+        write=shown.append,
+    )
+    reflector.after_run("run-1")
+    reflector.finish()
+    assert len(prompts) == 2
+    assert "first run" in prompts[1]
     assert shown == ["reflect failed: kaput"]
+
+    with transcript.open("a", encoding="utf-8") as file:
+        file.write("second run\n")
+    reflector.after_run("run-2")
+    reflector.finish()
+    assert len(prompts) == 3
+    assert "second run" in prompts[2]
+    assert "first run" not in prompts[2]
+
+
+def test_the_next_run_reflect_covers_the_failed_range(tmp_path):
+    transcript = _transcript(tmp_path, "first run\n")
+    failed = threading.Event()
+    prompts = []
+
+    def make_invoke(handler):
+        def invoke(prompt):
+            prompts.append(prompt)
+            if len(prompts) == 1:
+                failed.set()
+                raise RuntimeError("kaput")
+            return {"facts": [], "mem": []}
+
+        return invoke
+
+    reflector = Reflector(
+        root=tmp_path, transcript=transcript, cfg={}, make_invoke=make_invoke
+    )
+    reflector.after_run("run-1")
+    assert failed.wait(5)
+    with transcript.open("a", encoding="utf-8") as file:
+        file.write("second run\n")
+    reflector.after_run("run-2")
+    reflector.finish()
+    assert len(prompts) == 2
+    assert "first run" in prompts[1]
+    assert "second run" in prompts[1]
+
+
+def test_a_retried_range_stores_each_fact_and_proposal_once(tmp_path):
+    calls = []
+
+    def flaky(**kwargs):
+        calls.append(kwargs)
+        add_fact(kwargs["root"], "uses sqlite")
+        add_mem_proposal(kwargs["root"], "Prefer sqlite")
+        if len(calls) == 1:
+            raise RuntimeError("kaput")
+
+    reflector = Reflector(
+        root=tmp_path, transcript=_transcript(tmp_path, "turn\n"), cfg={}, reflect=flaky
+    )
+    reflector.after_run("run-1")
+    reflector.finish()
+    assert len(calls) == 2
+    assert [item["body"] for item in list_facts(tmp_path)] == ["uses sqlite"]
+    assert list_pending_mem_proposals(tmp_path) == [{"id": 1, "body": "Prefer sqlite"}]
+
+
+def test_finish_retries_a_failed_range_once_and_waits(tmp_path):
+    entered = threading.Event()
+    release = threading.Event()
+    calls = []
+
+    def flaky(**_kw):
+        calls.append(None)
+        if len(calls) == 1:
+            raise RuntimeError("kaput")
+        entered.set()
+        assert release.wait(5)
+
+    reflector = Reflector(
+        root=tmp_path, transcript=_transcript(tmp_path, "x\n"), cfg={}, reflect=flaky
+    )
+    reflector.after_run("run-1")
+    finisher = threading.Thread(target=reflector.finish)
+    finisher.start()
+    assert entered.wait(5)  # the retry was fired
+    assert finisher.is_alive()  # /quit still waits for it
+    release.set()
+    finisher.join(5)
+    assert not finisher.is_alive()
+    assert len(calls) == 2
+
+
+def test_reflects_run_one_at_a_time_in_transcript_order(tmp_path):
+    transcript = _transcript(tmp_path, "first\n")
+    entered = threading.Event()
+    release = threading.Event()
+    second = threading.Event()
+    offsets = []
+
+    def slow(**kwargs):
+        offsets.append(kwargs["offset"])
+        if len(offsets) == 1:
+            entered.set()
+            assert release.wait(5)
+        else:
+            second.set()
+
+    reflector = Reflector(
+        root=tmp_path, transcript=transcript, cfg={}, reflect=slow
+    )
+    reflector.after_run("run-1")
+    assert entered.wait(5)
+    with transcript.open("a", encoding="utf-8") as file:
+        file.write("second\n")
+    reflector.after_run("run-2")
+    assert not second.wait(0.3)  # the second reflect waits for the first
+    release.set()
+    reflector.finish()
+    assert offsets == [0, len("first\n")]
+
+
+def test_a_run_with_no_new_text_reflects_nothing(tmp_path):
+    calls = []
+    reflector = Reflector(
+        root=tmp_path,
+        transcript=_transcript(tmp_path, "x\n"),
+        cfg={},
+        reflect=_recording_reflect(calls),
+    )
+    reflector.after_run("run-1")
+    reflector.finish()
+    reflector.after_run("run-2")  # nothing new since the first reflect
+    reflector.finish()
+    assert len(calls) == 1

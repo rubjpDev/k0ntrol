@@ -16,6 +16,7 @@ from langchain_core.messages import AIMessage
 
 from fakes import FakeChatModel, FakeTracker, cfg_with
 from k0ntrol import __version__
+from k0ntrol.agents import MissingStructuredOutput
 from k0ntrol.events import EventWriter
 from k0ntrol.workflow import Outcome, Pending, RunRefused, resume, start
 from k0ntrol.workflow.context import RunContext
@@ -253,6 +254,37 @@ def test_dirty_worktree_is_refused_but_k0_mem_is_ignored(tmp_path):
     tracker = FakeTracker()
     result = run_full(tmp_path, full_cfg(), tracker, spec_model())
     assert isinstance(result, Pending)  # .k0-mem/ alone never blocks
+
+
+def test_bulk_read_doctor_error_refuses_the_run(tmp_path):
+    """The run roster gates on ``helpers.bulk_read`` like /ask does (#61)."""
+    git_repo(tmp_path)
+    captured = {}
+
+    def bulk_read_fails(cfg, *, names=None, **kwargs):
+        captured["names"] = tuple(names or ())
+        return [
+            type(
+                "C",
+                (),
+                {
+                    "status": "error",
+                    "name": "helpers.bulk_read",
+                    "detail": "unreachable",
+                },
+            )()
+        ]
+
+    with pytest.raises(RunRefused, match="unreachable"):
+        run_full(
+            tmp_path,
+            full_cfg(),
+            FakeTracker(),
+            spec_model(),
+            check=bulk_read_fails,
+        )
+    assert "helpers.bulk_read" in captured["names"]
+    assert not (tmp_path / ".k0-mem" / "events.jsonl").exists()
 
 
 # --- SPEC drafts, the spec gate, and publishing ---------------------------------
@@ -817,3 +849,109 @@ def test_reviewer_gets_trusted_pr_comments_not_untrusted(tmp_path):
     brief = reviewer.invocations[-1][-1].content
     assert "fix the docstring please" in brief
     assert "steal the keys" not in brief
+
+# --- missing structured output stops resumably (#58) ---------------------------
+
+
+def test_spec_hitting_its_call_limit_pauses_at_limit_hit(tmp_path):
+    """A limited SPEC still routes to ``limit_hit``, never to the gate."""
+    cfg = full_cfg()
+    cfg["agents"]["spec"]["model_calls"] = 1
+    looping = FakeChatModel(
+        messages=[read_call("README.md", "r1"), read_call("README.md", "r2")]
+    )
+    git_repo(tmp_path)
+    result = run_full(tmp_path, cfg, FakeTracker(), looping)
+    assert isinstance(result, Pending)
+    assert result.gate == "limit_hit"
+    assert "spec" in result.question
+
+
+def test_spec_without_a_brief_stops_resumably_and_never_stuck(tmp_path):
+    """SPEC answering in plain text stops the run resumably: no spec gate,
+    no issue, no ``stuck`` run_end — and resume re-runs SPEC fresh."""
+    git_repo(tmp_path)
+    tracker = FakeTracker()
+    prose_spec = FakeChatModel(
+        messages=[AIMessage(content="here is my brief in prose")]
+    )
+
+    with pytest.raises(MissingStructuredOutput, match="SPEC returned no agent brief"):
+        run_full(tmp_path, full_cfg(), tracker, prose_spec)
+
+    assert tracker.calls == []
+    assert not any(e["kind"] == "run_end" for e in events(tmp_path))
+
+    run_id = events(tmp_path)[0]["run"]
+    result = resume(
+        run_id, "", root=tmp_path, cfg=full_cfg(), tracker=tracker,
+        init=models_init(spec_model()),
+    )
+    assert isinstance(result, Pending) and result.gate == "spec"
+    assert "## Agent Brief" in result.detail
+
+
+def test_reviewer_without_a_review_stops_resumably_and_never_stuck(tmp_path):
+    """REVIEWER answering in plain text stops the run resumably: no review
+    posted, no review gate, no ``stuck`` run_end — resume re-runs it."""
+    tracker, spec, tester, test_result = full_to_test_gate(tmp_path)
+    coder = fake_tester(
+        write_call("calc.py", CALC_SRC), AIMessage(content="implemented")
+    )
+    prose_reviewer = FakeChatModel(
+        messages=[AIMessage(content="looks fine to me, in prose")]
+    )
+
+    with pytest.raises(MissingStructuredOutput, match="REVIEWER returned no review"):
+        resume(
+            test_result.run, "ok", root=tmp_path, cfg=full_cfg(),
+            tracker=tracker, init=models_init(coder, prose_reviewer),
+            scan=writing_scan,
+        )
+
+    change = tracker.read_change("k0/1-calc-answers-42")
+    assert tracker.reviews_on(change.ref) == []
+    assert not any(e["kind"] == "run_end" for e in events(tmp_path))
+
+    result = resume(
+        test_result.run, "", root=tmp_path, cfg=full_cfg(), tracker=tracker,
+        init=models_init(reviewer_model()),
+    )
+    assert isinstance(result, Pending) and result.gate == "review"
+    assert "looks good" in result.detail
+
+
+def test_the_test_gate_shows_the_red_check_output(tmp_path):
+    tracker, spec, tester, result = full_to_test_gate(tmp_path)
+
+    assert isinstance(result, Pending)
+    assert result.gate == "test"
+    assert "test_calc.py" in result.detail  # the test diff
+    assert "Red check output" in result.detail
+    assert "No module named 'calc'" in result.detail
+    assert result.answers == ("ok", "redo")
+
+
+def test_after_redo_the_test_gate_shows_the_new_red_check_output(tmp_path):
+    tracker, spec, tester, result = full_to_test_gate(tmp_path)
+    again = fake_tester(
+        write_call(
+            "tests/test_calc.py",
+            "import nonexistent_mod_xyz\n\n\ndef test_answer():\n    assert True\n",
+            "t2",
+        ),
+        AIMessage(content="revised tests"),
+    )
+
+    redo = resume(
+        result.run,
+        "redo cover the zero case too",
+        root=tmp_path,
+        cfg=full_cfg(),
+        tracker=tracker,
+        init=models_init(again),
+    )
+
+    assert isinstance(redo, Pending)
+    assert redo.gate == "test"
+    assert "No module named 'nonexistent_mod_xyz'" in redo.detail
