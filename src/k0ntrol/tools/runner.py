@@ -44,6 +44,12 @@ def scrubbed_env(environ: Mapping[str, str] | None = None) -> dict[str, str]:
     }
 
 
+# A cached ``.pyc`` is trusted on (mtime in seconds, size): an edit landing
+# in the same second as an earlier run, with the same size, would be
+# tested as the old code. Never writing bytecode keeps every run fresh.
+_FRESH_IMPORTS_ENV = {"PYTHONDONTWRITEBYTECODE": "1"}
+
+
 @dataclass(frozen=True)
 class CommandResult:
     """What one command run produced. ``timed_out`` counts as red."""
@@ -75,7 +81,7 @@ def run_command(
             capture_output=True,
             text=True,
             timeout=timeout,
-            env=scrubbed_env(environ),
+            env={**scrubbed_env(environ), **_FRESH_IMPORTS_ENV},
             check=False,
         )
     except subprocess.TimeoutExpired as error:

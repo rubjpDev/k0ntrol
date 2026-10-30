@@ -1,5 +1,6 @@
 """One scrubbed, timed-out, truncated runner behind run_tests/test_cmd/gates."""
 
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -105,6 +106,19 @@ def test_run_command_keeps_partial_output_on_timeout(root):
 def test_run_command_survives_a_missing_binary(root):
     result = run_command(["definitely-not-a-binary-xyz"], root=root, timeout=30)
     assert not result.ok
+
+
+def test_run_command_never_tests_a_stale_pyc(root):
+    """An edit in the same second, same size, must not hit the old bytecode."""
+    module = root / "calc.py"
+    module.write_text("ANSWER = 42\n")
+    probe = [sys.executable, "-c", "import calc; print(calc.ANSWER)"]
+    assert "42" in run_command(probe, root=root, timeout=30).output
+    stamp = module.stat().st_mtime_ns
+    module.write_text("ANSWER = 41\n")
+    os.utime(module, ns=(stamp, stamp))
+
+    assert "41" in run_command(probe, root=root, timeout=30).output
 
 
 def test_run_tests_runs_the_configured_test_cmd(root):
