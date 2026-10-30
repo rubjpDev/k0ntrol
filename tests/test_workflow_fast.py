@@ -135,6 +135,39 @@ def test_doctor_errors_refuse_the_run(tmp_path):
     assert not (tmp_path / ".k0-mem" / "events.jsonl").exists()
 
 
+def test_bulk_read_doctor_error_refuses_the_run(tmp_path):
+    """The run roster gates on ``helpers.bulk_read`` like /ask does (#61)."""
+    git_repo(tmp_path)
+    captured = {}
+
+    def bulk_read_fails(cfg, *, names=None, **kwargs):
+        captured["names"] = tuple(names or ())
+        return [
+            type(
+                "C",
+                (),
+                {
+                    "status": "error",
+                    "name": "helpers.bulk_read",
+                    "detail": "unreachable",
+                },
+            )()
+        ]
+
+    with pytest.raises(RunRefused, match="unreachable"):
+        start(
+            "fast",
+            "add a calc module",
+            root=tmp_path,
+            cfg=fast_cfg(),
+            check=bulk_read_fails,
+            scan=lambda root: "scanned",
+            init=models_init(scripted_tester()),
+        )
+    assert "helpers.bulk_read" in captured["names"]
+    assert not (tmp_path / ".k0-mem" / "events.jsonl").exists()
+
+
 # --- the happy path -----------------------------------------------------------
 
 

@@ -255,6 +255,37 @@ def test_dirty_worktree_is_refused_but_k0_mem_is_ignored(tmp_path):
     assert isinstance(result, Pending)  # .k0-mem/ alone never blocks
 
 
+def test_bulk_read_doctor_error_refuses_the_run(tmp_path):
+    """The run roster gates on ``helpers.bulk_read`` like /ask does (#61)."""
+    git_repo(tmp_path)
+    captured = {}
+
+    def bulk_read_fails(cfg, *, names=None, **kwargs):
+        captured["names"] = tuple(names or ())
+        return [
+            type(
+                "C",
+                (),
+                {
+                    "status": "error",
+                    "name": "helpers.bulk_read",
+                    "detail": "unreachable",
+                },
+            )()
+        ]
+
+    with pytest.raises(RunRefused, match="unreachable"):
+        run_full(
+            tmp_path,
+            full_cfg(),
+            FakeTracker(),
+            spec_model(),
+            check=bulk_read_fails,
+        )
+    assert "helpers.bulk_read" in captured["names"]
+    assert not (tmp_path / ".k0-mem" / "events.jsonl").exists()
+
+
 # --- SPEC drafts, the spec gate, and publishing ---------------------------------
 
 
