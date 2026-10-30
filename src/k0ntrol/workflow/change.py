@@ -69,6 +69,39 @@ def current_branch(root: Path) -> str | None:
     return result.stdout.strip() or None
 
 
+def head_sha(root: Path) -> str:
+    """The commit ``HEAD`` points at, or "" outside a git repo."""
+    return _git(root, "rev-parse", "HEAD").stdout.strip()
+
+
+def merge_base(root: Path, base: str) -> str:
+    """Where HEAD left ``origin/<base>`` (else local ``<base>``).
+
+    Falls back to git's empty tree so a diff against it shows everything.
+    """
+    for ref in (f"origin/{base}", base):
+        found = _git(root, "merge-base", "HEAD", ref).stdout.strip()
+        if found:
+            return found
+    return _empty_tree(root)
+
+
+def _empty_tree(root: Path) -> str:
+    """The empty tree object (written if missing): diff against it shows all."""
+    return subprocess.run(
+        ["git", "-C", str(root), "mktree"],
+        input="", capture_output=True, text=True, check=False,
+    ).stdout.strip()
+
+
+def diff_since(root: Path, since: str, path: str) -> str:
+    """``git diff <since> HEAD -- <path>``, capped like every gate detail."""
+    text = _git(root, "diff", since, "HEAD", "--", path).stdout.rstrip()
+    if len(text) > _SUMMARY_MAX_CHARS:
+        text = text[:_SUMMARY_MAX_CHARS] + "\n... diff truncated ..."
+    return text
+
+
 def diff_stat(root: Path) -> str:
     """``git diff --stat HEAD`` plus untracked paths, for gate details.
 

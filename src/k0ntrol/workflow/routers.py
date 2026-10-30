@@ -83,6 +83,14 @@ def route_full_validator(state: dict) -> str:
     return "coder"
 
 
+def route_ci_gate(state: dict) -> str:
+    """Cleared → push (with a gate comment when the human approved);
+    rejected → CODER with the feedback."""
+    if not state.get("ci_cleared_sha"):
+        return "coder"
+    return "ci_comment" if state.get("ci_approved") else "push"
+
+
 def route_after_reviewer(state: dict) -> str:
     """A REVIEWER run that hit its model-call limit never posts."""
     if state.get("limit"):

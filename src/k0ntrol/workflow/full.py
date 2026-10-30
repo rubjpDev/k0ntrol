@@ -36,6 +36,7 @@ from langgraph.graph.state import CompiledStateGraph
 from langgraph.types import interrupt
 
 from k0ntrol.tools.tracker import render_work_item
+from k0ntrol.workflow.ci_gate import gated_push, make_ci_gate
 from k0ntrol.workflow.change import decider, slugify, worktree_summary
 from k0ntrol.workflow.context import RunContext
 from k0ntrol.workflow.nodes import (
@@ -51,6 +52,7 @@ from k0ntrol.workflow.routers import (
     route_after_reviewer,
     route_after_spec,
     route_after_tester,
+    route_ci_gate,
     route_full_red_check,
     route_full_validator,
     route_limit_hit,
@@ -82,6 +84,9 @@ def build_full_graph(
     graph.add_node("coder", make_agent_node(ctx, "coder", "code_files", coder_brief))
     graph.add_node("validator", make_validator(ctx))
     graph.add_node("publish", make_publish(ctx))
+    graph.add_node("ci_gate", make_ci_gate(ctx))
+    graph.add_node("ci_comment", make_ci_comment(ctx))
+    graph.add_node("push", make_push(ctx))
     graph.add_node("reviewer", make_reviewer_node(ctx))
     graph.add_node("post_review", make_post_review(ctx))
     graph.add_node("review_gate", make_review_gate(ctx))
@@ -102,7 +107,10 @@ def build_full_graph(
     graph.add_edge("test_comment", "coder")
     graph.add_conditional_edges("coder", route_after_coder)
     graph.add_conditional_edges("validator", route_full_validator)
-    graph.add_edge("publish", "reviewer")
+    graph.add_edge("publish", "ci_gate")
+    graph.add_conditional_edges("ci_gate", route_ci_gate)
+    graph.add_edge("ci_comment", "push")
+    graph.add_edge("push", "reviewer")
     graph.add_conditional_edges("reviewer", route_after_reviewer)
     graph.add_edge("post_review", "review_gate")
     graph.add_conditional_edges("review_gate", route_review_gate)
@@ -308,7 +316,7 @@ def make_test_comment(ctx: RunContext) -> Callable[[dict], dict]:
 
 
 def make_publish(ctx: RunContext) -> Callable[[dict], dict]:
-    """On green: commit, rescan + memory commit, push, open the draft once.
+    """On green: commit, rescan + memory commit; the CI gate and push follow.
 
     ``commit`` is whole-tree, so the title commit runs first — a memory
     commit first would sweep the change into "update memory" and leave
@@ -325,16 +333,44 @@ def make_publish(ctx: RunContext) -> Callable[[dict], dict]:
         ctx.tracker.commit(message)
         ctx.scan(ctx.root)
         ctx.tracker.commit(f"#{ref}: update memory")
-        ctx.tracker.push(state["branch"])
+        return {}
+
+    return node
+
+
+def make_ci_comment(ctx: RunContext) -> Callable[[dict], dict]:
+    """The CI gate's pass record: on the PR once it exists, else the issue."""
+
+    def node(state: dict) -> dict:
+        body = gate_comment("ci", decider(ctx.root), state.get("ci_rejections", []))
+        marker_node = f"ci_gate_{state.get('ci_round', 1)}"
         if state.get("change_ref"):
-            return {}
+            ctx.tracker.comment_change(
+                state["change_ref"], body, run=ctx.run_id, node=marker_node
+            )
+        else:
+            ctx.tracker.comment_work_item(
+                state["item_ref"], body, run=ctx.run_id, node=marker_node
+            )
+        return {}
+
+    return node
+
+
+def make_push(ctx: RunContext) -> Callable[[dict], dict]:
+    """Push through the CI gate's clearance; open the draft PR once."""
+
+    def node(state: dict) -> dict:
+        updates = gated_push(ctx, state)
+        if state.get("change_ref"):
+            return updates
         change = ctx.tracker.open_change(
             state["branch"],
             ctx.base_branch,
             state["item_title"],
             change_body(ctx, state),
         )
-        return {"change_ref": change.ref, "change_url": change.url}
+        return {**updates, "change_ref": change.ref, "change_url": change.url}
 
     return node
 
@@ -550,6 +586,11 @@ def coder_brief(state: dict) -> str:
         text += (
             "\n\nThe human sent the change back after review:\n"
             f"{state['review_feedback']}"
+        )
+    if state.get("ci_feedback"):
+        text += (
+            "\n\nThe human rejected your .github/ changes at the CI gate:\n"
+            f"{state['ci_feedback']}"
         )
     if state.get("coder_attempts"):
         text += (
