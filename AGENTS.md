@@ -70,6 +70,8 @@ In Devin, use the profiles in `.devin/agents/` and the `design-variant` skill in
 
 A custom Devin profile without `model` uses the subagent router, not the parent's model. Keep `design-variant` as a skill backed by `subagent_general`, with no model override.
 
+Never let a reviewer, merger, implementer or exploration subagent run on the orchestrator's model. This holds in Devin cloud too, where a step may run as a child session instead of a profile subagent: name the model explicitly, the profile's model or `swe-2-high` when unsure. If no profile or explicit model is available, run the step inline in the parent instead of spawning a copy of it; for `/code-review`, that means one inline pass per axis, not two spawned sessions.
+
 ### Issue tracker
 
 GitHub Issues on `rubjpDev/k0ntrol`. Apply the title prefix in `docs/agents/issue-tracker.md`.

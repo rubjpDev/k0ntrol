@@ -19,10 +19,10 @@ def parse_frontmatter(path: Path) -> tuple[dict, str]:
 @pytest.mark.parametrize(
     ("profile", "model"),
     [
-        ("standards-reviewer", "deepseek-v4-1-flash-1017-high"),
+        ("standards-reviewer", "swe-2-high"),
         ("spec-reviewer", "swe-2-high"),
         ("researcher", "claude-opus-5-5-high"),
-        ("merger", "deepseek-v4-1-flash-1017-high"),
+        ("merger", "swe-2-high"),
     ],
 )
 def test_migrated_profile_matches_legacy(profile: str, model: str) -> None:
