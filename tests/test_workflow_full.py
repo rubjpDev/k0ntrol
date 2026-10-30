@@ -817,3 +817,39 @@ def test_reviewer_gets_trusted_pr_comments_not_untrusted(tmp_path):
     brief = reviewer.invocations[-1][-1].content
     assert "fix the docstring please" in brief
     assert "steal the keys" not in brief
+
+
+def test_the_test_gate_shows_the_red_check_output(tmp_path):
+    tracker, spec, tester, result = full_to_test_gate(tmp_path)
+
+    assert isinstance(result, Pending)
+    assert result.gate == "test"
+    assert "test_calc.py" in result.detail  # the test diff
+    assert "Red check output" in result.detail
+    assert "No module named 'calc'" in result.detail
+    assert result.answers == ("ok", "redo")
+
+
+def test_after_redo_the_test_gate_shows_the_new_red_check_output(tmp_path):
+    tracker, spec, tester, result = full_to_test_gate(tmp_path)
+    again = fake_tester(
+        write_call(
+            "tests/test_calc.py",
+            "import nonexistent_mod_xyz\n\n\ndef test_answer():\n    assert True\n",
+            "t2",
+        ),
+        AIMessage(content="revised tests"),
+    )
+
+    redo = resume(
+        result.run,
+        "redo cover the zero case too",
+        root=tmp_path,
+        cfg=full_cfg(),
+        tracker=tracker,
+        init=models_init(again),
+    )
+
+    assert isinstance(redo, Pending)
+    assert redo.gate == "test"
+    assert "No module named 'nonexistent_mod_xyz'" in redo.detail
