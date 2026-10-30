@@ -1,12 +1,12 @@
 """The reflect helper: distills a session transcript into session memory.
 
 ``run_reflect`` turns one slice of the session transcript — everything
-written since the last reflect, marked by a byte ``offset`` — into session
-facts and pending ``Mem.md`` proposals through the ``reflect`` helper's
-structured output. ``Reflector`` owns the offset and the background
-threads: one fire per run outcome and one at ``/quit`` for pending ``/ask``
-turns, never a graph node, so it is never replayed on resume and never
-fails a run.
+written since the last completed reflect, marked by a byte ``offset`` —
+into session facts and pending ``Mem.md`` proposals through the ``reflect``
+helper's structured output. ``Reflector`` owns the offsets and the
+background threads: one fire per run outcome and one at ``/quit`` for
+pending ``/ask`` turns, never a graph node, so it is never replayed on
+resume and never fails a run.
 """
 
 from __future__ import annotations
@@ -154,10 +154,13 @@ class Reflector:
     ``after_run`` fires once per run outcome (``done``/``stuck``/``rejected``),
     ``finish`` fires once for ``/ask`` turns pending since the last reflect
     and then waits — ``/quit`` never returns while a reflect is running.
-    The byte ``offset`` marks where the last fire's input ended, so each
-    reflect sees only the transcript written since the one before and is
-    never replayed on resume. Reflect is not a graph node: it cannot delay
-    an outcome, and a failure shows one line instead of failing the run.
+    Two byte offsets track the transcript: ``_dispatched`` ends the range
+    handed to the last fire, ``_completed`` ends the prefix reflected
+    successfully. A fire covers ``_completed`` up to the transcript size at
+    dispatch, and only a success moves ``_completed`` — so a failed range
+    is covered again by the next reflect, after a run or at ``/quit``.
+    Reflect is not a graph node: it cannot delay an outcome, and a failure
+    shows one line instead of failing the run.
     """
 
     def __init__(
@@ -176,7 +179,8 @@ class Reflector:
         self._write = write
         self._reflect = reflect
         self._threads: list[threading.Thread] = []
-        self._offset = 0
+        self._dispatched = 0
+        self._completed = 0
         self._ask_turns = 0
         self._cfg = cfg
         self._init = init
@@ -192,23 +196,25 @@ class Reflector:
         self._fire(run=run_id)
 
     def finish(self) -> None:
-        """``/quit``: reflect pending ``/ask`` turns once, then wait."""
+        """``/quit``: reflect pending ``/ask`` turns once, retry a failed
+        range once, then wait."""
         self._wait()
-        if self._ask_turns and self._has_new_text():
+        if self._completed < self._dispatched or (
+            self._ask_turns and self._has_new_text()
+        ):
             self._fire(chat=new_chat_id())
             self._wait()
 
     def _fire(self, *, run: str | None = None, chat: str | None = None) -> None:
-        offset = self._offset
-        self._offset = _transcript_size(self._transcript)
+        self._dispatched = _transcript_size(self._transcript)
         self._ask_turns = 0
         thread = threading.Thread(
-            target=self._run, args=(offset, self._offset, run, chat), daemon=True, name="k0-reflect"
+            target=self._run, args=(self._dispatched, run, chat), daemon=True, name="k0-reflect"
         )
         self._threads.append(thread)
         thread.start()
 
-    def _run(self, offset: int, end: int, run: str | None, chat: str | None) -> None:
+    def _run(self, end: int, run: str | None, chat: str | None) -> None:
         try:
             handler = K0EventHandler(
                 EventWriter(
@@ -221,6 +227,9 @@ class Reflector:
             invoke = self._make_invoke(handler)
             # One reflect at a time: session.sqlite has no writer queue.
             with self._lock:
+                offset = self._completed
+                if offset >= end:
+                    return
                 self._reflect(
                     root=self._root,
                     invoke=invoke,
@@ -228,6 +237,7 @@ class Reflector:
                     offset=offset,
                     end=end,
                 )
+                self._completed = end
         except Exception as error:
             if self._write is not None:
                 self._write(f"reflect failed: {_short(error)}")
@@ -247,7 +257,7 @@ class Reflector:
         )
 
     def _has_new_text(self) -> bool:
-        return self._offset < _transcript_size(self._transcript)
+        return self._dispatched < _transcript_size(self._transcript)
 
     def _wait(self) -> None:
         for thread in self._threads:
