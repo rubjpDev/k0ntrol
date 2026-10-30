@@ -163,3 +163,40 @@ def test_grep_truncates_a_long_match_list(root, monkeypatch):
     tool = make_grep(root)
     result = tool.invoke({"pattern": "."})
     assert result.splitlines()[-1] == "... truncated at 2"
+
+
+def test_grep_never_searches_through_a_symlink_to_an_ignored_file(root):
+    (root / "link").symlink_to(".env")
+    subprocess.run(["git", "add", "link"], cwd=root, check=True)
+    tool = make_grep(root)
+    result = tool.invoke({"pattern": "SECRET"})
+    assert "hunter2" not in result
+    assert "link" not in result
+
+
+def test_grep_never_searches_through_a_symlink_into_a_protected_dir(root):
+    (root / "gitconfig").symlink_to(".git/config")
+    subprocess.run(["git", "add", "gitconfig"], cwd=root, check=True)
+    tool = make_grep(root)
+    result = tool.invoke({"pattern": "repositoryformatversion"})
+    assert "gitconfig" not in result
+    assert "repositoryformatversion" not in result
+
+
+def test_grep_never_searches_through_a_symlink_outside_the_root(root):
+    (root.parent / "outside.txt").write_text("outside-secret\n")
+    (root / "escape.txt").symlink_to("../outside.txt")
+    subprocess.run(["git", "add", "escape.txt"], cwd=root, check=True)
+    tool = make_grep(root)
+    result = tool.invoke({"pattern": "outside-secret"})
+    assert "escape.txt" not in result
+    assert "outside-secret" not in result
+
+
+def test_grep_searches_a_symlink_to_a_visible_file(root):
+    (root / "alias.py").symlink_to("src/app.py")
+    subprocess.run(["git", "add", "alias.py"], cwd=root, check=True)
+    tool = make_grep(root)
+    result = tool.invoke({"pattern": "def main"})
+    assert "alias.py:1:def main():" in result
+    assert "src/app.py:1:def main():" in result
