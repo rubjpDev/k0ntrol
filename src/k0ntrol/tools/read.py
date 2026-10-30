@@ -112,8 +112,9 @@ def make_grep(root: Path) -> BaseTool:
     def grep(pattern: str, path_glob: str | None = None) -> str:
         """Search repository files for a regex. Returns `path:line: text` matches."""
         regex = _compile(pattern)
-        files = _search_targets(path_glob, root)
-        return _collect_matches(regex, files, root)
+        visible = visible_files(root)
+        files = _search_targets(path_glob, visible)
+        return _collect_matches(regex, files, root, visible)
 
     return grep
 
@@ -125,19 +126,19 @@ def _compile(pattern: str) -> re.Pattern[str]:
         raise ToolError(f"bad regex: {error}") from error
 
 
-def _search_targets(path_glob: str | None, root: Path) -> list[str]:
-    visible = sorted(visible_files(root))
+def _search_targets(path_glob: str | None, visible: set[str]) -> list[str]:
+    names = sorted(visible)
     if path_glob is None:
-        return visible
-    return [name for name in visible if PurePosixPath(name).match(path_glob)]
+        return names
+    return [name for name in names if PurePosixPath(name).match(path_glob)]
 
 
 def _collect_matches(
-    regex: re.Pattern[str], files: list[str], root: Path
+    regex: re.Pattern[str], files: list[str], root: Path, visible: set[str]
 ) -> str:
     matches = []
     for name in files:
-        matches.extend(_file_matches(regex, name, root))
+        matches.extend(_file_matches(regex, name, root, visible))
         if len(matches) >= _MATCH_LIMIT:
             break
     if len(matches) > _MATCH_LIMIT:
@@ -145,8 +146,25 @@ def _collect_matches(
     return "\n".join(matches)
 
 
-def _file_matches(regex: re.Pattern[str], name: str, root: Path) -> list[str]:
-    lines = _read_lines(root / name)
+def _resolved_if_visible(name: str, root: Path, visible: set[str]) -> Path | None:
+    """Resolve ``root/name`` through the path guard and return it only when
+    the resolved path still lands on a file git sees. A tracked symlink whose
+    target is ignored, protected or outside the root returns ``None``."""
+    try:
+        resolved = guard_path(name, root)
+    except ToolError:
+        return None
+    relative = resolved.relative_to(root.resolve()).as_posix()
+    return resolved if relative in visible else None
+
+
+def _file_matches(
+    regex: re.Pattern[str], name: str, root: Path, visible: set[str]
+) -> list[str]:
+    resolved = _resolved_if_visible(name, root, visible)
+    if resolved is None:
+        return []
+    lines = _read_lines(resolved)
     if lines is None:
         return []
     return [
