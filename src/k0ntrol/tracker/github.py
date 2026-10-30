@@ -115,11 +115,10 @@ class GhTracker:
 
     def create_branch(self, branch: str, base: str) -> None:
         self._run(["git", "fetch", "origin", base])
-        probe = self._runner(
-            ["git", "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}"]
-        )
-        if probe.returncode == 0:
+        if self._has_ref(f"refs/heads/{branch}"):
             self._run(["git", "checkout", branch])
+        elif self._has_ref(f"refs/remotes/origin/{branch}"):
+            self._run(["git", "checkout", "-b", branch, f"origin/{branch}"])
         else:
             self._run(["git", "checkout", "-b", branch, f"origin/{base}"])
 
@@ -191,7 +190,7 @@ class GhTracker:
         )
         if not prs:
             return None
-        pr = prs[0]
+        pr = _preferred_pr(prs)
         return Change(
             ref=str(pr["number"]),
             branch=branch,
@@ -215,6 +214,10 @@ class GhTracker:
             for c in raw
         )
 
+    def _has_ref(self, ref: str) -> bool:
+        probe = self._runner(["git", "rev-parse", "--verify", "--quiet", ref])
+        return probe.returncode == 0
+
     def _label_names(self, ref: str) -> set[str]:
         issue = self._gh_json(["gh", "api", f"repos/{{owner}}/{{repo}}/issues/{ref}"])
         return {label["name"] for label in issue["labels"]}
@@ -230,6 +233,15 @@ class GhTracker:
 
     def _gh_json(self, argv: list[str]):
         return json.loads(self._run(argv).stdout)
+
+
+def _preferred_pr(prs: list[dict]) -> dict:
+    """The branch's open PR, else its most recent one (highest number).
+
+    ``gh pr list`` order is not a contract, so the choice never leans on it.
+    """
+    open_prs = [pr for pr in prs if pr["state"].lower() == "open"]
+    return max(open_prs or prs, key=lambda pr: pr["number"])
 
 
 def _number_from_url(url: str) -> str:

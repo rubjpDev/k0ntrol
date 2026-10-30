@@ -40,6 +40,28 @@ def slugify(title: str) -> str:
     return slug[:48].strip("-") or "work"
 
 
+def existing_branch(root: Path, ref: str) -> str | None:
+    """The ``k0/<ref>-*`` branch an earlier run cut, if any.
+
+    A local branch wins; a branch only on ``origin`` (a fresh clone) counts
+    too, named without the remote.
+    """
+    local = _branches(root, f"refs/heads/k0/{ref}-*")
+    remote = _branches(root, f"refs/remotes/origin/k0/{ref}-*")
+    return next(iter(local + [b.removeprefix("origin/") for b in remote]), None)
+
+
+def _branches(root: Path, pattern: str) -> list[str]:
+    out = _git(root, "for-each-ref", "--format=%(refname:short)", pattern).stdout
+    return out.split()
+
+
+def remote_tip(root: Path, branch: str) -> str | None:
+    """The commit ``origin/<branch>`` points at, if the branch was pushed."""
+    result = _git(root, "rev-parse", "--verify", "--quiet", f"refs/remotes/origin/{branch}")
+    return result.stdout.strip() or None
+
+
 def default_base_branch(root: Path) -> str:
     """origin's default branch, ``main`` when there is no remote."""
     result = _git(
@@ -62,6 +84,36 @@ def current_branch(root: Path) -> str | None:
     if result.returncode != 0:
         return None
     return result.stdout.strip() or None
+
+
+def head_sha(root: Path) -> str:
+    """The commit ``HEAD`` points at, or "" outside a git repo."""
+    return _git(root, "rev-parse", "HEAD").stdout.strip()
+
+
+def merge_base(root: Path, base: str) -> str:
+    """Where HEAD left ``origin/<base>`` (else local ``<base>``).
+
+    Falls back to git's empty tree so a diff against it shows everything.
+    """
+    for ref in (f"origin/{base}", base):
+        found = _git(root, "merge-base", "HEAD", ref).stdout.strip()
+        if found:
+            return found
+    return _empty_tree(root)
+
+
+def _empty_tree(root: Path) -> str:
+    """The empty tree object (written if missing): diff against it shows all."""
+    return _git(root, "hash-object", "-w", "-t", "tree", "/dev/null").stdout.strip()
+
+
+def diff_since(root: Path, since: str, path: str) -> str:
+    """``git diff <since> HEAD -- <path>``, capped like every gate detail."""
+    text = _git(root, "diff", since, "HEAD", "--", path).stdout.rstrip()
+    if len(text) > _SUMMARY_MAX_CHARS:
+        text = text[:_SUMMARY_MAX_CHARS] + "\n... diff truncated ..."
+    return text
 
 
 def diff_stat(root: Path) -> str:

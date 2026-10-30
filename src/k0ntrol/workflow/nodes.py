@@ -197,7 +197,7 @@ def make_limit_hit(ctx: RunContext) -> Callable[[dict], dict]:
                 "gate": "limit_hit",
                 "question": (
                     f"{limit.get('node', '?')} hit its limit "
-                    f"({_limit_desc(limit)}) — retry or stop?"
+                    f"({limit_desc(limit)}) — retry or stop?"
                 ),
                 "answers": ["retry", "stop"],
                 "detail": _limit_detail(ctx, limit),
@@ -205,7 +205,7 @@ def make_limit_hit(ctx: RunContext) -> Callable[[dict], dict]:
         )
         verb, _, feedback = str(decision).strip().partition(" ")
         if verb.lower() == "retry":
-            return _retry_update(limit, feedback.strip())
+            return _retry_update(state, limit, feedback.strip())
         return {
             "outcome": "stuck",
             "reason": limit.get("reason"),
@@ -216,7 +216,7 @@ def make_limit_hit(ctx: RunContext) -> Callable[[dict], dict]:
     return node
 
 
-def _limit_desc(limit: dict) -> str:
+def limit_desc(limit: dict) -> str:
     return f"{limit.get('what', 'attempts')} {limit.get('used', '?')}/{limit.get('max', '?')}"
 
 
@@ -229,9 +229,10 @@ def _limit_detail(ctx: RunContext, limit: dict) -> str:
     return "\n\n".join(parts)
 
 
-def _retry_update(limit: dict, feedback: str) -> dict:
+def _retry_update(state: dict, limit: dict, feedback: str) -> dict:
     retry_node = str(limit.get("retry_node") or "tester")
     return {
+        "retries_granted": state.get("retries_granted", 0) + 1,
         "limit": None,
         "retry_node": retry_node,
         "retry_context": _retry_context(limit, feedback),
@@ -241,7 +242,7 @@ def _retry_update(limit: dict, feedback: str) -> dict:
 
 def _retry_context(limit: dict, feedback: str) -> str:
     parts = [
-        f"The previous run stopped at its limit: {_limit_desc(limit)} "
+        f"The previous run stopped at its limit: {limit_desc(limit)} "
         f"at {limit.get('node', '?')}. Files written so far are kept."
     ]
     output = str(limit.get("output") or "").rstrip()

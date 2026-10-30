@@ -10,8 +10,19 @@ from k0ntrol.workflow.run import (
     Pending,
     Result,
     RunRefused,
+    Unfinished,
+    abandon,
     resume,
     start,
 )
 
-__all__ = ["Outcome", "Pending", "Result", "RunRefused", "resume", "start"]
+__all__ = [
+    "Outcome",
+    "Pending",
+    "Result",
+    "RunRefused",
+    "Unfinished",
+    "abandon",
+    "resume",
+    "start",
+]

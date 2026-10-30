@@ -178,10 +178,28 @@ def test_label_operations_use_gh_issue_edit_and_gh_label():
     assert len(creates) == 1 and "k0:stuck" in creates[0]
 
 
+def test_create_branch_checks_out_a_remote_only_branch_from_its_tip():
+    runner = FakeRunner()
+    runner.script(["git", "fetch", "origin", "main"])
+    runner.script(["git", "rev-parse", "--verify", "--quiet", "refs/heads/k0/1-x"], returncode=1)
+    runner.script(["git", "rev-parse", "--verify", "--quiet", "refs/remotes/origin/k0/1-x"])
+    runner.script(["git", "checkout"])
+    tracker = GhTracker(runner)
+
+    tracker.create_branch("k0/1-x", "main")
+
+    assert ["git", "checkout", "-b", "k0/1-x", "origin/k0/1-x"] in runner.calls
+    assert ["git", "checkout", "-b", "k0/1-x", "origin/main"] not in runner.calls
+
+
 def test_create_branch_fetches_and_checks_out_new_branch():
     runner = FakeRunner()
     runner.script(["git", "fetch", "origin", "main"])
     runner.script(["git", "rev-parse", "--verify", "--quiet", "refs/heads/k0/1-x"], returncode=1)
+    runner.script(
+        ["git", "rev-parse", "--verify", "--quiet", "refs/remotes/origin/k0/1-x"],
+        returncode=1,
+    )
     runner.script(["git", "checkout"])
     tracker = GhTracker(runner)
 
@@ -253,6 +271,39 @@ def test_read_change_returns_none_or_the_change():
     )
     change = tracker.read_change("b")
     assert change.ref == "7" and change.state == "merged"
+
+
+def _pr(number, state):
+    return {
+        "number": number,
+        "title": f"PR {number}",
+        "state": state,
+        "isDraft": False,
+        "url": f"https://github.com/o/r/pull/{number}",
+    }
+
+
+@pytest.mark.parametrize(
+    "prs,ref,state",
+    [
+        # an open PR wins whatever the listing order is
+        ([_pr(9, "CLOSED"), _pr(7, "OPEN")], "7", "open"),
+        ([_pr(7, "OPEN"), _pr(9, "CLOSED")], "7", "open"),
+        # no open PR: the most recent one (highest number) speaks
+        ([_pr(7, "MERGED"), _pr(9, "CLOSED")], "9", "closed"),
+        ([_pr(9, "CLOSED"), _pr(7, "MERGED")], "9", "closed"),
+    ],
+)
+def test_read_change_does_not_depend_on_the_listing_order(prs, ref, state):
+    runner = FakeRunner()
+    runner.script(
+        ["gh", "pr", "list", "--head", "b", "--state", "all", "--json"],
+        stdout=json.dumps(prs),
+    )
+
+    change = GhTracker(runner).read_change("b")
+
+    assert (change.ref, change.state) == (ref, state)
 
 
 def test_open_change_reuses_open_pr_or_creates_a_draft():

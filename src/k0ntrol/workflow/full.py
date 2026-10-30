@@ -36,7 +36,14 @@ from langgraph.graph.state import CompiledStateGraph
 from langgraph.types import interrupt
 
 from k0ntrol.tools.tracker import render_work_item
-from k0ntrol.workflow.change import decider, slugify, worktree_summary
+from k0ntrol.workflow.change import (
+    decider,
+    existing_branch,
+    remote_tip,
+    slugify,
+    worktree_summary,
+)
+from k0ntrol.workflow.ci_gate import gated_push, make_ci_gate
 from k0ntrol.workflow.context import RunContext
 from k0ntrol.workflow.nodes import (
     _brief_with_retry,
@@ -51,14 +58,24 @@ from k0ntrol.workflow.routers import (
     route_after_reviewer,
     route_after_spec,
     route_after_tester,
+    route_ci_gate,
+    route_full_limit_hit,
     route_full_red_check,
     route_full_validator,
-    route_limit_hit,
     route_review_gate,
     route_spec_gate,
+    route_stuck_ci_gate,
     route_test_gate,
 )
 from k0ntrol.workflow.state import RunState
+from k0ntrol.workflow.stuck import (
+    make_stuck_commit,
+    make_stuck_comment,
+    make_stuck_label,
+    make_stuck_pr_comment,
+    make_stuck_push,
+    make_unstick,
+)
 
 
 def build_full_graph(
@@ -82,18 +99,32 @@ def build_full_graph(
     graph.add_node("coder", make_agent_node(ctx, "coder", "code_files", coder_brief))
     graph.add_node("validator", make_validator(ctx))
     graph.add_node("publish", make_publish(ctx))
+    graph.add_node("ci_gate", make_ci_gate(ctx))
+    graph.add_node("ci_comment", make_ci_comment(ctx))
+    graph.add_node("ci_reject_comment", make_ci_reject_comment(ctx))
+    graph.add_node("push", make_push(ctx))
     graph.add_node("reviewer", make_reviewer_node(ctx))
     graph.add_node("post_review", make_post_review(ctx))
     graph.add_node("review_gate", make_review_gate(ctx))
     graph.add_node("review_comment", make_review_comment(ctx))
     graph.add_node("mark_ready", make_mark_ready(ctx))
     graph.add_node("limit_hit", make_limit_hit(ctx))
+    graph.add_node("unstick", make_unstick(ctx))
+    graph.add_node("stuck_commit", make_stuck_commit(ctx))
+    graph.add_node("stuck_ci_gate", make_ci_gate(ctx))
+    graph.add_node("stuck_ci_comment", make_ci_comment(ctx))
+    graph.add_node("stuck_ci_reject_comment", make_ci_reject_comment(ctx))
+    graph.add_node("stuck_push", make_stuck_push(ctx))
+    graph.add_node("stuck_label", make_stuck_label(ctx))
+    graph.add_node("stuck_comment", make_stuck_comment(ctx))
+    graph.add_node("stuck_pr_comment", make_stuck_pr_comment(ctx))
     graph.add_edge(START, "spec")
     graph.add_conditional_edges("spec", route_after_spec)
     graph.add_conditional_edges("spec_gate", route_spec_gate)
     graph.add_edge("create_issue", "post_brief")
     graph.add_edge("post_brief", "spec_comment")
-    graph.add_edge("spec_comment", "branch_setup")
+    graph.add_edge("spec_comment", "unstick")
+    graph.add_edge("unstick", "branch_setup")
     graph.add_edge("branch_setup", "tester")
     graph.add_conditional_edges("tester", route_after_tester)
     graph.add_conditional_edges("red_check", route_full_red_check)
@@ -102,13 +133,25 @@ def build_full_graph(
     graph.add_edge("test_comment", "coder")
     graph.add_conditional_edges("coder", route_after_coder)
     graph.add_conditional_edges("validator", route_full_validator)
-    graph.add_edge("publish", "reviewer")
+    graph.add_edge("publish", "ci_gate")
+    graph.add_conditional_edges("ci_gate", route_ci_gate)
+    graph.add_edge("ci_comment", "push")
+    graph.add_edge("ci_reject_comment", "coder")
+    graph.add_edge("push", "reviewer")
     graph.add_conditional_edges("reviewer", route_after_reviewer)
     graph.add_edge("post_review", "review_gate")
     graph.add_conditional_edges("review_gate", route_review_gate)
     graph.add_edge("review_comment", "mark_ready")
     graph.add_edge("mark_ready", END)
-    graph.add_conditional_edges("limit_hit", route_limit_hit)
+    graph.add_conditional_edges("limit_hit", route_full_limit_hit)
+    graph.add_edge("stuck_commit", "stuck_ci_gate")
+    graph.add_conditional_edges("stuck_ci_gate", route_stuck_ci_gate)
+    graph.add_edge("stuck_ci_comment", "stuck_push")
+    graph.add_edge("stuck_ci_reject_comment", "stuck_label")
+    graph.add_edge("stuck_push", "stuck_label")
+    graph.add_edge("stuck_label", "stuck_comment")
+    graph.add_edge("stuck_comment", "stuck_pr_comment")
+    graph.add_edge("stuck_pr_comment", END)
     return graph.compile(checkpointer=checkpointer)
 
 
@@ -224,15 +267,25 @@ def make_spec_comment(ctx: RunContext) -> Callable[[dict], dict]:
 
 
 def make_branch_setup(ctx: RunContext) -> Callable[[dict], dict]:
-    """Cut ``k0/<n>-<slug>`` from the base, rescan, commit ``.k0-mem/``."""
+    """Cut ``k0/<n>-<slug>`` from the base, rescan, commit ``.k0-mem/``.
+
+    A reused branch carries what an earlier run pushed: its remote tip is
+    the first push's CI-gate baseline, so ``.github/`` changes already
+    there are not asked about again.
+    """
 
     def node(state: dict) -> dict:
         ref = state["item_ref"]
-        branch = state.get("branch") or f"k0/{ref}-{slugify(state['item_title'])}"
+        branch = (
+            state.get("branch")
+            or existing_branch(ctx.root, ref)
+            or f"k0/{ref}-{slugify(state['item_title'])}"
+        )
         ctx.tracker.create_branch(branch, ctx.base_branch)
         ctx.scan(ctx.root)
         ctx.tracker.commit(f"#{ref}: update memory")
-        return {"branch": branch}
+        tip = None if state.get("ci_approved_sha") else remote_tip(ctx.root, branch)
+        return {"branch": branch, **({"ci_approved_sha": tip} if tip else {})}
 
     return node
 
@@ -308,7 +361,7 @@ def make_test_comment(ctx: RunContext) -> Callable[[dict], dict]:
 
 
 def make_publish(ctx: RunContext) -> Callable[[dict], dict]:
-    """On green: commit, rescan + memory commit, push, open the draft once.
+    """On green: commit, rescan + memory commit; the CI gate and push follow.
 
     ``commit`` is whole-tree, so the title commit runs first — a memory
     commit first would sweep the change into "update memory" and leave
@@ -325,16 +378,62 @@ def make_publish(ctx: RunContext) -> Callable[[dict], dict]:
         ctx.tracker.commit(message)
         ctx.scan(ctx.root)
         ctx.tracker.commit(f"#{ref}: update memory")
-        ctx.tracker.push(state["branch"])
+        return {}
+
+    return node
+
+
+def make_ci_comment(ctx: RunContext) -> Callable[[dict], dict]:
+    """The CI gate's pass record: on the PR once it exists, else the issue."""
+
+    def node(state: dict) -> dict:
+        body = gate_comment("ci", decider(ctx.root), state.get("ci_rejections", []))
+        _post_ci_comment(ctx, state, body, f"ci_gate_{state.get('ci_round', 1)}")
+        return {}
+
+    return node
+
+
+def make_ci_reject_comment(ctx: RunContext) -> Callable[[dict], dict]:
+    """The CI gate's reject record, with the human's feedback."""
+
+    def node(state: dict) -> dict:
+        rejections = state.get("ci_rejections", [])
+        body = reject_comment("ci", decider(ctx.root), rejections[-1])
+        _post_ci_comment(ctx, state, body, f"ci_gate_reject_{len(rejections)}")
+        return {}
+
+    return node
+
+
+def _post_ci_comment(
+    ctx: RunContext, state: dict, body: str, marker_node: str
+) -> None:
+    """On the PR once it exists, else on the issue (marker-idempotent)."""
+    if state.get("change_ref"):
+        ctx.tracker.comment_change(
+            state["change_ref"], body, run=ctx.run_id, node=marker_node
+        )
+    else:
+        ctx.tracker.comment_work_item(
+            state["item_ref"], body, run=ctx.run_id, node=marker_node
+        )
+
+
+def make_push(ctx: RunContext) -> Callable[[dict], dict]:
+    """Push through the CI gate's clearance; open the draft PR once."""
+
+    def node(state: dict) -> dict:
+        updates = gated_push(ctx, state)
         if state.get("change_ref"):
-            return {}
+            return updates
         change = ctx.tracker.open_change(
             state["branch"],
             ctx.base_branch,
             state["item_title"],
             change_body(ctx, state),
         )
-        return {"change_ref": change.ref, "change_url": change.url}
+        return {**updates, "change_ref": change.ref, "change_url": change.url}
 
     return node
 
@@ -536,6 +635,19 @@ def gate_comment(gate: str, who: str, rejections: list[str]) -> str:
     return "\n".join(lines)
 
 
+def reject_comment(gate: str, who: str, feedback: str) -> str:
+    """One comment per rejected gate: gate, who, when and the feedback."""
+    return "\n".join(
+        [
+            f"Gate rejected: {gate}",
+            f"Decided by: {who}",
+            f"At: {datetime.now(UTC).isoformat(timespec='seconds')}",
+            "",
+            f"Feedback: {feedback or '(none)'}",
+        ]
+    )
+
+
 def coder_brief(state: dict) -> str:
     """CODER's fresh context: the item, the tests, review or VALIDATOR output."""
     files = ", ".join(state.get("test_files", [])) or "(none)"
@@ -550,6 +662,11 @@ def coder_brief(state: dict) -> str:
         text += (
             "\n\nThe human sent the change back after review:\n"
             f"{state['review_feedback']}"
+        )
+    if state.get("ci_feedback"):
+        text += (
+            "\n\nThe human rejected your .github/ changes at the CI gate:\n"
+            f"{state['ci_feedback']}"
         )
     if state.get("coder_attempts"):
         text += (
