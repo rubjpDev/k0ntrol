@@ -1181,6 +1181,30 @@ def test_a_second_full_run_gets_the_unfinished_run_back(tmp_path):
     assert again == Unfinished(run=pending.run, node="review_gate")
 
 
+@pytest.mark.parametrize("input_text", ["#2", "something else entirely"])
+def test_an_open_run_for_another_work_item_still_refuses(tmp_path, input_text):
+    tracker, coder, reviewer, pending = full_to_review_gate(tmp_path)
+
+    with pytest.raises(RunRefused, match=f"already open.*{pending.run}"):
+        run_full(tmp_path, full_cfg(), tracker, input=input_text)
+
+
+def test_an_open_run_for_a_closed_issue_is_refused_not_offered(tmp_path):
+    tracker, coder, reviewer, pending = full_to_review_gate(tmp_path)
+    tracker.close_work_item("1")
+
+    with pytest.raises(RunRefused, match="work item #1 is closed"):
+        run_full(tmp_path, full_cfg(), tracker, input="#1")
+
+
+def test_an_open_run_for_a_merged_pr_is_refused_not_offered(tmp_path):
+    tracker, coder, reviewer, pending = full_to_review_gate(tmp_path)
+    tracker.merge_change(tracker.read_change(BRANCH).ref)
+
+    with pytest.raises(RunRefused, match="pull request .* merged"):
+        run_full(tmp_path, full_cfg(), tracker, input="#1")
+
+
 def test_resume_without_an_answer_shows_the_pending_gate_again(tmp_path):
     tracker, coder, reviewer, pending = full_to_review_gate(tmp_path)
 
