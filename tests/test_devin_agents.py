@@ -19,7 +19,7 @@ def parse_frontmatter(path: Path) -> tuple[dict, str]:
 @pytest.mark.parametrize(
     ("profile", "model"),
     [
-        ("standards-reviewer", "swe-2-high"),
+        ("standards-reviewer", "swe-2-medium"),
         ("spec-reviewer", "swe-2-high"),
         ("researcher", "swe-2-high"),
         ("merger", "swe-2-medium"),
