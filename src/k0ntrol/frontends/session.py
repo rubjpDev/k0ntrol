@@ -8,7 +8,8 @@ from k0ntrol import __version__
 from k0ntrol.frontends.ask import answer_ask
 from k0ntrol.frontends.banner import render_banner
 from k0ntrol.memory.reflect import Reflector, offer_mem_proposals
-from k0ntrol.workflow import Outcome, Pending, RunRefused
+from k0ntrol.workflow import Outcome, Pending, RunRefused, Unfinished
+from k0ntrol.workflow import abandon as abandon_run
 from k0ntrol.workflow import resume as resume_run
 from k0ntrol.workflow import start as start_run
 
@@ -24,6 +25,7 @@ def run_session(
     ask: Callable = answer_ask,
     start: Callable = start_run,
     resume: Callable = resume_run,
+    abandon: Callable = abandon_run,
     init: Callable = init_chat_model,
     reflector=None,
 ) -> int:
@@ -67,6 +69,7 @@ def run_session(
                 config=config,
                 start=start,
                 resume=resume,
+                abandon=abandon,
                 reflector=reflector,
             ),
         )
@@ -157,10 +160,14 @@ def _run_work(
     config: dict,
     start: Callable,
     resume: Callable,
+    abandon: Callable,
     reflector,
 ) -> None:
     """Drive one run: start, then Pending → answer → resume until it ends."""
-    result = _try_start(kind, task, show=show, root=root, config=config, start=start)
+    result = _start_or_resume(
+        kind, task, read_line=read_line, show=show, root=root, config=config,
+        start=start, resume=resume, abandon=abandon,
+    )
     if result is None:
         return
     while isinstance(result, Pending):
@@ -175,6 +182,47 @@ def _run_work(
     reflector.after_run(result.run)
 
 
+def _start_or_resume(
+    kind: str,
+    task: str,
+    *,
+    read_line: Callable[[], str],
+    show: Callable[[str], None],
+    root: Path,
+    config: dict,
+    start: Callable,
+    resume: Callable,
+    abandon: Callable,
+):
+    """Start the run; an unfinished one is resumed or abandoned first."""
+    result = _try_start(kind, task, show=show, root=root, config=config, start=start)
+    if not isinstance(result, Unfinished):
+        return result
+    answer = _ask_resume(result, read_line, show)
+    if answer == "y":
+        resumed = _try_resume(
+            result, None, show=show, root=root, config=config, resume=resume
+        )
+        return None if resumed is result else resumed
+    if answer == "n":
+        abandon(result.run, root=root)
+        return _try_start(kind, task, show=show, root=root, config=config, start=start)
+    return None
+
+
+def _ask_resume(
+    unfinished: Unfinished,
+    read_line: Callable[[], str],
+    show: Callable[[str], None],
+) -> str | None:
+    """``resume run <id> at <node>? [y/n]`` until a y or n; None on EOF."""
+    while True:
+        show(f"resume run {unfinished.run} at {unfinished.node}? [y/n]")
+        answer = _gate_answer(read_line, show, unfinished)
+        if answer is None or answer.lower() in ("y", "n"):
+            return answer and answer.lower()
+
+
 def _try_start(kind, task, *, show, root, config, start):
     try:
         return start(kind, task, root=root, cfg=config, write=show)
@@ -187,7 +235,7 @@ def _try_start(kind, task, *, show, root, config, start):
         return None
 
 
-def _try_resume(result: Pending, answer: str, *, show, root, config, resume):
+def _try_resume(result: Pending | Unfinished, answer: str | None, *, show, root, config, resume):
     try:
         return resume(result.run, answer, root=root, cfg=config, write=show)
     except RunRefused as error:
@@ -208,15 +256,13 @@ def _show_pending(pending: Pending, show: Callable[[str], None]) -> None:
 def _gate_answer(
     read_line: Callable[[], str],
     show: Callable[[str], None],
-    pending: Pending,
+    pending: Pending | Unfinished,
 ) -> str | None:
     try:
         return read_line().strip()
     except (KeyboardInterrupt, EOFError):
-        show(
-            f"run {pending.run} is paused at gate {pending.gate}; "
-            "resume it later"
-        )
+        where = pending.gate if isinstance(pending, Pending) else pending.node
+        show(f"run {pending.run} is paused at {where}; resume it later")
         return None
 
 

@@ -109,6 +109,19 @@ def route_limit_hit(state: dict) -> str:
     return state.get("retry_node") or END
 
 
+def route_full_limit_hit(state: dict) -> str:
+    """``/full``: ``retry`` reruns the node; ``stop`` runs the stuck effects."""
+    if state.get("retry_node"):
+        return state["retry_node"]
+    return "stuck_commit" if state.get("branch") else "stuck_label"
+
+
+def route_stuck_ci_gate(state: dict) -> str:
+    """Cleared → push (with a gate comment when approved); rejected → no push."""
+    if not state.get("ci_cleared_sha"):
+        return "stuck_label"
+    return "stuck_ci_comment" if state.get("ci_approved") else "stuck_push"
+
 
 def _exhausted(state: dict, key: str) -> bool:
     return state.get(key, 0) >= state.get("max_attempts", DEFAULT_MAX_ATTEMPTS)

@@ -205,7 +205,7 @@ def make_limit_hit(ctx: RunContext) -> Callable[[dict], dict]:
         )
         verb, _, feedback = str(decision).strip().partition(" ")
         if verb.lower() == "retry":
-            return _retry_update(limit, feedback.strip())
+            return _retry_update(state, limit, feedback.strip())
         return {
             "outcome": "stuck",
             "reason": limit.get("reason"),
@@ -229,9 +229,10 @@ def _limit_detail(ctx: RunContext, limit: dict) -> str:
     return "\n\n".join(parts)
 
 
-def _retry_update(limit: dict, feedback: str) -> dict:
+def _retry_update(state: dict, limit: dict, feedback: str) -> dict:
     retry_node = str(limit.get("retry_node") or "tester")
     return {
+        "retries_granted": state.get("retries_granted", 0) + 1,
         "limit": None,
         "retry_node": retry_node,
         "retry_context": _retry_context(limit, feedback),

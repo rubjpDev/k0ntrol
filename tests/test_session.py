@@ -519,3 +519,46 @@ def test_quit_waits_for_a_running_reflect(tmp_path):
     release.set()
     thread.join(5)
     assert done == [0]
+
+
+def _unfinished_session(tmp_path, answer):
+    from k0ntrol.workflow import Outcome, Unfinished
+
+    calls = []
+    results = iter([Unfinished(run="r1", node="review_gate"),
+                    Outcome(run="r2", outcome="done")])
+
+    def fake_start(kind, task, **kwargs):
+        calls.append(("start", kind, task))
+        return next(results)
+
+    def fake_resume(run_id, decision, **kwargs):
+        calls.append(("resume", run_id, decision))
+        return Outcome(run=run_id, outcome="done")
+
+    def fake_abandon(run_id, **kwargs):
+        calls.append(("abandon", run_id))
+
+    lines = iter(["/full #7", answer, "/quit"])
+    shown = []
+    run_session(
+        lambda: next(lines), shown.append, root=tmp_path, config=config(),
+        start=fake_start, resume=fake_resume, abandon=fake_abandon,
+    )
+    return calls, "\n".join(shown)
+
+
+def test_full_y_at_the_unfinished_prompt_resumes_the_run(tmp_path):
+    calls, text = _unfinished_session(tmp_path, "y")
+
+    assert "resume run r1 at review_gate? [y/n]" in text
+    assert calls == [("start", "full", "#7"), ("resume", "r1", None)]
+
+
+def test_full_n_at_the_unfinished_prompt_abandons_and_starts_fresh(tmp_path):
+    calls, text = _unfinished_session(tmp_path, "n")
+
+    assert calls == [
+        ("start", "full", "#7"), ("abandon", "r1"), ("start", "full", "#7"),
+    ]
+    assert "run done" in text
