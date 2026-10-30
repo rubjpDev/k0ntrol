@@ -13,9 +13,6 @@ from pathlib import Path
 # Cap on the diff text shown at a gate.
 _SUMMARY_MAX_CHARS = 12_000
 
-# git's well-known empty tree: the baseline when there is no base branch.
-_EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbd2904c"
-
 
 def dirty_paths(root: Path, *, ignored_prefix: str = ".k0-mem/") -> list[str]:
     """Porcelain lines for the working tree, minus ``.k0-mem/`` entries.
@@ -81,7 +78,15 @@ def merge_base(root: Path, base: str) -> str:
         found = _git(root, "merge-base", "HEAD", ref).stdout.strip()
         if found:
             return found
-    return _EMPTY_TREE
+    return _empty_tree(root)
+
+
+def _empty_tree(root: Path) -> str:
+    """The empty tree object (written if missing): diff against it shows all."""
+    return subprocess.run(
+        ["git", "-C", str(root), "mktree"],
+        input="", capture_output=True, text=True, check=False,
+    ).stdout.strip()
 
 
 def diff_since(root: Path, since: str, path: str) -> str:
