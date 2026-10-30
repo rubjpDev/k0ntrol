@@ -74,6 +74,28 @@ def route_test_gate(state: dict) -> str:
     return "commit_tests" if state.get("test_approved") else "tester"
 
 
+def route_full_validator(state: dict) -> str:
+    """Green → publish; red → CODER while attempts remain (same as /fast)."""
+    if state.get("validator_ok"):
+        return "publish"
+    if _exhausted(state, "coder_attempts"):
+        return "limit_hit"
+    return "coder"
+
+
+def route_after_reviewer(state: dict) -> str:
+    """A REVIEWER run that hit its model-call limit never posts."""
+    if state.get("limit"):
+        return "limit_hit"
+    return "post_review"
+
+
+def route_review_gate(state: dict) -> str:
+    """The gate's decision names the next node: ok → record + ready,
+    redo → CODER with the review, spec → SPEC with the review."""
+    return state.get("review_route") or END
+
+
 def route_limit_hit(state: dict) -> str:
     """``stop`` ends the run; ``retry`` goes back to the limited node."""
     return state.get("retry_node") or END

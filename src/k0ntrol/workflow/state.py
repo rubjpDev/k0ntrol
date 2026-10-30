@@ -40,6 +40,17 @@ class RunState(TypedDict, total=False):
     test_rejections: list[str]  # earlier test-gate feedback
     test_feedback: str | None  # the feedback of the last test-gate reject
 
+    # /full (#45): the change, REVIEWER's structured review and its gate.
+    change_ref: str | None  # the PR ref once the draft is open
+    review: dict | None  # REVIEWER's structured Review as a plain dict
+    review_round: int  # REVIEWER runs that produced a review (marker suffix)
+    review_approved: bool  # the human ok'd the review
+    review_route: str  # the review gate's decision: a node name
+    review_feedback: str | None  # review + feedback, sent to CODER on redo
+    review_rejections: list[str]  # earlier review-gate feedback
+    reviewer_attempts: int  # REVIEWER agent runs so far
+    spec_round: int  # approved briefs so far (marker suffix on republish)
+
     limit: dict[str, Any] | None  # set when the last node can hit a limit
     retry_node: str | None  # the node a limit_hit retry sends back to
     retry_context: str | None  # limit note + output tail + human feedback
