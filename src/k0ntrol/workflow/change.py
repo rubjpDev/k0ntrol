@@ -40,9 +40,12 @@ def slugify(title: str) -> str:
     return slug[:48].strip("-") or "work"
 
 
-def push_branch(tracker, branch: str) -> None:
-    """The one push path of ``/full``: publish and the stuck push share it."""
-    tracker.push(branch)
+def existing_branch(root: Path, ref: str) -> str | None:
+    """The local ``k0/<ref>-*`` branch an earlier run cut, if any."""
+    out = _git(
+        root, "for-each-ref", "--format=%(refname:short)", f"refs/heads/k0/{ref}-*"
+    ).stdout
+    return next(iter(out.split()), None)
 
 
 def default_base_branch(root: Path) -> str:

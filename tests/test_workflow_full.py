@@ -1202,6 +1202,10 @@ def test_abandoning_a_run_frees_the_checkout_for_a_new_one(tmp_path):
     assert isinstance(fresh, Pending) and fresh.gate == "spec"
 
 
+DOUBLE_TEST = "from calc import double\n\n\ndef test_double():\n    assert double(2) == 4\n"
+DOUBLE_SRC = "\n\ndef double(x):\n    return 2 * x\n"
+
+
 def done_run(tmp_path):
     tracker, coder, reviewer, pending = full_to_review_gate(tmp_path)
     done = resume(
@@ -1219,16 +1223,19 @@ def test_rerun_after_done_reuses_the_branch_and_the_open_pr(tmp_path):
     change = tracker.read_change(BRANCH)
     tracker.calls.clear()
 
-    spec = spec_model()
-    pending = rerun(tmp_path, tracker, spec)
+    pending = rerun(tmp_path, tracker, spec_model())
     assert pending.gate == "spec"
-    tester = write_red_tests()
+    tester = fake_tester(
+        write_call("tests/test_double.py", DOUBLE_TEST),
+        AIMessage(content="wrote failing tests"),
+    )
     test_gate = resume(
         pending.run, "ok", root=tmp_path, cfg=full_cfg(), tracker=tracker,
         init=models_init(tester), scan=writing_scan,
     )
     coder = fake_tester(
-        write_call("calc.py", CALC_SRC + "\n", "c9"), AIMessage(content="again")
+        write_call("calc.py", CALC_SRC + DOUBLE_SRC, "c9"),
+        AIMessage(content="again"),
     )
     gate = resume(
         test_gate.run, "ok", root=tmp_path, cfg=full_cfg(), tracker=tracker,

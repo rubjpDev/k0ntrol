@@ -29,6 +29,7 @@ class RunState(TypedDict, total=False):
 
     # /full (#44): the work item the run carries, its branch and gates.
     item_ref: str | None  # the issue number (None until the spec gate passes)
+    refining: bool  # /full #<n>: the issue existed before the run (re-runs)
     item_title: str
     branch: str  # k0/<n>-<slug>
     brief: dict | None  # SPEC's structured AgentBrief as a plain dict

@@ -36,8 +36,8 @@ from langgraph.graph.state import CompiledStateGraph
 from langgraph.types import interrupt
 
 from k0ntrol.tools.tracker import render_work_item
+from k0ntrol.workflow.change import decider, existing_branch, slugify, worktree_summary
 from k0ntrol.workflow.ci_gate import gated_push, make_ci_gate
-from k0ntrol.workflow.change import decider, slugify, worktree_summary
 from k0ntrol.workflow.context import RunContext
 from k0ntrol.workflow.nodes import (
     _brief_with_retry,
@@ -54,13 +54,22 @@ from k0ntrol.workflow.routers import (
     route_after_tester,
     route_ci_gate,
     route_full_red_check,
+    route_full_limit_hit,
     route_full_validator,
-    route_limit_hit,
     route_review_gate,
     route_spec_gate,
+    route_stuck_ci_gate,
     route_test_gate,
 )
 from k0ntrol.workflow.state import RunState
+from k0ntrol.workflow.stuck import (
+    make_stuck_commit,
+    make_stuck_comment,
+    make_stuck_label,
+    make_stuck_pr_comment,
+    make_stuck_push,
+    make_unstick,
+)
 
 
 def build_full_graph(
@@ -93,12 +102,21 @@ def build_full_graph(
     graph.add_node("review_comment", make_review_comment(ctx))
     graph.add_node("mark_ready", make_mark_ready(ctx))
     graph.add_node("limit_hit", make_limit_hit(ctx))
+    graph.add_node("unstick", make_unstick(ctx))
+    graph.add_node("stuck_commit", make_stuck_commit(ctx))
+    graph.add_node("stuck_ci_gate", make_ci_gate(ctx))
+    graph.add_node("stuck_ci_comment", make_ci_comment(ctx))
+    graph.add_node("stuck_push", make_stuck_push(ctx))
+    graph.add_node("stuck_label", make_stuck_label(ctx))
+    graph.add_node("stuck_comment", make_stuck_comment(ctx))
+    graph.add_node("stuck_pr_comment", make_stuck_pr_comment(ctx))
     graph.add_edge(START, "spec")
     graph.add_conditional_edges("spec", route_after_spec)
     graph.add_conditional_edges("spec_gate", route_spec_gate)
     graph.add_edge("create_issue", "post_brief")
     graph.add_edge("post_brief", "spec_comment")
-    graph.add_edge("spec_comment", "branch_setup")
+    graph.add_edge("spec_comment", "unstick")
+    graph.add_edge("unstick", "branch_setup")
     graph.add_edge("branch_setup", "tester")
     graph.add_conditional_edges("tester", route_after_tester)
     graph.add_conditional_edges("red_check", route_full_red_check)
@@ -116,7 +134,14 @@ def build_full_graph(
     graph.add_conditional_edges("review_gate", route_review_gate)
     graph.add_edge("review_comment", "mark_ready")
     graph.add_edge("mark_ready", END)
-    graph.add_conditional_edges("limit_hit", route_limit_hit)
+    graph.add_conditional_edges("limit_hit", route_full_limit_hit)
+    graph.add_edge("stuck_commit", "stuck_ci_gate")
+    graph.add_conditional_edges("stuck_ci_gate", route_stuck_ci_gate)
+    graph.add_edge("stuck_ci_comment", "stuck_push")
+    graph.add_edge("stuck_push", "stuck_label")
+    graph.add_edge("stuck_label", "stuck_comment")
+    graph.add_edge("stuck_comment", "stuck_pr_comment")
+    graph.add_edge("stuck_pr_comment", END)
     return graph.compile(checkpointer=checkpointer)
 
 
@@ -236,7 +261,11 @@ def make_branch_setup(ctx: RunContext) -> Callable[[dict], dict]:
 
     def node(state: dict) -> dict:
         ref = state["item_ref"]
-        branch = state.get("branch") or f"k0/{ref}-{slugify(state['item_title'])}"
+        branch = (
+            state.get("branch")
+            or existing_branch(ctx.root, ref)
+            or f"k0/{ref}-{slugify(state['item_title'])}"
+        )
         ctx.tracker.create_branch(branch, ctx.base_branch)
         ctx.scan(ctx.root)
         ctx.tracker.commit(f"#{ref}: update memory")

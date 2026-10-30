@@ -12,7 +12,9 @@ survives the process dying: a later ``resume`` compiles a fresh graph on
 the same DB and picks up at the gate.
 
 One run per checkout (ADR 0007): any unfinished checkpoint thread refuses
-a second ``/full`` or ``/fast`` with a git-worktree hint.
+a second ``/fast`` with a git-worktree hint. A second ``/full`` gets the
+unfinished run back as ``Unfinished`` (#46): the REPL asks whether to
+resume it, and ``abandon`` drops its checkpoint thread on a ``n``.
 """
 
 import os
@@ -42,10 +44,15 @@ from k0ntrol.memory.scan import ScanError, run_scan  # noqa: E402
 from k0ntrol.providers import free_checks, has_errors, report_lines  # noqa: E402
 from k0ntrol.tracker import TRUSTED_ASSOCIATIONS, TrackerError  # noqa: E402
 from k0ntrol.tracker.github import GhTracker, subprocess_runner  # noqa: E402
-from k0ntrol.workflow.change import current_branch, dirty_paths  # noqa: E402
+from k0ntrol.workflow.change import (  # noqa: E402
+    current_branch,
+    dirty_paths,
+    existing_branch,
+)
 from k0ntrol.workflow.context import RunContext  # noqa: E402
 from k0ntrol.workflow.fast import build_fast_graph  # noqa: E402
 from k0ntrol.workflow.full import build_full_graph  # noqa: E402
+from k0ntrol.workflow.stuck import stuck_update  # noqa: E402
 
 _BUILDERS = {"fast": build_fast_graph, "full": build_full_graph}
 
@@ -97,7 +104,15 @@ class Pending:
     detail: str = ""
 
 
-Result = Outcome | Pending
+@dataclass(frozen=True)
+class Unfinished:
+    """``/full`` found an unfinished run: resume it or abandon it."""
+
+    run: str
+    node: str
+
+
+Result = Outcome | Pending | Unfinished
 
 
 def checkpoints_path(root: Path) -> Path:
@@ -123,7 +138,8 @@ def start(
     ``/full <text>`` drafts a brief; ``/full #<n>`` refines issue ``n``.
     Refuses — ``RunRefused`` — on bad usage, a missing tracker or work
     item, an untrusted issue body, a dirty tree (``.k0-mem/`` ignored),
-    failed doctor checks, a failed rescan or another open run.
+    failed doctor checks, a failed rescan or (for ``/fast``) another open
+    run. ``/full`` answers an open run with ``Unfinished`` instead.
     """
     if kind not in _BUILDERS:
         raise RunRefused(f"unknown run: {kind}")
@@ -135,7 +151,9 @@ def start(
             root=root, cfg=cfg, kind=kind, init=init, tracker=tracker, scan=scan
         )
         graph = _BUILDERS[kind](ctx, saver)
-        _refuse_if_busy(saver, graph)
+        busy = _busy_run(saver, graph, kind)
+        if busy is not None:
+            return busy
         _doctor_gate(check, cfg, kind, root)
         _rescan(scan, root)
         item = _full_preflight(kind, input_text, tracker, root)
@@ -158,16 +176,14 @@ def start(
             )
             return _finish(ctx, graph, run_id, config)
         except EventWriteError:
-            # A broken event log ends the run stuck (events contract, #16).
-            _trace_finish(ctx, "stuck", session_id, {})
-            return Outcome(run=run_id, outcome="stuck")
+            return _log_failed(ctx, graph, config, run_id, session_id)
     finally:
         conn.close()
 
 
 def resume(
     run_id: str,
-    decision: str,
+    decision: str | None,
     *,
     root: Path,
     cfg: dict,
@@ -178,6 +194,9 @@ def resume(
     tracing: Callable = build_trace,
 ) -> Result:
     """Continue run ``run_id`` with the human's ``decision``.
+
+    ``decision=None`` answers nothing: a run at a gate shows it again, a
+    run paused between nodes continues.
 
     Rebuilds the graph and checkpoint connection from scratch — this is
     also how a fresh process resumes a run after a crash or a ``/quit``
@@ -206,8 +225,16 @@ def resume(
             _advance(ctx, graph, state, decision, config)
             return _finish(ctx, graph, run_id, config)
         except EventWriteError:
-            _trace_finish(ctx, "stuck", session_id, state.values)
-            return Outcome(run=run_id, outcome="stuck")
+            return _log_failed(ctx, graph, config, run_id, session_id)
+    finally:
+        conn.close()
+
+
+def abandon(run_id: str, *, root: Path) -> None:
+    """Drop run ``run_id``'s checkpoint thread: the run can no longer resume."""
+    conn, saver = _open_checkpoints(root)
+    try:
+        saver.delete_thread(run_id)
     finally:
         conn.close()
 
@@ -233,11 +260,13 @@ def _open_checkpoints(root: Path) -> tuple[sqlite3.Connection, SqliteSaver]:
     return conn, SqliteSaver(conn)
 
 
-def _refuse_if_busy(saver: SqliteSaver, graph) -> None:
+def _busy_run(saver: SqliteSaver, graph, kind: str) -> Unfinished | None:
     busy = open_runs(saver, graph)
     if not busy:
-        return
+        return None
     run_id, node = busy[0]
+    if kind == "full":
+        return Unfinished(run=run_id, node=node)
     raise RunRefused(
         f"a run is already open in this checkout: {run_id} at {node}\n"
         "resume it, or run k0 from another git worktree: "
@@ -299,12 +328,30 @@ def _tracker_for(kind: str, cfg: dict, root: Path, tracker):
     return GhTracker(subprocess_runner(root))
 
 
+def _log_failed(
+    ctx: RunContext, graph, config: dict, run_id: str, session_id
+) -> Outcome:
+    """A broken event log ends the run stuck (events contract, #16).
+
+    ``/full`` still runs the stuck effects from where the run stood (#46);
+    there is no ``run_end`` — the log cannot take it.
+    """
+    state = graph.get_state(config)
+    reason, node = None, None
+    if ctx.kind == "full" and state.next:
+        reason, node = "event_log", state.next[0]
+        graph.update_state(config, stuck_update(node), as_node="limit_hit")
+        graph.invoke(None, config=config, durability="sync")
+    _trace_finish(ctx, "stuck", session_id, state.values)
+    return Outcome(run=run_id, outcome="stuck", reason=reason, node=node)
+
+
 def _full_preflight(kind: str, input_text: str, tracker, root: Path):
     """``/full``'s last refusals: a dirty tree, then the work item read."""
     if kind != "full":
         return None
     _refuse_dirty(root)
-    return _work_item(input_text, tracker)
+    return _work_item(input_text, tracker, root)
 
 
 def _refuse_dirty(root: Path) -> None:
@@ -315,13 +362,14 @@ def _refuse_dirty(root: Path) -> None:
         )
 
 
-def _work_item(input_text: str, tracker):
+def _work_item(input_text: str, tracker, root: Path):
     """``/full #<n>``'s issue: must exist and come from a trusted author."""
     if not input_text.startswith("#"):
         return None
     ref = input_text[1:].strip()
     try:
         item = tracker.read_work_item(ref)
+        _refuse_ended_work(item, tracker, root)
     except TrackerError as error:
         raise RunRefused(str(error)) from error
     if item.author_association not in TRUSTED_ASSOCIATIONS:
@@ -331,6 +379,18 @@ def _work_item(input_text: str, tracker):
             "the work yourself: /full <task>"
         )
     return item
+
+
+def _refuse_ended_work(item, tracker, root: Path) -> None:
+    """A closed issue, or a merged or closed PR, is not worked on again."""
+    if item.state != "open":
+        raise TrackerError(f"work item #{item.ref} is {item.state}")
+    branch = existing_branch(root, item.ref)
+    change = tracker.read_change(branch) if branch else None
+    if change is not None and change.state != "open":
+        raise TrackerError(
+            f"pull request #{change.ref} for {branch} is {change.state}"
+        )
 
 
 def _initial_state(kind: str, input_text: str, cfg: dict, item=None) -> dict:
@@ -358,6 +418,7 @@ def _full_state(task: str, item) -> dict:
         "task": task,
         "item_ref": None,
         "item_title": "",
+        "refining": False,
         "branch": "",
         "brief": None,
         "spec_attempts": 0,
@@ -372,6 +433,7 @@ def _full_state(task: str, item) -> dict:
         state["task"] = item.body
         state["item_ref"] = item.ref
         state["item_title"] = item.title
+        state["refining"] = True
     return state
 
 
@@ -450,7 +512,11 @@ def _refuse_finished(state, run_id: str) -> None:
     raise RunRefused(f"run {run_id} already ended {outcome}")
 
 
-def _advance(ctx: RunContext, graph, state, decision: str, config: dict) -> None:
+def _advance(
+    ctx: RunContext, graph, state, decision: str | None, config: dict
+) -> None:
+    if state.interrupts and decision is None:
+        return  # nothing answered: _finish shows the gate again
     if state.interrupts:
         payload = state.interrupts[0].value
         _check_decision(payload, decision)
