@@ -326,7 +326,7 @@ def make_publish(ctx: RunContext) -> Callable[[dict], dict]:
             state["item_title"],
             change_body(ctx, state),
         )
-        return {"change_ref": change.ref}
+        return {"change_ref": change.ref, "change_url": change.url}
 
     return node
 

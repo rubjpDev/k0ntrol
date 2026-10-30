@@ -42,6 +42,7 @@ class RunState(TypedDict, total=False):
 
     # /full (#45): the change, REVIEWER's structured review and its gate.
     change_ref: str | None  # the PR ref once the draft is open
+    change_url: str
     review: dict | None  # REVIEWER's structured Review as a plain dict
     review_round: int  # REVIEWER runs that produced a review (marker suffix)
     review_approved: bool  # the human ok'd the review

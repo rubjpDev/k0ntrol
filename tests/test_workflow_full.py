@@ -15,7 +15,9 @@ import pytest
 from langchain_core.messages import AIMessage
 
 from fakes import FakeChatModel, FakeTracker, cfg_with
+from k0ntrol import __version__
 from k0ntrol.workflow import Outcome, Pending, RunRefused, resume, start
+from test_langfuse import _tracing
 
 TASK = "add a calc module that answers 42"
 
@@ -620,6 +622,22 @@ def test_full_runs_to_done_with_one_review_redo(tmp_path):
         and "- tighten the edge case" in c
         for c in comments
     )
+
+
+def test_full_trace_keeps_change_url_across_resume(tmp_path):
+    tracker, coder, reviewer, pending = full_to_review_gate(tmp_path)
+    made = []
+    result = resume(
+        pending.run, "ok", root=tmp_path, cfg=full_cfg(), tracker=tracker,
+        init=models_init(), tracing=_tracing(made),
+    )
+    assert isinstance(result, Outcome) and result.outcome == "done"
+    change = tracker.read_change("k0/1-calc-answers-42")
+    assert made[0].finished[0]["metadata"] == {
+        "branch": "k0/1-calc-answers-42",
+        "change_url": change.url,
+        "k0_version": __version__,
+    }
 
 
 def test_review_gate_spec_sends_the_review_back_to_spec(tmp_path):
