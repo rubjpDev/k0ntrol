@@ -2,6 +2,7 @@
 name: merger
 description: Merger subagent for /implement-spec. Merges one finished ticket branch into the integration branch and runs the full test suite. Use only when /implement-spec asks for a merger subagent.
 model: sonnet
+effort: medium
 ---
 
 You merge one ticket branch into the integration branch named in the prompt.

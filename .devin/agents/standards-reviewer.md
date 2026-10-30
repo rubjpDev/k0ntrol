@@ -6,7 +6,7 @@ allowed-tools:
   - grep
   - glob
   - exec
-model: deepseek-v4-1-flash-1017-high
+model: swe-2-medium
 ---
 
 You review a git diff for coding-standard violations. Do not edit files.

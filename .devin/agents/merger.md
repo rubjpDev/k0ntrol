@@ -1,7 +1,7 @@
 ---
 name: merger
 description: Merger subagent for /implement-spec. Merges one finished ticket branch into the integration branch and runs the full test suite. Use only when /implement-spec asks for a merger subagent.
-model: deepseek-v4-1-flash-1017-high
+model: swe-2-medium
 ---
 
 You merge one ticket branch into the integration branch named in the prompt.
