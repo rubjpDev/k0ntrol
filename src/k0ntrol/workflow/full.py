@@ -611,12 +611,16 @@ def _test_names(root: Path, files: list[str]) -> list[str]:
 def _test_nodes(nodes: list[ast.stmt], prefix: str) -> list[str]:
     names = []
     for node in nodes:
-        if isinstance(node, ast.ClassDef) and node.name.startswith("Test"):
-            names += _test_nodes(node.body, f"{prefix}::{node.name}")
-        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            if node.name.startswith("test_"):
-                names.append(f"{prefix}::{node.name}")
+        names += _test_node_names(node, prefix)
     return names
+
+
+def _test_node_names(node: ast.stmt, prefix: str) -> list[str]:
+    if isinstance(node, ast.ClassDef) and node.name.startswith("Test"):
+        return _test_nodes(node.body, f"{prefix}::{node.name}")
+    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name.startswith("test_"):
+        return [f"{prefix}::{node.name}"]
+    return []
 
 
 def _tests_line(criterion: str, names: list[str]) -> str:
