@@ -70,7 +70,7 @@ def new_chat_id() -> str:
 def secret_env_values(env: Mapping[str, str] | None = None) -> list[str]:
     """Exact values of known secret env vars, used for `err` masking."""
     source = os.environ if env is None else env
-    known_names = {name for spec in REGISTRY.values() for name in spec.credentials}
+    known_names = set().union(*(spec.credentials for spec in REGISTRY.values()))
     values = [
         value
         for name, value in source.items()
