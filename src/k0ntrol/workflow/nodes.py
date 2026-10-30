@@ -197,7 +197,7 @@ def make_limit_hit(ctx: RunContext) -> Callable[[dict], dict]:
                 "gate": "limit_hit",
                 "question": (
                     f"{limit.get('node', '?')} hit its limit "
-                    f"({_limit_desc(limit)}) — retry or stop?"
+                    f"({limit_desc(limit)}) — retry or stop?"
                 ),
                 "answers": ["retry", "stop"],
                 "detail": _limit_detail(ctx, limit),
@@ -216,7 +216,7 @@ def make_limit_hit(ctx: RunContext) -> Callable[[dict], dict]:
     return node
 
 
-def _limit_desc(limit: dict) -> str:
+def limit_desc(limit: dict) -> str:
     return f"{limit.get('what', 'attempts')} {limit.get('used', '?')}/{limit.get('max', '?')}"
 
 
@@ -242,7 +242,7 @@ def _retry_update(state: dict, limit: dict, feedback: str) -> dict:
 
 def _retry_context(limit: dict, feedback: str) -> str:
     parts = [
-        f"The previous run stopped at its limit: {_limit_desc(limit)} "
+        f"The previous run stopped at its limit: {limit_desc(limit)} "
         f"at {limit.get('node', '?')}. Files written so far are kept."
     ]
     output = str(limit.get("output") or "").rstrip()

@@ -14,19 +14,23 @@ from collections.abc import Callable
 from k0ntrol.workflow.change import head_sha
 from k0ntrol.workflow.ci_gate import gated_push
 from k0ntrol.workflow.context import RunContext
-from k0ntrol.workflow.nodes import _limit_desc
+from k0ntrol.workflow.nodes import limit_desc
 
 STUCK_LABEL = "k0:stuck"
 STUCK_NODE = "stuck"
 
 
-def stuck_update(node: str | None) -> dict:
-    """The state of a run stuck by its event log, as if ``limit_hit`` stopped."""
+def stuck_update(node: str | None, values: dict | None = None) -> dict:
+    """The state of a run stuck by its event log, as if ``limit_hit`` stopped.
+
+    A run held at ``limit_hit`` names the node that hit the limit, not the
+    pause, and keeps the limit so the comment can say what it ran into.
+    """
+    limit = (values or {}).get("limit") or {}
     return {
         "outcome": "stuck",
         "reason": "event_log",
-        "node": node,
-        "limit": None,
+        "node": limit.get("node") or node,
         "retry_node": None,
     }
 
@@ -121,20 +125,46 @@ def stuck_text(ctx: RunContext, state: dict) -> str:
         f"k0 run {ctx.run_id} is stuck.",
         "",
         f"- node: {state.get('node') or limit.get('node') or '?'}",
-        f"- {_reason_line(state, limit)}",
+        *_reason_lines(state, limit),
         f"- retries granted: {state.get('retries_granted', 0)}",
     ]
     lines += _branch_lines(ctx, state)
-    output = str(limit.get("output") or "").rstrip()
+    output = _output_tail(state, limit)
     if output:
         lines += ["", "Last output:", "", "```", output, "```"]
     return "\n".join(lines)
 
 
-def _reason_line(state: dict, limit: dict) -> str:
-    if state.get("reason") == "event_log":
-        return "reason: the event log could not be written"
-    return f"limit: {_limit_desc(limit)}"
+# A run stuck by its event log has no limit to quote: name the attempts
+# each agent had used instead, and the output of the node it stood at.
+_ATTEMPTS = (
+    ("spec", "spec_attempts"),
+    ("tester", "tester_attempts"),
+    ("coder", "coder_attempts"),
+    ("reviewer", "reviewer_attempts"),
+)
+_NODE_OUTPUT = {
+    "tester": "red_check_output",
+    "red_check": "red_check_output",
+    "coder": "validator_output",
+    "validator": "validator_output",
+}
+
+
+def _reason_lines(state: dict, limit: dict) -> list[str]:
+    if state.get("reason") != "event_log":
+        return [f"- limit: {limit_desc(limit)}"]
+    lines = ["- reason: the event log could not be written"]
+    if limit:
+        return [*lines, f"- limit at the time: {limit_desc(limit)}"]
+    max_ = state.get("max_attempts", 2)
+    used = [f"{name} {state[key]}/{max_}" for name, key in _ATTEMPTS if state.get(key)]
+    return [*lines, f"- attempts used: {', '.join(used)}"] if used else lines
+
+
+def _output_tail(state: dict, limit: dict) -> str:
+    output = limit.get("output") or state.get(_NODE_OUTPUT.get(state.get("node"), ""))
+    return str(output or "").rstrip()
 
 
 def _branch_lines(ctx: RunContext, state: dict) -> list[str]:

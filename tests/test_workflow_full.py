@@ -1106,6 +1106,9 @@ def test_a_broken_event_log_runs_the_stuck_effects(tmp_path):
     assert tracker.labels_on("1") == {"k0:stuck"}
     comment = tracker.read_work_item("1").comments[-1].body
     assert "event log" in comment and BRANCH in comment
+    assert "- node: review_gate" in comment
+    assert "attempts used:" in comment and "coder 1/2" in comment
+    assert "retries granted: 0" in comment
     change = tracker.read_change(BRANCH)
     assert change.is_draft  # the broken log ended the run before the gate applied
     assert "node=stuck" in tracker.change_comments_on(change.ref)[0]

@@ -35,11 +35,15 @@ def run_ci_gate(ctx: RunContext, state: dict) -> dict:
     ``ci_cleared_sha`` names the HEAD the push may use; ``None`` means the
     human rejected and the feedback goes to CODER. ``ci_approved`` is True
     only when the human approved on this pass (the gate comment is due).
+    A run stuck by its event log never interrupts — nobody can be asked
+    and the log cannot record the gate — so unapproved changes stay local.
     """
     head = head_sha(ctx.root)
     diff = ci_diff(ctx, state)
     if not diff:
         return {"ci_cleared_sha": head, "ci_approved": False, "ci_feedback": None}
+    if state.get("reason") == "event_log":
+        return {"ci_cleared_sha": None, "ci_approved": False, "ci_feedback": None}
     decision = interrupt(
         {
             "gate": "ci",

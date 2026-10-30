@@ -339,11 +339,24 @@ def _log_failed(
     state = graph.get_state(config)
     reason, node = None, None
     if ctx.kind == "full" and state.next:
-        reason, node = "event_log", state.next[0]
-        graph.update_state(config, stuck_update(node), as_node="limit_hit")
-        graph.invoke(None, config=config, durability="sync")
+        state = _stuck_by_log(graph, config, state)
+        reason, node = "event_log", state.values.get("node")
     _trace_finish(ctx, "stuck", session_id, state.values)
     return Outcome(run=run_id, outcome="stuck", reason=reason, node=node)
+
+
+def _stuck_by_log(graph, config: dict, state):
+    """Run the stuck effects; a pass already marked ``event_log`` just continues.
+
+    Resuming a run whose log is still broken lands here again, and must
+    pick the effects up where the failed tracker write left them.
+    """
+    if state.values.get("reason") != "event_log":
+        graph.update_state(
+            config, stuck_update(state.next[0], state.values), as_node="limit_hit"
+        )
+    graph.invoke(None, config=config, durability="sync")
+    return graph.get_state(config)
 
 
 def _full_preflight(kind: str, input_text: str, tracker, root: Path):
