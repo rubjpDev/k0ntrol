@@ -15,6 +15,7 @@ from pathlib import Path
 from langchain.chat_models import init_chat_model
 from langchain_core.messages import HumanMessage
 
+from k0ntrol import __version__
 from k0ntrol.agents import AgentResult, agent_tools, build_agent
 from k0ntrol.events import (
     EventWriter,
@@ -25,8 +26,10 @@ from k0ntrol.events import (
 )
 from k0ntrol.frontends.mentions import MentionError, mention_paths
 from k0ntrol.helpers import helper_invoker
+from k0ntrol.langfuse import build_trace
 from k0ntrol.memory.refresh import refresh_memory
 from k0ntrol.providers import free_checks, has_errors, report_lines
+from k0ntrol.workflow.change import current_branch
 
 
 def answer_ask(
@@ -39,6 +42,7 @@ def answer_ask(
     init: Callable = init_chat_model,
     check: Callable = free_checks,
     refresh: Callable = refresh_memory,
+    tracing: Callable = build_trace,
 ) -> AgentResult | None:
     """Answer ``question`` with CHATTY.
 
@@ -50,8 +54,10 @@ def answer_ask(
     prompt = _prepare(question, root, config, write, check)
     if prompt is None:
         return None
-    writer, handler = _chat_events(root, write)
-    if not _refresh(root, config, init, handler, write, refresh):
+    writer, handler, chat_id = _chat_events(root, write)
+    trace = tracing(chat_id)  # each /ask is its own trace (#49)
+    if not _refresh(root, config, init, handler, write, refresh, trace):
+        trace.finish(kind="ask", outcome="failed", metadata=_ask_metadata(root))
         return None
     agent = build_agent(
         "chatty",
@@ -61,15 +67,17 @@ def answer_ask(
         init=init,
     )
     try:
-        result = _run_chatty(agent, prompt, handler, write, on_text or write)
+        result = _run_chatty(agent, prompt, handler, on_text or write, trace)
     except Exception as error:
         write(f"CHATTY failed: {error}")
+        trace.finish(kind="ask", outcome="failed", metadata=_ask_metadata(root))
         return None
     if result.limit_hit:
         write(
             f"CHATTY hit its {agent.model_calls} model-call limit; "
             "ask again or narrow the question."
         )
+    trace.finish(kind="ask", outcome="done", metadata=_ask_metadata(root))
     return result
 
 
@@ -117,10 +125,28 @@ def _chat_events(root: Path, write: Callable[[str], None]):
     """One chat-scoped writer + handler shared by the refresh and CHATTY."""
     path = events_path(root)
     path.parent.mkdir(parents=True, exist_ok=True)
+    chat_id = new_chat_id()
     writer = EventWriter(
-        path, chat=new_chat_id(), progress=ProgressRenderer(write)
+        path, chat=chat_id, progress=ProgressRenderer(write)
     )
-    return writer, K0EventHandler(writer)
+    return writer, K0EventHandler(writer), chat_id
+
+
+def _callbacks(handler: K0EventHandler, trace) -> list:
+    """The events handler plus the optional Langfuse one (#49)."""
+    callbacks = [handler]
+    if trace.handler is not None:
+        callbacks.append(trace.handler)
+    return callbacks
+
+
+def _ask_metadata(root: Path) -> dict:
+    """The ask trace's metadata (#49): branch and k0 version."""
+    metadata = {"k0_version": __version__}
+    branch = current_branch(root)
+    if branch:
+        metadata["branch"] = branch
+    return metadata
 
 
 def _refresh(
@@ -130,11 +156,12 @@ def _refresh(
     handler: K0EventHandler,
     write: Callable[[str], None],
     refresh: Callable,
+    trace,
 ) -> bool:
     """Rescan + one index rebuild; the rescan's helper calls are
     chat-scoped ``model`` events. Returns False when refresh fails."""
     invoke = helper_invoker(
-        config, "bulk_read", init=init, config={"callbacks": [handler]}
+        config, "bulk_read", init=init, config={"callbacks": _callbacks(handler, trace)}
     )
     try:
         refresh(root, config=config, invoke=invoke)
@@ -144,9 +171,12 @@ def _refresh(
     return True
 
 
-def _run_chatty(agent, prompt, handler, write, on_text) -> AgentResult:
+def _run_chatty(agent, prompt, handler, on_text, trace) -> AgentResult:
     return agent.stream(
         [HumanMessage(prompt)],
-        config={"callbacks": [handler]},
+        config={
+            "callbacks": _callbacks(handler, trace),
+            "metadata": {"langfuse_tags": ["ask"]},
+        },
         on_text=on_text,
     )

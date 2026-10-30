@@ -37,6 +37,7 @@ from k0ntrol.events import (  # noqa: E402
     events_path,
     new_run_id,
 )
+from k0ntrol.langfuse import build_trace  # noqa: E402
 from k0ntrol.memory.scan import ScanError, run_scan  # noqa: E402
 from k0ntrol.providers import free_checks, has_errors, report_lines  # noqa: E402
 from k0ntrol.tracker import TRUSTED_ASSOCIATIONS, TrackerError  # noqa: E402
@@ -107,6 +108,7 @@ def start(
     check: Callable = free_checks,
     scan: Callable = run_scan,
     tracker=None,
+    tracing: Callable = build_trace,
 ) -> Result:
     """Start a run of ``kind`` for ``input``.
 
@@ -131,7 +133,9 @@ def start(
         item = _full_preflight(kind, input_text, tracker, root)
         run_id = new_run_id()
         _bind_events(ctx, root, run_id, write)
-        config = _runnable(run_id, ctx)
+        ctx.trace = tracing(run_id)
+        session_id = item.qualified_ref if item else None
+        config = _runnable(run_id, ctx, session_id)
         try:
             ctx.writer.run_start(
                 kind,
@@ -147,6 +151,7 @@ def start(
             return _finish(ctx, graph, run_id, config)
         except EventWriteError:
             # A broken event log ends the run stuck (events contract, #16).
+            _trace_finish(ctx, "stuck", session_id, {})
             return Outcome(run=run_id, outcome="stuck")
     finally:
         conn.close()
@@ -162,6 +167,7 @@ def resume(
     init: Callable = init_chat_model,
     scan: Callable = run_scan,
     tracker=None,
+    tracing: Callable = build_trace,
 ) -> Result:
     """Continue run ``run_id`` with the human's ``decision``.
 
@@ -182,7 +188,9 @@ def resume(
         state = graph.get_state(_thread(run_id))
         _refuse_finished(state, run_id)
         _bind_events(ctx, root, run_id, write)
-        config = _runnable(run_id, ctx)
+        ctx.trace = tracing(run_id)
+        session_id = _session_id(ctx, state.values)
+        config = _runnable(run_id, ctx, session_id)
         try:
             ctx.writer.run_start(
                 kind, resumed=True, branch=current_branch(root), version=__version__
@@ -190,6 +198,7 @@ def resume(
             _advance(ctx, graph, state, decision, config)
             return _finish(ctx, graph, run_id, config)
         except EventWriteError:
+            _trace_finish(ctx, "stuck", session_id, state.values)
             return Outcome(run=run_id, outcome="stuck")
     finally:
         conn.close()
@@ -358,7 +367,7 @@ def _full_state(task: str, item) -> dict:
     return state
 
 
-def _runnable(run_id: str, ctx: RunContext) -> dict:
+def _runnable(run_id: str, ctx: RunContext, session_id=None) -> dict:
     config = _thread(run_id)
     config["callbacks"] = [ctx.handler]
     # Always explicit (langgraph's default is a safety net, not a budget):
@@ -366,7 +375,52 @@ def _runnable(run_id: str, ctx: RunContext) -> dict:
     attempts = ctx.cfg.get("max_attempts", 2)
     slack = 16 if ctx.kind == "full" else _OUTER_STEPS_SLACK
     config["recursion_limit"] = _OUTER_STEPS_PER_ATTEMPT * attempts + slack
+    if ctx.trace is not None and ctx.trace.handler is not None:
+        config["callbacks"].append(ctx.trace.handler)
+        config["metadata"] = _langfuse_metadata(ctx.kind, session_id)
     return config
+
+
+def _langfuse_metadata(kind: str, session_id) -> dict:
+    """Root-run metadata the Langfuse handler reads: session + kind tag."""
+    metadata = {"langfuse_tags": [kind]}
+    if session_id:
+        metadata["langfuse_session_id"] = session_id
+    return metadata
+
+
+def _session_id(ctx: RunContext, values: dict) -> str | None:
+    """The run's work item as a session id, resolved through the tracker."""
+    ref = values.get("item_ref")
+    if not ref or ctx.tracker is None:
+        return None
+    try:
+        return ctx.tracker.read_work_item(ref).qualified_ref
+    except TrackerError:
+        return None
+
+
+def _trace_metadata(ctx: RunContext, values: dict) -> dict:
+    """The trace's metadata (#49): branch, change URL and k0 version."""
+    metadata = {"k0_version": __version__}
+    branch = values.get("branch") or current_branch(ctx.root)
+    if branch:
+        metadata["branch"] = branch
+    if values.get("change_url"):
+        metadata["change_url"] = values["change_url"]
+    return metadata
+
+
+def _trace_finish(ctx: RunContext, outcome: str, session_id, values: dict) -> None:
+    """Close the run's trace — enabled-only, never raising (#49)."""
+    if ctx.trace is None:
+        return
+    ctx.trace.finish(
+        kind=ctx.kind,
+        outcome=outcome,
+        session_id=session_id,
+        metadata=_trace_metadata(ctx, values),
+    )
 
 
 def _thread(run_id: str) -> dict:
@@ -435,6 +489,8 @@ def _gate_result(decision: str) -> str:
 def _finish(ctx: RunContext, graph, run_id: str, config: dict) -> Result:
     state = graph.get_state(config)
     if state.interrupts:
+        if ctx.trace is not None:
+            ctx.trace.flush()
         return _pending(run_id, state.interrupts[0].value)
     if state.next:
         raise RunRefused(
@@ -448,6 +504,7 @@ def _finish(ctx: RunContext, graph, run_id: str, config: dict) -> Result:
         reason=values.get("reason"),
         node=values.get("node"),
     )
+    _trace_finish(ctx, outcome, _session_id(ctx, values), values)
     return Outcome(
         run=run_id,
         outcome=outcome,
