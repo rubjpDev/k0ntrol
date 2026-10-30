@@ -41,6 +41,7 @@ class GhTracker:
 
     def __init__(self, runner: CommandRunner):
         self._runner = runner
+        self._login: str | None = None
 
     # -- work items ------------------------------------------------------
 
@@ -64,7 +65,7 @@ class GhTracker:
     def ensure_work_item(self, title: str, body: str, *, run: str, node: str) -> WorkItem:
         marker = comment_marker(run, node)
         for issue in self._work_items():
-            if "pull_request" not in issue and marker in (issue.get("body") or ""):
+            if self._has_own_marker(issue, marker):
                 return self.read_work_item(str(issue["number"]))
         return self.create_work_item(title, f"{body}\n\n{marker}")
 
@@ -74,6 +75,18 @@ class GhTracker:
             "repos/{owner}/{repo}/issues?state=all&per_page=100",
         ])
         return [issue for page in pages for issue in page]
+
+    def _has_own_marker(self, issue: dict, marker: str) -> bool:
+        """A body marker counts only on an issue authored by the gh user."""
+        if "pull_request" in issue or marker not in (issue.get("body") or ""):
+            return False
+        return (issue.get("user") or {}).get("login") == self._me()
+
+    def _me(self) -> str:
+        """The login `gh` is authenticated as: the author of issues k0 opens."""
+        if self._login is None:
+            self._login = self._gh_json(["gh", "api", "user"])["login"]
+        return self._login
 
     def comment_work_item(self, ref: str, body: str, *, run: str, node: str) -> None:
         marker = comment_marker(run, node)
