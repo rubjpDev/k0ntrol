@@ -52,6 +52,14 @@ class RunState(TypedDict, total=False):
     reviewer_attempts: int  # REVIEWER agent runs so far
     spec_round: int  # approved briefs so far (marker suffix on republish)
 
+    # /full (#47): the CI gate for pushes that change .github/.
+    ci_cleared_sha: str | None  # the HEAD the CI gate cleared for a push
+    ci_approved: bool  # the human approved on the last pass (comment due)
+    ci_approved_sha: str | None  # HEAD at the last push; the next diff base
+    ci_round: int  # approvals so far (gate-comment marker suffix)
+    ci_feedback: str | None  # the feedback of the last CI-gate reject
+    ci_rejections: list[str]  # earlier CI-gate feedback, for the comment
+
     limit: dict[str, Any] | None  # set when the last node can hit a limit
     retry_node: str | None  # the node a limit_hit retry sends back to
     retry_context: str | None  # limit note + output tail + human feedback

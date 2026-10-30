@@ -13,6 +13,9 @@ from pathlib import Path
 # Cap on the diff text shown at a gate.
 _SUMMARY_MAX_CHARS = 12_000
 
+# git's well-known empty tree: the baseline when there is no base branch.
+_EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbd2904c"
+
 
 def dirty_paths(root: Path, *, ignored_prefix: str = ".k0-mem/") -> list[str]:
     """Porcelain lines for the working tree, minus ``.k0-mem/`` entries.
@@ -62,6 +65,31 @@ def current_branch(root: Path) -> str | None:
     if result.returncode != 0:
         return None
     return result.stdout.strip() or None
+
+
+def head_sha(root: Path) -> str:
+    """The commit ``HEAD`` points at, or "" outside a git repo."""
+    return _git(root, "rev-parse", "HEAD").stdout.strip()
+
+
+def merge_base(root: Path, base: str) -> str:
+    """Where HEAD left ``origin/<base>`` (else local ``<base>``).
+
+    Falls back to git's empty tree so a diff against it shows everything.
+    """
+    for ref in (f"origin/{base}", base):
+        found = _git(root, "merge-base", "HEAD", ref).stdout.strip()
+        if found:
+            return found
+    return _EMPTY_TREE
+
+
+def diff_since(root: Path, since: str, path: str) -> str:
+    """``git diff <since> HEAD -- <path>``, capped like every gate detail."""
+    text = _git(root, "diff", since, "HEAD", "--", path).stdout.rstrip()
+    if len(text) > _SUMMARY_MAX_CHARS:
+        text = text[:_SUMMARY_MAX_CHARS] + "\n... diff truncated ..."
+    return text
 
 
 def diff_stat(root: Path) -> str:
