@@ -19,6 +19,7 @@ from dataclasses import dataclass
 from importlib.resources import files
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 from langchain.agents import create_agent
 from langchain.agents.middleware import ModelCallLimitMiddleware
@@ -97,6 +98,21 @@ class Review(BaseModel):
 # #33): the schema becomes a tool the model calls; the validated value lands
 # on ``AgentResult.structured_response``.
 _RESPONSE_FORMATS = {"spec": AgentBrief, "reviewer": Review}
+
+
+class MissingStructuredOutput(Exception):
+    """An agent with a ``response_format`` finished without one and no
+    limit hit.
+
+    Raised inside the agent invoke — the same resumable stop path as a
+    provider error: the checkpoint stays before the node, the error is
+    shown, and the run is never ``stuck`` (spec #33, #58)."""
+
+
+_MISSING_OUTPUT = {
+    "spec": "SPEC returned no agent brief",
+    "reviewer": "REVIEWER returned no review",
+}
 
 
 def allowlist_for(name: str, *, tracker: bool) -> tuple[str, ...]:
@@ -369,14 +385,26 @@ class K0Agent:
         if self.effort:
             metadata[META_EFFORT] = self.effort
         merged["metadata"] = metadata
+        # The run graph's checkpointer leaks into this invoke through
+        # runnable config context: without a fresh namespace the inner run
+        # checkpoints under the node's task namespace and a retried node
+        # replays its stale output instead of re-running on fresh context
+        # (ADR 0002, #58).
+        configurable = dict(merged.get("configurable") or {})
+        configurable["checkpoint_ns"] = f"{self.name}-{uuid4().hex}"
+        merged["configurable"] = configurable
         return merged
 
     def _result(self, output: dict | None) -> AgentResult:
         messages = list((output or {}).get("messages") or [])
+        limited = _limit_hit(messages, self.model_calls)
+        structured = (output or {}).get("structured_response")
+        if self.name in _MISSING_OUTPUT and not limited and structured is None:
+            raise MissingStructuredOutput(_MISSING_OUTPUT[self.name])
         return AgentResult(
             messages=messages,
-            limit_hit=_limit_hit(messages, self.model_calls),
-            structured_response=(output or {}).get("structured_response"),
+            limit_hit=limited,
+            structured_response=structured,
         )
 
 
