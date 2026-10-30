@@ -412,6 +412,7 @@ def make_review_gate(ctx: RunContext) -> Callable[[dict], dict]:
             "review_approved": False,
             "review_route": "spec",
             "spec_approved": False,
+            "coder_attempts": 0,
             "review_feedback": None,
             "spec_feedback": _review_feedback(state, feedback),
             "review_rejections": rejections,

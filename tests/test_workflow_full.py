@@ -707,6 +707,31 @@ def test_full_validator_red_retries_coder_then_limit_hit(tmp_path):
     assert stuck.outcome == "stuck" and stuck.node == "validator"
 
 
+def test_revised_contract_gets_a_fresh_coder_retry_budget(tmp_path):
+    tracker, coder, reviewer, pending = full_to_review_gate(tmp_path)
+    pending = resume(
+        pending.run, "spec revise", root=tmp_path, cfg=full_cfg(),
+        tracker=tracker, init=models_init(spec_model()),
+    )
+    tester = fake_tester(
+        write_call("tests/test_calc_edge.py", "from calc import answer\n\n"
+                   "def test_edge():\n    assert answer() == 43\n"),
+        AIMessage(content="tests"),
+    )
+    pending = resume(
+        pending.run, "ok", root=tmp_path, cfg=full_cfg(), tracker=tracker,
+        init=models_init(tester), scan=writing_scan,
+    )
+    coder = fake_tester(AIMessage(content="not fixed"), AIMessage(content="still red"))
+    pending = resume(
+        pending.run, "ok", root=tmp_path, cfg=full_cfg(), tracker=tracker,
+        init=models_init(coder), scan=writing_scan,
+    )
+    assert pending.gate == "limit_hit"
+    assert len(coder.invocations) == 2
+    assert "2/2" in pending.question
+
+
 def test_reviewer_hitting_its_call_limit_pauses(tmp_path):
     cfg = full_cfg()
     cfg["agents"]["reviewer"]["model_calls"] = 3
