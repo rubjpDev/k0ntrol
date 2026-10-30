@@ -50,9 +50,17 @@ from k0ntrol.workflow.full import build_full_graph  # noqa: E402
 _BUILDERS = {"fast": build_fast_graph, "full": build_full_graph}
 
 # The roster each run kind uses; the free doctor checks gate start on it.
+# Every agent gets the bulk_read tool, so the helper is part of each roster
+# (#61, same gate /ask already applies).
 _ROSTER = {
-    "fast": ("agents.tester", "agents.coder"),
-    "full": ("agents.spec", "agents.tester", "agents.coder", "agents.reviewer"),
+    "fast": ("agents.tester", "agents.coder", "helpers.bulk_read"),
+    "full": (
+        "agents.spec",
+        "agents.tester",
+        "agents.coder",
+        "agents.reviewer",
+        "helpers.bulk_read",
+    ),
 }
 
 # Outer recursion limit: each loop iteration costs two super-steps at most.
