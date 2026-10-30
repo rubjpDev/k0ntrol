@@ -602,7 +602,8 @@ def test_full_runs_to_done_with_one_review_redo(tmp_path):
     tracker, coder, reviewer, result = full_to_review_gate(tmp_path)
 
     coder2 = fake_tester(
-        write_call("calc.py", CALC_SRC, "c2"), AIMessage(content="revised")
+        write_call("calc.py", 'def answer():\n    """Return the answer."""\n    return 42\n', "c2"),
+        AIMessage(content="revised"),
     )
     reviewer2 = reviewer_model(summary="all good now", findings=[])
     redo = resume(
