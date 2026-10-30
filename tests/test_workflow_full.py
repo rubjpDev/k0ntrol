@@ -7,6 +7,7 @@ Decisions; ticket #44's last criterion).
 """
 
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -955,3 +956,326 @@ def test_after_redo_the_test_gate_shows_the_new_red_check_output(tmp_path):
     assert isinstance(redo, Pending)
     assert redo.gate == "test"
     assert "No module named 'nonexistent_mod_xyz'" in redo.detail
+
+
+# --- stuck, re-runs and resume (#46) --------------------------------------------
+
+WRONG_CALC = "def answer():\n    return 41\n"
+
+
+def stuck_coder():
+    """A CODER that writes a wrong ``calc.py`` and never fixes it."""
+    return fake_tester(
+        write_call("calc.py", WRONG_CALC),
+        AIMessage(content="tried"),
+        AIMessage(content="still red"),
+    )
+
+
+def stop_at_limit(tmp_path, pending, tracker, answer="stop"):
+    return resume(
+        pending.run, answer, root=tmp_path, cfg=full_cfg(), tracker=tracker,
+        init=models_init(), scan=writing_scan,
+    )
+
+
+def test_stop_at_limit_hit_runs_the_stuck_side_effects(tmp_path):
+    tracker, coder, reviewer, pending = full_to_review_gate(
+        tmp_path, coder=stuck_coder()
+    )
+    assert pending.gate == "limit_hit"
+    tracker.calls.clear()
+
+    stuck = stop_at_limit(tmp_path, pending, tracker)
+
+    assert isinstance(stuck, Outcome)
+    assert stuck.outcome == "stuck" and stuck.node == "validator"
+    assert git(tmp_path, "log", "-1", "--format=%s") == "#1: wip (stuck)"
+    assert git(tmp_path, "status", "--porcelain", "--", "calc.py") == ""
+    names = [call[0] for call in tracker.calls]
+    assert ("push", "k0/1-calc-answers-42") in tracker.calls
+    assert "open_change" not in names  # a PR means green
+    assert ("ensure_label", "k0:stuck") in tracker.calls
+    assert tracker.labels_on("1") == {"k0:stuck"}
+
+    comment = tracker.read_work_item("1").comments[-1].body
+    assert f"run={pending.run} node=stuck" in comment
+    assert "validator" in comment
+    assert "attempts 2/2" in comment
+    assert "retries granted: 0" in comment
+    assert "k0/1-calc-answers-42" in comment
+    assert "$ " in comment  # the tail of the last failing output
+    assert tracker.read_change("k0/1-calc-answers-42") is None
+
+
+
+BRANCH = "k0/1-calc-answers-42"
+
+
+def stuck_run(tmp_path):
+    """A /full run stopped at ``limit_hit`` with a wrong ``calc.py``."""
+    tracker, coder, reviewer, pending = full_to_review_gate(
+        tmp_path, coder=stuck_coder()
+    )
+    return tracker, stop_at_limit(tmp_path, pending, tracker)
+
+
+def rerun(tmp_path, tracker, *models, input="#1"):
+    return run_full(
+        tmp_path, full_cfg(), tracker, *models, input=input, scan=writing_scan
+    )
+
+
+def test_stuck_comment_also_lands_on_the_pr_when_one_exists(tmp_path):
+    tracker, coder, reviewer, pending = full_to_review_gate(tmp_path)
+    limit = resume(
+        pending.run, "redo", root=tmp_path, cfg=full_cfg(), tracker=tracker,
+        init=models_init(fake_tester(
+            write_call("calc.py", WRONG_CALC, "c2"),
+            AIMessage(content="tried"),
+            AIMessage(content="still red"),
+        )),
+        scan=writing_scan,
+    )
+    assert limit.gate == "limit_hit"
+    change = tracker.read_change(BRANCH)
+    tracker.calls.clear()
+
+    stuck = stop_at_limit(tmp_path, limit, tracker)
+
+    assert stuck.outcome == "stuck"
+    comments = tracker.change_comments_on(change.ref)
+    assert len(comments) == 1 and f"run={limit.run} node=stuck" in comments[0]
+    assert BRANCH in comments[0]
+    assert "open_change" not in [call[0] for call in tracker.calls]
+    assert tracker.read_change(BRANCH).is_draft
+
+
+def test_stuck_effects_resume_after_a_failed_push_without_duplicates(tmp_path):
+    from k0ntrol.tracker import TrackerError
+
+    class PushFailsOnce(FakeTracker):
+        failed = False
+
+        def push(self, branch):
+            if self.armed and not self.failed:
+                self.failed = True
+                raise TrackerError("git push failed (exit 1): network down")
+            super().push(branch)
+
+    tracker, coder, reviewer, pending = full_to_review_gate(
+        tmp_path, coder=stuck_coder()
+    )
+    tracker.__class__ = PushFailsOnce
+    tracker.armed = True
+
+    with pytest.raises(TrackerError, match="network down"):
+        stop_at_limit(tmp_path, pending, tracker)
+    assert tracker.labels_on("1") == set()  # stopped before the label
+
+    stuck = resume(
+        pending.run, "", root=tmp_path, cfg=full_cfg(), tracker=tracker,
+        init=models_init(),
+    )
+
+    assert stuck.outcome == "stuck" and stuck.node == "validator"
+    assert tracker.labels_on("1") == {"k0:stuck"}
+    comments = [
+        c for c in tracker.read_work_item("1").comments if "node=stuck" in c.body
+    ]
+    assert len(comments) == 1
+    assert git(tmp_path, "log", "--format=%s").count("#1: wip (stuck)") == 1
+
+
+def test_a_broken_event_log_runs_the_stuck_effects(tmp_path):
+    tracker, coder, reviewer, pending = full_to_review_gate(tmp_path)
+    log = tmp_path / ".k0-mem" / "events.jsonl"
+    log.unlink()
+    log.mkdir()
+    (tmp_path / "scratch.txt").write_text("unsaved work\n", encoding="utf-8")
+    tracker.calls.clear()
+
+    stuck = resume(
+        pending.run, "ok", root=tmp_path, cfg=full_cfg(), tracker=tracker,
+        init=models_init(),
+    )
+
+    assert stuck.outcome == "stuck" and stuck.reason == "event_log"
+    assert git(tmp_path, "log", "-1", "--format=%s") == "#1: wip (stuck)"
+    assert ("push", BRANCH) in tracker.calls
+    assert tracker.labels_on("1") == {"k0:stuck"}
+    comment = tracker.read_work_item("1").comments[-1].body
+    assert "event log" in comment and BRANCH in comment
+    change = tracker.read_change(BRANCH)
+    assert change.is_draft  # the broken log ended the run before the gate applied
+    assert "node=stuck" in tracker.change_comments_on(change.ref)[0]
+
+
+def test_a_failed_pass_record_write_is_retried_without_a_duplicate(tmp_path):
+    from k0ntrol.tracker import TrackerError
+
+    class LandsThenFails(FakeTracker):
+        failed = False
+
+        def comment_change(self, ref, body, *, run, node):
+            super().comment_change(ref, body, run=run, node=node)
+            if not self.failed:
+                self.failed = True
+                raise TrackerError("gh pr comment failed (exit 1): timeout")
+
+    tracker, coder, reviewer, pending = full_to_review_gate(tmp_path)
+    tracker.__class__ = LandsThenFails
+
+    with pytest.raises(TrackerError, match="gh pr comment failed"):
+        resume(
+            pending.run, "ok", root=tmp_path, cfg=full_cfg(), tracker=tracker,
+            init=models_init(),
+        )
+    done = resume(
+        pending.run, None, root=tmp_path, cfg=full_cfg(), tracker=tracker,
+        init=models_init(),
+    )
+
+    assert done.outcome == "done"
+    change = tracker.read_change(BRANCH)
+    assert len(tracker.change_comments_on(change.ref)) == 1
+    assert not change.is_draft
+
+
+def test_a_killed_run_resumes_at_the_review_gate_in_a_fresh_process(tmp_path):
+    tracker, coder, reviewer, pending = full_to_review_gate(tmp_path)
+    script = (
+        "import sys\n"
+        "from pathlib import Path\n"
+        "from fakes import FakeTracker\n"
+        "from k0ntrol.workflow import resume\n"
+        "print(resume(sys.argv[1], None, root=Path('.'), cfg={'tracker': 'github'},"
+        " tracker=FakeTracker()))\n"
+    )
+    env = {**os.environ, "PYTHONPATH": str(Path(__file__).parent)}
+
+    result = subprocess.run(
+        [sys.executable, "-c", script, pending.run],
+        cwd=tmp_path, capture_output=True, text=True, env=env, check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "gate='review'" in result.stdout
+    assert f"run={pending.run}" not in result.stdout  # a Pending, not an Outcome
+    assert "Outcome" not in result.stdout
+
+
+# --- an unfinished run, re-runs and refusals ----------------------------------
+
+
+def test_a_second_full_run_gets_the_unfinished_run_back(tmp_path):
+    from k0ntrol.workflow import Unfinished
+
+    tracker, coder, reviewer, pending = full_to_review_gate(tmp_path)
+
+    again = run_full(tmp_path, full_cfg(), tracker, input="#1")
+
+    assert again == Unfinished(run=pending.run, node="review_gate")
+
+
+def test_resume_without_an_answer_shows_the_pending_gate_again(tmp_path):
+    tracker, coder, reviewer, pending = full_to_review_gate(tmp_path)
+
+    again = resume(
+        pending.run, None, root=tmp_path, cfg=full_cfg(), tracker=tracker,
+        init=models_init(),
+    )
+
+    assert again == pending
+
+
+def test_abandoning_a_run_frees_the_checkout_for_a_new_one(tmp_path):
+    from k0ntrol.workflow import abandon
+
+    tracker, coder, reviewer, pending = full_to_review_gate(tmp_path)
+
+    abandon(pending.run, root=tmp_path)
+
+    with pytest.raises(RunRefused, match="no run"):
+        resume(pending.run, None, root=tmp_path, cfg=full_cfg(), tracker=tracker)
+    fresh = run_full(tmp_path, full_cfg(), tracker, spec_model(), input="#1")
+    assert isinstance(fresh, Pending) and fresh.gate == "spec"
+
+
+def done_run(tmp_path):
+    tracker, coder, reviewer, pending = full_to_review_gate(tmp_path)
+    done = resume(
+        pending.run, "ok", root=tmp_path, cfg=full_cfg(), tracker=tracker,
+        init=models_init(),
+    )
+    assert done.outcome == "done"
+    return tracker
+
+
+def test_rerun_after_done_reuses_the_branch_and_the_open_pr(tmp_path):
+    tracker = done_run(tmp_path)
+    # the issue was retitled since: the slug must not decide the branch
+    tracker._items["1"]["title"] = "Calc answers forty two"
+    change = tracker.read_change(BRANCH)
+    tracker.calls.clear()
+
+    spec = spec_model()
+    pending = rerun(tmp_path, tracker, spec)
+    assert pending.gate == "spec"
+    tester = write_red_tests()
+    test_gate = resume(
+        pending.run, "ok", root=tmp_path, cfg=full_cfg(), tracker=tracker,
+        init=models_init(tester), scan=writing_scan,
+    )
+    coder = fake_tester(
+        write_call("calc.py", CALC_SRC + "\n", "c9"), AIMessage(content="again")
+    )
+    gate = resume(
+        test_gate.run, "ok", root=tmp_path, cfg=full_cfg(), tracker=tracker,
+        init=models_init(coder, reviewer_model()), scan=writing_scan,
+    )
+
+    assert gate.gate == "review"
+    assert ("create_branch", BRANCH) in tracker.calls
+    assert [c for c in tracker.calls if c[0] == "create_branch"] == [
+        ("create_branch", BRANCH)
+    ]
+    assert "create_work_item" not in [c[0] for c in tracker.calls]
+    assert tracker.read_change(BRANCH).ref == change.ref
+    assert git(tmp_path, "rev-parse", "--abbrev-ref", "HEAD") == BRANCH
+
+
+def test_rerun_after_stuck_removes_the_stuck_label(tmp_path):
+    tracker, stuck = stuck_run(tmp_path)
+    assert tracker.labels_on("1") == {"k0:stuck"}
+
+    pending = rerun(tmp_path, tracker, spec_model())
+    brief_seen = tracker.read_work_item("1").comments
+    assert any("node=stuck" in c.body for c in brief_seen)  # SPEC can read it
+    assert tracker.labels_on("1") == {"k0:stuck"}  # not before the spec gate
+
+    resume(
+        pending.run, "ok", root=tmp_path, cfg=full_cfg(), tracker=tracker,
+        init=models_init(write_red_tests()), scan=writing_scan,
+    )
+
+    assert tracker.labels_on("1") == set()
+    assert ("remove_label", "1", "k0:stuck") in tracker.calls
+
+
+@pytest.mark.parametrize("state,word", [("merged", "merged"), ("closed", "closed")])
+def test_rerun_refuses_a_merged_or_closed_pr(tmp_path, state, word):
+    tracker = done_run(tmp_path)
+    change = tracker.read_change(BRANCH)
+    getattr(tracker, f"{'merge' if state == 'merged' else 'close'}_change")(change.ref)
+
+    with pytest.raises(RunRefused, match=f"pull request .* {word}"):
+        rerun(tmp_path, tracker)
+
+
+def test_rerun_refuses_a_closed_issue(tmp_path):
+    tracker = done_run(tmp_path)
+    tracker.close_work_item("1")
+
+    with pytest.raises(RunRefused, match="work item #1 is closed"):
+        rerun(tmp_path, tracker)

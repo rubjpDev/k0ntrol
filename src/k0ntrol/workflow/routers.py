@@ -100,6 +100,9 @@ def route_limit_hit(state: dict) -> str:
     """``stop`` ends the run; ``retry`` goes back to the limited node."""
     return state.get("retry_node") or END
 
+def route_full_limit_hit(state: dict) -> str:
+    """``/full``: ``retry`` reruns the node; ``stop`` runs the stuck effects."""
+    return state.get("retry_node") or "stuck_push"
 
 
 def _exhausted(state: dict, key: str) -> bool:

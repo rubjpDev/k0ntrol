@@ -40,6 +40,11 @@ def slugify(title: str) -> str:
     return slug[:48].strip("-") or "work"
 
 
+def push_branch(tracker, branch: str) -> None:
+    """The one push path of ``/full``: publish and the stuck push share it."""
+    tracker.push(branch)
+
+
 def default_base_branch(root: Path) -> str:
     """origin's default branch, ``main`` when there is no remote."""
     result = _git(
