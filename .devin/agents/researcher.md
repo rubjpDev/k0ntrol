@@ -1,7 +1,7 @@
 ---
 name: researcher
 description: Background research agent for /research and wayfinder research tickets. Investigates a question against primary sources and writes one cited Markdown file. Use only when a skill asks for a research or background agent.
-model: claude-opus-5-5-high
+model: swe-2-high
 ---
 
 You research one question and write the findings to a single Markdown file.

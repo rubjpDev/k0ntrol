@@ -60,15 +60,15 @@ Skills are vendored per repo in `.agents/skills/` (from `mattpocock/skills`, pin
 
 ### Subagent routing
 
-In Devin, use the profiles in `.devin/agents/` and the `design-variant` skill in `.devin/skills/`. The profiles in `.claude/agents/` remain for legacy clients. Clients without custom subagents run the step inline.
+In Devin, use the profiles in `.devin/agents/`. The profiles in `.claude/agents/` remain for legacy clients. Clients without custom subagents run the step inline.
 
 - `/code-review`: two sub-agents in one turn — Standards `standards-reviewer`, Spec `spec-reviewer`. The parent aggregates after both return.
 - `/research` background agent, including wayfinder research tickets: `researcher`.
 - `/implement-spec`: use `swe-worker` for implementer and exploration subagents, and `merger` for the merger subagent.
-- `codebase-design` design-it-twice: invoke the `design-variant` skill for Agent 3 ("optimise for the most common caller"). It uses `subagent_general` to inherit the parent's model. Use `swe-worker` for the other designers and include the read-only constraint in each brief.
+- `codebase-design` design-it-twice: use `design-variant` for Agent 3 ("optimise for the most common caller"). Use `swe-worker` for the other designers and include the read-only constraint in each brief.
 - Other Matt Pocock skill subagents that previously inherited the parent model use `swe-worker`.
 
-A custom Devin profile without `model` uses the subagent router, not the parent's model. Keep `design-variant` as a skill backed by `subagent_general`, with no model override.
+A custom Devin profile without `model` uses the subagent router, not the parent's model, so every profile in `.devin/agents/` names a SWE-2 model: `swe-2-medium` for mechanical work (`merger`), `swe-2-high` for implementation, review and research, `swe-2-max` for interface design (`design-variant`).
 
 Never let a reviewer, merger, implementer or exploration subagent run on the orchestrator's model. This holds in Devin cloud too, where a step may run as a child session instead of a profile subagent: name the model explicitly, the profile's model or `swe-2-high` when unsure. If no profile or explicit model is available, run the step inline in the parent instead of spawning a copy of it; for `/code-review`, that means one inline pass per axis, not two spawned sessions.
 

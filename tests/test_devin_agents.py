@@ -21,8 +21,9 @@ def parse_frontmatter(path: Path) -> tuple[dict, str]:
     [
         ("standards-reviewer", "swe-2-high"),
         ("spec-reviewer", "swe-2-high"),
-        ("researcher", "claude-opus-5-5-high"),
-        ("merger", "swe-2-high"),
+        ("researcher", "swe-2-high"),
+        ("merger", "swe-2-medium"),
+        ("design-variant", "swe-2-max"),
     ],
 )
 def test_migrated_profile_matches_legacy(profile: str, model: str) -> None:
@@ -35,7 +36,7 @@ def test_migrated_profile_matches_legacy(profile: str, model: str) -> None:
     assert devin_body == legacy_body
     assert "tools" not in devin_fm
 
-    if profile in ("standards-reviewer", "spec-reviewer"):
+    if profile in ("standards-reviewer", "spec-reviewer", "design-variant"):
         assert devin_fm["allowed-tools"] == ["read", "grep", "glob", "exec"]
     else:
         assert "allowed-tools" not in devin_fm
@@ -47,24 +48,10 @@ def test_swe_worker_profile() -> None:
     assert fm["model"] == "swe-2-high"
 
 
-def test_no_design_variant_profile_in_devin_agents() -> None:
+def test_every_devin_profile_uses_swe_2() -> None:
     for path in DEVIN_AGENTS.glob("*.md"):
         fm, _body = parse_frontmatter(path)
-        assert fm["name"] != "design-variant"
-
-
-def test_design_variant_skill_uses_subagent_general() -> None:
-    fm, body = parse_frontmatter(
-        REPO_ROOT / ".devin" / "skills" / "design-variant" / "SKILL.md"
-    )
-    legacy_fm, legacy_body = parse_frontmatter(LEGACY_AGENTS / "design-variant.md")
-
-    assert fm["agent"] == "subagent_general"
-    for key in ("model", "tools", "allowed-tools", "permissions"):
-        assert key not in fm
-    assert fm["name"] == legacy_fm["name"]
-    assert fm["description"] == legacy_fm["description"]
-    assert body == legacy_body
+        assert fm["model"] in ("swe-2-medium", "swe-2-high", "swe-2-max"), path.name
 
 
 def routing_section() -> str:
@@ -78,7 +65,6 @@ def test_agents_routing_section() -> None:
     section = routing_section()
 
     assert ".devin/agents/" in section
-    assert ".devin/skills/" in section
     for name in (
         "standards-reviewer",
         "spec-reviewer",
@@ -88,7 +74,6 @@ def test_agents_routing_section() -> None:
         "design-variant",
     ):
         assert name in section
-    assert "subagent_general" in section
     assert "implementer" in section
     assert "exploration" in section
     assert "other designers" in section
