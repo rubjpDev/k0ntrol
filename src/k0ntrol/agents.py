@@ -86,10 +86,17 @@ class AgentBrief(BaseModel):
     out_of_scope: str
 
 
+class Review(BaseModel):
+    """REVIEWER's structured output: the review of the change."""
+
+    summary: str
+    findings: list[str]
+
+
 # Agents whose ``create_agent`` gets a structured ``response_format`` (spec
 # #33): the schema becomes a tool the model calls; the validated value lands
 # on ``AgentResult.structured_response``.
-_RESPONSE_FORMATS = {"spec": AgentBrief}
+_RESPONSE_FORMATS = {"spec": AgentBrief, "reviewer": Review}
 
 
 def allowlist_for(name: str, *, tracker: bool) -> tuple[str, ...]:

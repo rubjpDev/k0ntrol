@@ -17,6 +17,7 @@ from langchain.chat_models import init_chat_model
 
 from k0ntrol.agents import K0Agent, agent_tools, allowlist_for, build_agent
 from k0ntrol.events import META_ATTEMPT, EventWriter, K0EventHandler
+from k0ntrol.langfuse import RunTrace
 from k0ntrol.memory.scan import run_scan
 from k0ntrol.tools.run_tests import DEFAULT_TEST_TIMEOUT
 from k0ntrol.workflow.change import default_base_branch
@@ -34,6 +35,7 @@ class RunContext:
     scan: Callable = run_scan
     writer: EventWriter | None = None
     handler: K0EventHandler | None = None
+    trace: RunTrace | None = None
     _agents: dict[str, K0Agent] = field(default_factory=dict)
 
     def bind(self, writer: EventWriter) -> None:
@@ -77,8 +79,15 @@ class RunContext:
         return self._agents[name]
 
     def agent_config(self, attempt: int) -> dict:
-        """The config for one agent run: events handler + attempt tag."""
+        """The config for one agent run: handlers + attempt tag.
+
+        The optional Langfuse handler sits beside the events handler
+        when tracing is on (#49).
+        """
+        callbacks = [self.handler]
+        if self.trace is not None and self.trace.handler is not None:
+            callbacks.append(self.trace.handler)
         return {
-            "callbacks": [self.handler],
+            "callbacks": callbacks,
             "metadata": {META_ATTEMPT: attempt},
         }

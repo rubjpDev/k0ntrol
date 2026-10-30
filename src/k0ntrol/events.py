@@ -31,6 +31,8 @@ from uuid import uuid4
 
 from langgraph.callbacks import GraphCallbackHandler, GraphInterruptEvent
 
+from k0ntrol.providers import REGISTRY
+
 ERR_MAX_CHARS = 500
 MASKED = "***"
 # Values shorter than this are not masked: a short env value would mangle
@@ -68,10 +70,12 @@ def new_chat_id() -> str:
 def secret_env_values(env: Mapping[str, str] | None = None) -> list[str]:
     """Exact values of known secret env vars, used for `err` masking."""
     source = os.environ if env is None else env
+    known_names = set().union(*(spec.credentials for spec in REGISTRY.values()))
     values = [
         value
         for name, value in source.items()
-        if name.endswith(_SECRET_NAME_SUFFIXES) and len(value) >= MASK_MIN_LENGTH
+        if (name in known_names or name.endswith(_SECRET_NAME_SUFFIXES))
+        and len(value) >= MASK_MIN_LENGTH
     ]
     return values
 
