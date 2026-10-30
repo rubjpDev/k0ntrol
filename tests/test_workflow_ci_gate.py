@@ -21,6 +21,7 @@ from test_workflow_full import (
     full_to_test_gate,
     models_init,
     reviewer_model,
+    spec_model,
     write_call,
     writing_scan,
 )
@@ -165,6 +166,39 @@ def test_a_later_push_without_github_changes_skips_the_gate(tmp_path):
         if e["kind"] == "gate" and e["gate"] == "ci" and e["result"] == "waiting"
     ]
     assert len(waiting) == 1
+
+
+def test_a_rerun_does_not_regate_workflow_changes_already_on_the_remote(tmp_path):
+    from test_workflow_full import DOUBLE_SRC, DOUBLE_TEST, git, rerun
+
+    tracker, gate = to_ci_gate(tmp_path)
+    review = answer(tmp_path, tracker, gate.run, "ok", reviewer_model())
+    done = answer(tmp_path, tracker, review.run, "ok")
+    assert done.outcome == "done"
+    branch = "k0/1-calc-answers-42"
+    git(tmp_path, "update-ref", f"refs/remotes/origin/{branch}", "HEAD")  # pushed
+
+    spec = rerun(tmp_path, tracker, spec_model())
+    tests = answer(
+        tmp_path, tracker, spec.run, "ok",
+        fake_tester(
+            write_call("tests/test_double.py", DOUBLE_TEST, "t2"),
+            AIMessage(content="wrote failing tests"),
+        ),
+    )
+    coder = fake_tester(
+        write_call("calc.py", CALC_SRC + DOUBLE_SRC, "c2"),
+        AIMessage(content="double"),
+    )
+    result = answer(tmp_path, tracker, tests.run, "ok", coder, reviewer_model())
+
+    assert isinstance(result, Pending) and result.gate == "review"
+    assert len(pushes(tracker)) == 2
+    waiting = [
+        e for e in events(tmp_path)
+        if e["kind"] == "gate" and e["gate"] == "ci" and e["result"] == "waiting"
+    ]
+    assert len(waiting) == 1  # only the first run's push was gated
 
 
 def test_push_refuses_a_head_the_gate_has_not_cleared(tmp_path):

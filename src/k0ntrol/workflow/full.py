@@ -36,7 +36,13 @@ from langgraph.graph.state import CompiledStateGraph
 from langgraph.types import interrupt
 
 from k0ntrol.tools.tracker import render_work_item
-from k0ntrol.workflow.change import decider, existing_branch, slugify, worktree_summary
+from k0ntrol.workflow.change import (
+    decider,
+    existing_branch,
+    remote_tip,
+    slugify,
+    worktree_summary,
+)
 from k0ntrol.workflow.ci_gate import gated_push, make_ci_gate
 from k0ntrol.workflow.context import RunContext
 from k0ntrol.workflow.nodes import (
@@ -261,7 +267,12 @@ def make_spec_comment(ctx: RunContext) -> Callable[[dict], dict]:
 
 
 def make_branch_setup(ctx: RunContext) -> Callable[[dict], dict]:
-    """Cut ``k0/<n>-<slug>`` from the base, rescan, commit ``.k0-mem/``."""
+    """Cut ``k0/<n>-<slug>`` from the base, rescan, commit ``.k0-mem/``.
+
+    A reused branch carries what an earlier run pushed: its remote tip is
+    the first push's CI-gate baseline, so ``.github/`` changes already
+    there are not asked about again.
+    """
 
     def node(state: dict) -> dict:
         ref = state["item_ref"]
@@ -273,7 +284,8 @@ def make_branch_setup(ctx: RunContext) -> Callable[[dict], dict]:
         ctx.tracker.create_branch(branch, ctx.base_branch)
         ctx.scan(ctx.root)
         ctx.tracker.commit(f"#{ref}: update memory")
-        return {"branch": branch}
+        tip = None if state.get("ci_approved_sha") else remote_tip(ctx.root, branch)
+        return {"branch": branch, **({"ci_approved_sha": tip} if tip else {})}
 
     return node
 
