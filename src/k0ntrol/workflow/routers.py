@@ -85,10 +85,8 @@ def route_full_validator(state: dict) -> str:
 
 def route_ci_gate(state: dict) -> str:
     """Cleared → push (with a gate comment when the human approved);
-    rejected → CODER with the feedback."""
-    if not state.get("ci_cleared_sha"):
-        return "coder"
-    return "ci_comment" if state.get("ci_approved") else "push"
+    rejected → record it, then CODER with the feedback."""
+    return _route_ci(state, prefix="", skipped="coder")
 
 
 def route_after_reviewer(state: dict) -> str:
@@ -117,10 +115,22 @@ def route_full_limit_hit(state: dict) -> str:
 
 
 def route_stuck_ci_gate(state: dict) -> str:
-    """Cleared → push (with a gate comment when approved); rejected → no push."""
-    if not state.get("ci_cleared_sha"):
-        return "stuck_label"
-    return "stuck_ci_comment" if state.get("ci_approved") else "stuck_push"
+    """The stuck path's CI gate: no CODER, so a reject (or a gate nobody
+    decided) just leaves HEAD unpushed and goes on to the label."""
+    return _route_ci(state, prefix="stuck_", skipped="stuck_label")
+
+
+def _route_ci(state: dict, *, prefix: str, skipped: str) -> str:
+    """The CI gate's outcomes for one path; ``prefix`` names its nodes.
+
+    ``skipped`` is where HEAD goes uncleared with nobody having decided
+    (a run stuck by its event log never asks).
+    """
+    if state.get("ci_cleared_sha"):
+        return f"{prefix}ci_comment" if state.get("ci_approved") else f"{prefix}push"
+    if state.get("ci_feedback") is None:
+        return skipped
+    return f"{prefix}ci_reject_comment"
 
 
 def _exhausted(state: dict, key: str) -> bool:

@@ -7,21 +7,25 @@ before the harness pushes.
 
 import subprocess
 
+import pytest
 from langchain_core.messages import AIMessage
 
 from fakes import FakeTracker
 from test_workflow_full import (
     CALC_SRC,
+    WRONG_CALC,
     events,
     fake_tester,
     full_cfg,
+    full_to_review_gate,
     full_to_test_gate,
     models_init,
     reviewer_model,
+    spec_model,
     write_call,
     writing_scan,
 )
-from k0ntrol.workflow import Outcome, Pending, resume
+from k0ntrol.workflow import Outcome, Pending, RunRefused, resume
 
 WORKFLOW = ".github/workflows/ci.yml"
 WORKFLOW_SRC = "name: ci\non: push\njobs: {}\n"
@@ -99,6 +103,11 @@ def test_rejecting_sends_the_feedback_to_coder_and_gates_again(tmp_path):
     assert isinstance(again, Pending) and again.gate == "ci"
     assert "pull_request" in again.detail
     assert pushes(tracker) == []
+    rejected = [
+        c.body for c in tracker.read_work_item("1").comments
+        if "Gate rejected: ci" in c.body
+    ]
+    assert len(rejected) == 1 and "only run on pull_request" in rejected[0]
 
     done = answer(tmp_path, tracker, again.run, "ok", reviewer_model())
     assert isinstance(done, Pending) and done.gate == "review"
@@ -159,6 +168,39 @@ def test_a_later_push_without_github_changes_skips_the_gate(tmp_path):
     assert len(waiting) == 1
 
 
+def test_a_rerun_does_not_regate_workflow_changes_already_on_the_remote(tmp_path):
+    from test_workflow_full import DOUBLE_SRC, DOUBLE_TEST, git, rerun
+
+    tracker, gate = to_ci_gate(tmp_path)
+    review = answer(tmp_path, tracker, gate.run, "ok", reviewer_model())
+    done = answer(tmp_path, tracker, review.run, "ok")
+    assert done.outcome == "done"
+    branch = "k0/1-calc-answers-42"
+    git(tmp_path, "update-ref", f"refs/remotes/origin/{branch}", "HEAD")  # pushed
+
+    spec = rerun(tmp_path, tracker, spec_model())
+    tests = answer(
+        tmp_path, tracker, spec.run, "ok",
+        fake_tester(
+            write_call("tests/test_double.py", DOUBLE_TEST, "t2"),
+            AIMessage(content="wrote failing tests"),
+        ),
+    )
+    coder = fake_tester(
+        write_call("calc.py", CALC_SRC + DOUBLE_SRC, "c2"),
+        AIMessage(content="double"),
+    )
+    result = answer(tmp_path, tracker, tests.run, "ok", coder, reviewer_model())
+
+    assert isinstance(result, Pending) and result.gate == "review"
+    assert len(pushes(tracker)) == 2
+    waiting = [
+        e for e in events(tmp_path)
+        if e["kind"] == "gate" and e["gate"] == "ci" and e["result"] == "waiting"
+    ]
+    assert len(waiting) == 1  # only the first run's push was gated
+
+
 def test_push_refuses_a_head_the_gate_has_not_cleared(tmp_path):
     import pytest
     from k0ntrol.workflow.ci_gate import CiGateError, gated_push
@@ -201,3 +243,138 @@ def test_the_gate_detail_is_capped(tmp_path):
     git(tmp_path, "commit", "-qm", "big")
 
     assert diff_since(tmp_path, base, ".github/").endswith("... diff truncated ...")
+
+
+# --- the CI gate on the stuck paths --------------------------------------------
+
+
+def stuck_with_workflow(tmp_path):
+    """A CODER that writes a wrong ``calc.py`` and a workflow, then runs dry."""
+    coder = fake_tester(
+        write_call("calc.py", WRONG_CALC),
+        write_call(WORKFLOW, WORKFLOW_SRC, "w1"),
+        AIMessage(content="tried"),
+        AIMessage(content="still red"),
+    )
+    tracker, _, _, pending = full_to_review_gate(tmp_path, coder=coder)
+    assert pending.gate == "limit_hit"
+    return tracker, pending
+
+
+def break_event_log(root):
+    log = root / ".k0-mem" / "events.jsonl"
+    log.unlink()
+    log.mkdir()
+    return log
+
+
+def test_the_stuck_push_of_a_workflow_change_waits_at_the_ci_gate(tmp_path):
+    tracker, pending = stuck_with_workflow(tmp_path)
+
+    gate = answer(tmp_path, tracker, pending.run, "stop")
+
+    assert isinstance(gate, Pending) and gate.gate == "ci"
+    assert WORKFLOW in gate.detail
+    assert pushes(tracker) == []
+
+
+def test_rejecting_the_stuck_push_posts_a_gate_comment_and_skips_the_push(tmp_path):
+    tracker, pending = stuck_with_workflow(tmp_path)
+    gate = answer(tmp_path, tracker, pending.run, "stop")
+
+    stuck = answer(tmp_path, tracker, gate.run, "redo too broad")
+
+    assert isinstance(stuck, Outcome) and stuck.outcome == "stuck"
+    assert pushes(tracker) == []
+    comments = [c.body for c in tracker.read_work_item("1").comments]
+    rejected = [c for c in comments if "Gate rejected: ci" in c]
+    assert len(rejected) == 1 and "too broad" in rejected[0]
+    assert "HEAD was not pushed" in comments[-1]
+
+
+def test_a_broken_event_log_never_parks_the_stuck_ci_gate(tmp_path):
+    tracker, pending = stuck_with_workflow(tmp_path)
+    break_event_log(tmp_path)
+
+    stuck = answer(tmp_path, tracker, pending.run, "stop")
+
+    assert isinstance(stuck, Outcome)
+    assert stuck.outcome == "stuck" and stuck.reason == "event_log"
+    assert pushes(tracker) == []  # unapproved .github/ changes: HEAD stays local
+    assert tracker.labels_on("1") == {"k0:stuck"}
+    comment = tracker.read_work_item("1").comments[-1].body
+    assert "node=stuck" in comment and "HEAD was not pushed" in comment
+    with pytest.raises(RunRefused, match="already ended"):
+        resume(stuck.run, None, root=tmp_path, cfg=full_cfg(), tracker=tracker)
+
+
+def test_a_tracker_failure_on_the_event_log_path_stops_and_resumes(tmp_path):
+    from k0ntrol.tracker import TrackerError
+
+    class LabelFailsOnce(FakeTracker):
+        failed = False
+
+        def ensure_label(self, name):
+            if not self.failed:
+                self.failed = True
+                raise TrackerError("gh label create failed (exit 1): rate limited")
+            super().ensure_label(name)
+
+    tracker, pending = stuck_with_workflow(tmp_path)
+    tracker.__class__ = LabelFailsOnce
+    log = break_event_log(tmp_path)
+
+    with pytest.raises(TrackerError, match="rate limited"):
+        answer(tmp_path, tracker, pending.run, "stop")
+    log.rmdir()
+    done = resume(
+        pending.run, None, root=tmp_path, cfg=full_cfg(), tracker=tracker,
+        init=models_init(),
+    )
+
+    assert done.outcome == "stuck" and done.reason == "event_log"
+    assert done.node == "validator"  # the limited node, not the pause
+    assert tracker.labels_on("1") == {"k0:stuck"}
+    comments = [
+        c for c in tracker.read_work_item("1").comments if "node=stuck" in c.body
+    ]
+    assert len(comments) == 1
+    assert "- node: validator" in comments[0].body
+    assert "attempts 2/2" in comments[0].body  # the limit the run was held at
+    assert "$ " in comments[0].body  # the tail of the last failing output
+
+
+def test_resuming_with_the_log_still_broken_picks_the_stuck_effects_up(tmp_path):
+    from k0ntrol.tracker import TrackerError
+
+    class LabelFailsOnce(FakeTracker):
+        failed = False
+
+        def ensure_label(self, name):
+            if not self.failed:
+                self.failed = True
+                raise TrackerError("gh label create failed (exit 1): rate limited")
+            super().ensure_label(name)
+
+    tracker, pending = stuck_with_workflow(tmp_path)
+    tracker.__class__ = LabelFailsOnce
+    break_event_log(tmp_path)
+    with pytest.raises(TrackerError):
+        answer(tmp_path, tracker, pending.run, "stop")
+    commits = git_log(tmp_path)
+
+    done = resume(
+        pending.run, None, root=tmp_path, cfg=full_cfg(), tracker=tracker,
+        init=models_init(),
+    )
+
+    assert done.outcome == "stuck" and done.reason == "event_log"
+    assert done.node == "validator"
+    assert tracker.labels_on("1") == {"k0:stuck"}
+    assert git_log(tmp_path) == commits  # the wip commit is not repeated
+
+
+def git_log(root):
+    from test_workflow_full import git
+
+    return git(root, "log", "--format=%s")

@@ -12,9 +12,10 @@ survives the process dying: a later ``resume`` compiles a fresh graph on
 the same DB and picks up at the gate.
 
 One run per checkout (ADR 0007): any unfinished checkpoint thread refuses
-a second ``/fast`` with a git-worktree hint. A second ``/full`` gets the
-unfinished run back as ``Unfinished`` (#46): the REPL asks whether to
-resume it, and ``abandon`` drops its checkpoint thread on a ``n``.
+a second ``/fast`` with a git-worktree hint. A ``/full #<n>`` for the open
+run's own work item gets it back as ``Unfinished`` (#46): the REPL asks
+whether to resume it, and ``abandon`` drops its checkpoint thread on a
+``n``. Any other second run is refused.
 """
 
 import os
@@ -139,7 +140,7 @@ def start(
     Refuses — ``RunRefused`` — on bad usage, a missing tracker or work
     item, an untrusted issue body, a dirty tree (``.k0-mem/`` ignored),
     failed doctor checks, a failed rescan or (for ``/fast``) another open
-    run. ``/full`` answers an open run with ``Unfinished`` instead.
+    run. ``/full #<n>`` answers an open run for item ``n`` with ``Unfinished``.
     """
     if kind not in _BUILDERS:
         raise RunRefused(f"unknown run: {kind}")
@@ -151,7 +152,7 @@ def start(
             root=root, cfg=cfg, kind=kind, init=init, tracker=tracker, scan=scan
         )
         graph = _BUILDERS[kind](ctx, saver)
-        busy = _busy_run(saver, graph, kind)
+        busy = _busy_run(saver, graph, kind, input_text, tracker, root)
         if busy is not None:
             return busy
         _doctor_gate(check, cfg, kind, root)
@@ -260,18 +261,39 @@ def _open_checkpoints(root: Path) -> tuple[sqlite3.Connection, SqliteSaver]:
     return conn, SqliteSaver(conn)
 
 
-def _busy_run(saver: SqliteSaver, graph, kind: str) -> Unfinished | None:
+def _busy_run(
+    saver: SqliteSaver, graph, kind: str, input_text: str, tracker, root: Path
+) -> Unfinished | None:
+    """An open run answers ``/full #<n>`` only for its own work item.
+
+    Anything else is refused. The refusals for an ended work item (closed
+    issue, merged or closed PR) come before the resume prompt.
+    """
     busy = open_runs(saver, graph)
     if not busy:
         return None
-    run_id, node = busy[0]
     if kind == "full":
-        return Unfinished(run=run_id, node=node)
+        same = _same_item_run(busy, graph, input_text)
+        if same is not None:
+            _work_item(input_text, tracker, root)
+            return Unfinished(run=same[0], node=same[1])
+    run_id, node = busy[0]
     raise RunRefused(
         f"a run is already open in this checkout: {run_id} at {node}\n"
         "resume it, or run k0 from another git worktree: "
         "git worktree add <path>"
     )
+
+
+def _same_item_run(busy: list[tuple[str, str]], graph, input_text: str):
+    """The open ``(run, node)`` whose work item is ``/full #<n>``'s, if any."""
+    if not input_text.startswith("#"):
+        return None
+    ref = input_text[1:].strip()
+    for run_id, node in busy:
+        if graph.get_state(_thread(run_id)).values.get("item_ref") == ref:
+            return run_id, node
+    return None
 
 
 def _doctor_gate(check: Callable, cfg: dict, kind: str, root: Path) -> None:
@@ -339,11 +361,24 @@ def _log_failed(
     state = graph.get_state(config)
     reason, node = None, None
     if ctx.kind == "full" and state.next:
-        reason, node = "event_log", state.next[0]
-        graph.update_state(config, stuck_update(node), as_node="limit_hit")
-        graph.invoke(None, config=config, durability="sync")
+        state = _stuck_by_log(graph, config, state)
+        reason, node = "event_log", state.values.get("node")
     _trace_finish(ctx, "stuck", session_id, state.values)
     return Outcome(run=run_id, outcome="stuck", reason=reason, node=node)
+
+
+def _stuck_by_log(graph, config: dict, state):
+    """Run the stuck effects; a pass already marked ``event_log`` just continues.
+
+    Resuming a run whose log is still broken lands here again, and must
+    pick the effects up where the failed tracker write left them.
+    """
+    if state.values.get("reason") != "event_log":
+        graph.update_state(
+            config, stuck_update(state.next[0], state.values), as_node="limit_hit"
+        )
+    graph.invoke(None, config=config, durability="sync")
+    return graph.get_state(config)
 
 
 def _full_preflight(kind: str, input_text: str, tracker, root: Path):

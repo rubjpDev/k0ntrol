@@ -1106,6 +1106,9 @@ def test_a_broken_event_log_runs_the_stuck_effects(tmp_path):
     assert tracker.labels_on("1") == {"k0:stuck"}
     comment = tracker.read_work_item("1").comments[-1].body
     assert "event log" in comment and BRANCH in comment
+    assert "- node: review_gate" in comment
+    assert "attempts used:" in comment and "coder 1/2" in comment
+    assert "retries granted: 0" in comment
     change = tracker.read_change(BRANCH)
     assert change.is_draft  # the broken log ended the run before the gate applied
     assert "node=stuck" in tracker.change_comments_on(change.ref)[0]
@@ -1176,6 +1179,30 @@ def test_a_second_full_run_gets_the_unfinished_run_back(tmp_path):
     again = run_full(tmp_path, full_cfg(), tracker, input="#1")
 
     assert again == Unfinished(run=pending.run, node="review_gate")
+
+
+@pytest.mark.parametrize("input_text", ["#2", "something else entirely"])
+def test_an_open_run_for_another_work_item_still_refuses(tmp_path, input_text):
+    tracker, coder, reviewer, pending = full_to_review_gate(tmp_path)
+
+    with pytest.raises(RunRefused, match=f"already open.*{pending.run}"):
+        run_full(tmp_path, full_cfg(), tracker, input=input_text)
+
+
+def test_an_open_run_for_a_closed_issue_is_refused_not_offered(tmp_path):
+    tracker, coder, reviewer, pending = full_to_review_gate(tmp_path)
+    tracker.close_work_item("1")
+
+    with pytest.raises(RunRefused, match="work item #1 is closed"):
+        run_full(tmp_path, full_cfg(), tracker, input="#1")
+
+
+def test_an_open_run_for_a_merged_pr_is_refused_not_offered(tmp_path):
+    tracker, coder, reviewer, pending = full_to_review_gate(tmp_path)
+    tracker.merge_change(tracker.read_change(BRANCH).ref)
+
+    with pytest.raises(RunRefused, match="pull request .* merged"):
+        run_full(tmp_path, full_cfg(), tracker, input="#1")
 
 
 def test_resume_without_an_answer_shows_the_pending_gate_again(tmp_path):
@@ -1277,6 +1304,35 @@ def test_rerun_refuses_a_merged_or_closed_pr(tmp_path, state, word):
     getattr(tracker, f"{'merge' if state == 'merged' else 'close'}_change")(change.ref)
 
     with pytest.raises(RunRefused, match=f"pull request .* {word}"):
+        rerun(tmp_path, tracker)
+
+
+def make_remote_only(root):
+    """As in a fresh clone: the branch lives on ``origin`` and not locally."""
+    git(root, "update-ref", f"refs/remotes/origin/{BRANCH}", "HEAD")
+    git(root, "checkout", "-q", "main")
+    git(root, "branch", "-q", "-D", BRANCH)
+
+
+def test_existing_branch_finds_a_remote_only_branch(tmp_path):
+    from k0ntrol.workflow.change import existing_branch
+
+    git_repo(tmp_path)
+    assert existing_branch(tmp_path, "1") is None
+    git(tmp_path, "update-ref", f"refs/remotes/origin/{BRANCH}", "HEAD")
+
+    assert existing_branch(tmp_path, "1") == BRANCH
+    assert existing_branch(tmp_path, "12") is None
+
+
+@pytest.mark.parametrize("state", ["merged", "closed"])
+def test_rerun_refuses_a_merged_or_closed_pr_on_a_remote_only_branch(tmp_path, state):
+    tracker = done_run(tmp_path)
+    change = tracker.read_change(BRANCH)
+    make_remote_only(tmp_path)
+    getattr(tracker, f"{'merge' if state == 'merged' else 'close'}_change")(change.ref)
+
+    with pytest.raises(RunRefused, match=f"pull request .* {state}"):
         rerun(tmp_path, tracker)
 
 
