@@ -175,7 +175,9 @@ def _run_work(
         answer = _gate_answer(read_line, show, result)
         if answer is None:
             return
-        result = _try_resume(result, answer, show=show, root=root, config=config, resume=resume)
+        result = _try_resume(
+            result, answer, show=show, root=root, config=config, resume=resume
+        )
         if result is None:
             return
     show(_outcome_text(result))
@@ -235,7 +237,15 @@ def _try_start(kind, task, *, show, root, config, start):
         return None
 
 
-def _try_resume(result: Pending | Unfinished, answer: str | None, *, show, root, config, resume):
+def _try_resume(
+    result: Pending | Unfinished,
+    answer: str | None,
+    *,
+    show,
+    root,
+    config,
+    resume,
+):
     try:
         return resume(result.run, answer, root=root, cfg=config, write=show)
     except RunRefused as error:
