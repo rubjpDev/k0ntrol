@@ -22,6 +22,7 @@ it to SPEC. Every tracker side effect is its own node, marker-idempotent
 with a round suffix on repasses (carrier contract, #13).
 """
 
+import ast
 import re
 from collections.abc import Callable
 from datetime import UTC, datetime
@@ -596,19 +597,25 @@ def change_body(ctx: RunContext, state: dict) -> str:
     return "\n".join(lines)
 
 
-_TEST_DEF = re.compile(r"^def (test_\w+)", re.MULTILINE)
-
-
 def _test_names(root: Path, files: list[str]) -> list[str]:
     """The test functions TESTER wrote, as ``path::test_name``."""
     names = []
     for path in files:
         file = root / path
         if file.is_file():
-            names += [
-                f"{path}::{name}"
-                for name in _TEST_DEF.findall(file.read_text(encoding="utf-8"))
-            ]
+            tree = ast.parse(file.read_text(encoding="utf-8"))
+            names += _test_nodes(tree.body, path)
+    return names
+
+
+def _test_nodes(nodes: list[ast.stmt], prefix: str) -> list[str]:
+    names = []
+    for node in nodes:
+        if isinstance(node, ast.ClassDef) and node.name.startswith("Test"):
+            names += _test_nodes(node.body, f"{prefix}::{node.name}")
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            if node.name.startswith("test_"):
+                names.append(f"{prefix}::{node.name}")
     return names
 
 

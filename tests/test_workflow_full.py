@@ -16,10 +16,36 @@ from langchain_core.messages import AIMessage
 
 from fakes import FakeChatModel, FakeTracker, cfg_with
 from k0ntrol import __version__
+from k0ntrol.events import EventWriter
 from k0ntrol.workflow import Outcome, Pending, RunRefused, resume, start
+from k0ntrol.workflow.context import RunContext
+from k0ntrol.workflow.full import change_body
 from test_langfuse import _tracing
 
 TASK = "add a calc module that answers 42"
+
+
+@pytest.mark.parametrize("source,names", [
+    ("def test_plain():\n    pass\n", ["test_plain"]),
+    ("class TestAnswer:\n    def test_answer(self):\n        pass\n",
+     ["TestAnswer::test_answer"]),
+    ("async def test_async():\n    pass\n", ["test_async"]),
+    ("class TestAsync:\n    async def test_answer(self):\n        pass\n",
+     ["TestAsync::test_answer"]),
+    ("", []),
+    ("def helper():\n    pass\n", []),
+])
+def test_change_body_names_class_and_async_tests(tmp_path, source, names):
+    (tmp_path / "test_answer.py").write_text(source, encoding="utf-8")
+    ctx = RunContext(root=tmp_path, cfg={}, kind="full")
+    ctx.bind(EventWriter(tmp_path / "events.jsonl", run="r"))
+    body = change_body(ctx, {
+        "item_ref": "1", "test_files": ["test_answer.py"],
+        "brief": {"acceptance_criteria": ["answer is correct"]},
+    })
+    for name in names:
+        assert f"test_answer.py::{name}" in body
+    assert ("(no tests recorded)" in body) == (not names)
 
 
 def test_full_public_functions_have_complete_annotations():
