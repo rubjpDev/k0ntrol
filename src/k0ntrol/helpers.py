@@ -34,17 +34,43 @@ def helper_invoker(
     config: dict | None = None,
 ) -> Invoke:
     """A ``prompt -> answer`` one-shot call to helper ``name``'s model."""
+    caller = _helper_caller(cfg, name, init=init, config=config)
+    return lambda prompt: _text(caller(prompt))
+
+
+def structured_helper_invoker(
+    cfg: dict | None,
+    name: str,
+    schema: dict,
+    *,
+    init: Callable = init_chat_model,
+    config: dict | None = None,
+) -> Callable[[str], dict]:
+    """A ``prompt -> dict`` call to helper ``name``'s model, structured output."""
+    return _helper_caller(cfg, name, init=init, config=config, schema=schema)
+
+
+def _helper_caller(
+    cfg: dict | None,
+    name: str,
+    *,
+    init: Callable,
+    config: dict | None,
+    schema: dict | None = None,
+) -> Callable[[str], object]:
     cache: dict = {}
 
-    def invoke(prompt: str) -> str:
+    def invoke(prompt: str) -> object:
         if "model" not in cache:
             cache["entry"] = _helper_entry(cfg, name)
-            cache["model"] = build_chat_model(cfg or {}, cache["entry"], init=init)
-        reply = cache["model"].invoke(
+            model = build_chat_model(cfg or {}, cache["entry"], init=init)
+            if schema is not None:
+                model = model.with_structured_output(schema)
+            cache["model"] = model
+        return cache["model"].invoke(
             [HumanMessage(prompt)],
             config=_call_config(name, cache["entry"], config),
         )
-        return _text(reply)
 
     return invoke
 

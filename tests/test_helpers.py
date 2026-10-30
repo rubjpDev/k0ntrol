@@ -13,7 +13,7 @@ from langchain_core.messages import AIMessage
 
 from fakes import FakeChatModel, cfg_with, recording_init
 from k0ntrol.events import EventWriter, K0EventHandler
-from k0ntrol.helpers import helper_invoker
+from k0ntrol.helpers import helper_invoker, structured_helper_invoker
 from k0ntrol.tools.errors import ToolError
 
 
@@ -98,6 +98,69 @@ def test_helper_call_clears_agent_metadata_it_inherits(tmp_path):
     assert "agent" not in event
     assert "effort" not in event
     assert "attempt" not in event
+
+
+_REFLECT_SCHEMA = {
+    "title": "reflect",
+    "type": "object",
+    "properties": {
+        "facts": {"type": "array", "items": {"type": "string"}},
+        "mem": {"type": "array", "items": {"type": "string"}},
+    },
+    "required": ["facts", "mem"],
+}
+
+
+def test_structured_helper_invoker_returns_parsed_output():
+    model = FakeChatModel(
+        messages=[
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "reflect",
+                        "args": {"facts": ["f1"], "mem": ["m1"]},
+                        "id": "c1",
+                    }
+                ],
+            )
+        ]
+    )
+    cfg = cfg_with(helpers={"reflect": {"provider": "anthropic", "model": "m"}})
+    invoke = structured_helper_invoker(cfg, "reflect", _REFLECT_SCHEMA, init=_init(model))
+
+    assert invoke("the transcript") == {"facts": ["f1"], "mem": ["m1"]}
+    assert model.invocations[0][-1].content == "the transcript"
+
+
+def test_structured_helper_invoker_emits_a_model_event(tmp_path):
+    events_path = tmp_path / "events.jsonl"
+    writer = EventWriter(events_path, run="run-9", mask=[])
+    model = FakeChatModel(
+        messages=[
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {"name": "reflect", "args": {"facts": [], "mem": []}, "id": "c1"}
+                ],
+            )
+        ]
+    )
+    cfg = cfg_with(helpers={"reflect": {"provider": "anthropic", "model": "m"}})
+    invoke = structured_helper_invoker(
+        cfg,
+        "reflect",
+        _REFLECT_SCHEMA,
+        init=_init(model),
+        config={"callbacks": [K0EventHandler(writer)]},
+    )
+
+    invoke("prompt")
+
+    (event,) = [json.loads(line) for line in events_path.read_text().splitlines()]
+    assert event["kind"] == "model"
+    assert event["helper"] == "reflect"
+    assert event["run"] == "run-9"
 
 
 def test_helper_call_keeps_the_helpers_own_effort(tmp_path):

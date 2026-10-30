@@ -1,10 +1,30 @@
-"""Harness step that reflects a session transcript into session memory."""
+"""The reflect helper: distills a session transcript into session memory.
+
+``run_reflect`` turns one slice of the session transcript — everything
+written since the last reflect, marked by a byte ``offset`` — into session
+facts and pending ``Mem.md`` proposals through the ``reflect`` helper's
+structured output. ``Reflector`` owns the offset and the background
+threads: one fire per run outcome and one at ``/quit`` for pending ``/ask``
+turns, never a graph node, so it is never replayed on resume and never
+fails a run.
+"""
 
 from __future__ import annotations
 
-from collections.abc import Callable
+import threading
+from collections.abc import Callable, Mapping
 from pathlib import Path
 
+from langchain.chat_models import init_chat_model
+
+from k0ntrol.events import (
+    EventWriter,
+    K0EventHandler,
+    ProgressRenderer,
+    events_path,
+    new_chat_id,
+)
+from k0ntrol.helpers import structured_helper_invoker
 from k0ntrol.memory.session import (
     add_fact,
     add_mem_proposal,
@@ -13,8 +33,28 @@ from k0ntrol.memory.session import (
     list_pending_mem_proposals,
 )
 
-Invoke = Callable[[str], str]
+Invoke = Callable[[str], Mapping]
 MEM_RELATIVE = Path(".k0-mem") / "General_mem" / "Mem.md"
+
+# The reflect helper's structured output shape (with_structured_output).
+REFLECT_SCHEMA = {
+    "title": "reflect",
+    "description": "Facts and Mem.md proposals distilled from a session transcript.",
+    "type": "object",
+    "properties": {
+        "facts": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "session facts worth remembering",
+        },
+        "mem": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "project-wide Mem.md bullet proposals",
+        },
+    },
+    "required": ["facts", "mem"],
+}
 
 
 def run_reflect(
@@ -22,14 +62,23 @@ def run_reflect(
     root: Path,
     invoke: Invoke,
     transcript: Path | None = None,
+    offset: int = 0,
+    end: int | None = None,
 ) -> None:
     """Invoke the reflect helper; store facts and pending Mem.md proposals."""
-    raw = invoke(_reflect_prompt(root, transcript))
-    facts, mems = _parse_reflect(raw)
-    for body in facts:
+    raw = invoke(_reflect_prompt(root, transcript, offset, end))
+    for body in _output_bodies(raw, "facts"):
         add_fact(root, body)
-    for body in mems:
+    for body in _output_bodies(raw, "mem"):
         add_mem_proposal(root, body)
+
+
+def _output_bodies(raw: object, key: str) -> list[str]:
+    """The helper's string list under ``key``; anything else is ignored."""
+    values = raw.get(key) if isinstance(raw, Mapping) else None
+    if not isinstance(values, list):
+        return []
+    return [value.strip() for value in values if isinstance(value, str) and value.strip()]
 
 
 def offer_mem_proposals(
@@ -65,8 +114,14 @@ def _append_mem(root: Path, body: str) -> None:
     path.write_text(f"{existing}{prefix}- {body}\n", encoding="utf-8")
 
 
-def _reflect_prompt(root: Path, transcript: Path | None) -> str:
-    sections = ["Session transcript:\n" + (_transcript_text(transcript) or "(empty)")]
+def _reflect_prompt(root: Path, transcript: Path | None, offset: int, end: int | None) -> str:
+    sections = [
+        "You are the reflect helper. Distill this part of the session "
+        "transcript into durable session facts and, only where a fact is "
+        "worth keeping project-wide, Mem.md bullet proposals.\n"
+        "\nSession transcript:\n"
+        + (_transcript_text(transcript, offset, end) or "(empty)")
+    ]
     decided = _decided_mem_prompt(root)
     if decided:
         sections.append(decided)
@@ -82,32 +137,130 @@ def _decided_mem_prompt(root: Path) -> str:
     )
 
 
-def _transcript_text(transcript: Path | None) -> str:
+def _transcript_text(transcript: Path | None, offset: int, end: int | None) -> str:
     if transcript is None or not transcript.is_file():
         return ""
-    return transcript.read_text(encoding="utf-8")
+    # Bytes, then a lossy decode: the offset can land mid-codepoint when a
+    # reflect fired while the session was still writing the transcript.
+    with transcript.open("rb") as file:
+        file.seek(offset)
+        size = -1 if end is None else max(0, end - offset)
+        return file.read(size).decode("utf-8", errors="replace")
 
 
-def _parse_reflect(raw: str) -> tuple[list[str], list[str]]:
-    facts: list[str] = []
-    mems: list[str] = []
-    for line in raw.splitlines():
-        _append_parsed(line, facts, mems)
-    return facts, mems
+class Reflector:
+    """Reflects one session transcript on background threads.
+
+    ``after_run`` fires once per run outcome (``done``/``stuck``/``rejected``),
+    ``finish`` fires once for ``/ask`` turns pending since the last reflect
+    and then waits — ``/quit`` never returns while a reflect is running.
+    The byte ``offset`` marks where the last fire's input ended, so each
+    reflect sees only the transcript written since the one before and is
+    never replayed on resume. Reflect is not a graph node: it cannot delay
+    an outcome, and a failure shows one line instead of failing the run.
+    """
+
+    def __init__(
+        self,
+        *,
+        root: Path,
+        transcript: Path,
+        cfg: dict,
+        init: Callable = init_chat_model,
+        write: Callable[[str], None] | None = None,
+        reflect: Callable = run_reflect,
+        make_invoke: Callable[[K0EventHandler], Invoke] | None = None,
+    ) -> None:
+        self._root = root
+        self._transcript = transcript
+        self._write = write
+        self._reflect = reflect
+        self._threads: list[threading.Thread] = []
+        self._offset = 0
+        self._ask_turns = 0
+        self._cfg = cfg
+        self._init = init
+        self._make_invoke = make_invoke or self._reflect_invoker
+        self._lock = threading.Lock()
+
+    def ask_turn(self) -> None:
+        """One ``/ask`` exchange happened since the last reflect check."""
+        self._ask_turns += 1
+
+    def after_run(self, run_id: str) -> None:
+        """Fire a background reflect for an ended run; never blocks."""
+        self._fire(run=run_id)
+
+    def finish(self) -> None:
+        """``/quit``: reflect pending ``/ask`` turns once, then wait."""
+        self._wait()
+        if self._ask_turns and self._has_new_text():
+            self._fire(chat=new_chat_id())
+            self._wait()
+
+    def _fire(self, *, run: str | None = None, chat: str | None = None) -> None:
+        offset = self._offset
+        self._offset = _transcript_size(self._transcript)
+        self._ask_turns = 0
+        thread = threading.Thread(
+            target=self._run, args=(offset, self._offset, run, chat), daemon=True, name="k0-reflect"
+        )
+        self._threads.append(thread)
+        thread.start()
+
+    def _run(self, offset: int, end: int, run: str | None, chat: str | None) -> None:
+        try:
+            handler = K0EventHandler(
+                EventWriter(
+                    events_path(self._root),
+                    run=run,
+                    chat=chat,
+                    progress=self._progress(),
+                )
+            )
+            invoke = self._make_invoke(handler)
+            # One reflect at a time: session.sqlite has no writer queue.
+            with self._lock:
+                self._reflect(
+                    root=self._root,
+                    invoke=invoke,
+                    transcript=self._transcript,
+                    offset=offset,
+                    end=end,
+                )
+        except Exception as error:
+            if self._write is not None:
+                self._write(f"reflect failed: {_short(error)}")
+
+    def _progress(self) -> ProgressRenderer | None:
+        if self._write is None:
+            return None
+        return ProgressRenderer(self._write)
+
+    def _reflect_invoker(self, handler: K0EventHandler) -> Invoke:
+        return structured_helper_invoker(
+            self._cfg,
+            "reflect",
+            REFLECT_SCHEMA,
+            init=self._init,
+            config={"callbacks": [handler]},
+        )
+
+    def _has_new_text(self) -> bool:
+        return self._offset < _transcript_size(self._transcript)
+
+    def _wait(self) -> None:
+        for thread in self._threads:
+            thread.join()
+        self._threads = []
 
 
-def _append_parsed(line: str, facts: list[str], mems: list[str]) -> None:
-    stripped = line.strip()
-    lower = stripped.lower()
-    for prefix, bucket in (("fact:", facts), ("mem:", mems)):
-        if lower.startswith(prefix):
-            _append_value(bucket, stripped)
-            return
+def _transcript_size(transcript: Path) -> int:
+    try:
+        return transcript.stat().st_size
+    except OSError:
+        return 0
 
 
-def _append_value(bucket: list[str], stripped: str) -> None:
-    text = stripped.split(":", 1)[1].strip()
-    if text.startswith("- "):
-        text = text[2:].strip()
-    if text:
-        bucket.append(text)
+def _short(error: BaseException) -> str:
+    return (str(error) or type(error).__name__)[:200]

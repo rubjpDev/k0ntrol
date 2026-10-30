@@ -1,5 +1,17 @@
+import json
+import threading
+from pathlib import Path
+
+from langchain_core.messages import AIMessage
+
+from fakes import FakeChatModel, cfg_with
 from k0ntrol.memory.layout import MEM, RULES
-from k0ntrol.memory.reflect import apply_mem_decision, offer_mem_proposals, run_reflect
+from k0ntrol.memory.reflect import (
+    Reflector,
+    apply_mem_decision,
+    offer_mem_proposals,
+    run_reflect,
+)
 from k0ntrol.memory.session import (
     add_mem_proposal,
     list_facts,
@@ -15,11 +27,41 @@ def test_run_reflect_stores_facts_from_the_helper_reply(tmp_path):
 
     def fake_invoke(prompt):
         seen["prompt"] = prompt
-        return "fact: checkout uses sqlite\nepisode: asked how checkout works\n"
+        return {"facts": ["checkout uses sqlite"], "mem": []}
 
     run_reflect(root=tmp_path, invoke=fake_invoke, transcript=transcript)
     assert "how does checkout work" in seen["prompt"]
     assert [item["body"] for item in list_facts(tmp_path)] == ["checkout uses sqlite"]
+
+
+def test_run_reflect_reads_the_transcript_from_the_offset(tmp_path):
+    transcript = tmp_path / "session.txt"
+    transcript.write_text("old turns\nnew turns\n", encoding="utf-8")
+    seen = {}
+
+    def fake_invoke(prompt):
+        seen["prompt"] = prompt
+        return {"facts": [], "mem": []}
+
+    run_reflect(
+        root=tmp_path,
+        invoke=fake_invoke,
+        transcript=transcript,
+        offset=len("old turns\n"),
+    )
+    assert "new turns" in seen["prompt"]
+    assert "old turns" not in seen["prompt"]
+
+
+def test_run_reflect_ignores_missing_or_wrong_shaped_output(tmp_path):
+    def fake_invoke(prompt):
+        return {"facts": "not a list", "mem": [{"nested": True}, "  ", "keep me"]}
+
+    run_reflect(root=tmp_path, invoke=fake_invoke)
+    assert list_facts(tmp_path) == []
+    assert list_pending_mem_proposals(tmp_path) == [
+        {"id": 1, "body": "keep me"}
+    ]
 
 
 def test_run_reflect_queues_mem_proposals_without_writing_files(tmp_path):
@@ -33,10 +75,10 @@ def test_run_reflect_queues_mem_proposals_without_writing_files(tmp_path):
     topology.write_text("human owned\n", encoding="utf-8")
 
     def fake_invoke(prompt):
-        return (
-            "fact: checkout uses sqlite\n"
-            "mem: Prefer sqlite for checkout state\n"
-        )
+        return {
+            "facts": ["checkout uses sqlite"],
+            "mem": ["Prefer sqlite for checkout state"],
+        }
 
     run_reflect(root=tmp_path, invoke=fake_invoke)
     assert list_pending_mem_proposals(tmp_path) == [
@@ -55,7 +97,7 @@ def test_run_reflect_does_not_requeue_decided_mem_proposals(tmp_path):
 
     def fake_invoke(prompt):
         seen["prompt"] = prompt
-        return "mem: Prefer sqlite for checkout state\n"
+        return {"facts": [], "mem": ["Prefer sqlite for checkout state"]}
 
     run_reflect(root=tmp_path, invoke=fake_invoke)
     assert list_pending_mem_proposals(tmp_path) == []
@@ -102,3 +144,253 @@ def test_apply_mem_decision_appends_after_unterminated_text(tmp_path):
     add_mem_proposal(tmp_path, "fact two")
     apply_mem_decision(tmp_path, 1, True)
     assert mem.read_text(encoding="utf-8") == "# Mem\nno newline\n- fact two\n"
+
+
+# --- Reflector: the background scheduler --------------------------------------
+
+
+def _transcript(root: Path, text: str = "") -> Path:
+    path = root / ".k0-mem" / "sessions" / "s.txt"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+    return path
+
+
+def _events(root: Path) -> list[dict]:
+    path = root / ".k0-mem" / "events.jsonl"
+    if not path.exists():
+        return []
+    return [json.loads(line) for line in path.read_text().splitlines()]
+
+
+def _recording_reflect(calls, body=lambda **_kw: None):
+    def reflect(**kwargs):
+        calls.append(kwargs)
+        body(**kwargs)
+
+    return reflect
+
+
+def test_delayed_worker_reads_only_dispatched_range(tmp_path):
+    transcript = _transcript(tmp_path, "first run\n")
+    entered = threading.Event()
+    release = threading.Event()
+    prompts = []
+
+    def make_invoke(handler):
+        entered.set()
+        assert release.wait(5)
+        return lambda prompt: (prompts.append(prompt) or {"facts": [], "mem": []})
+
+    reflector = Reflector(
+        root=tmp_path, transcript=transcript, cfg={}, make_invoke=make_invoke,
+    )
+    reflector.after_run("run-1")
+    try:
+        assert entered.wait(5)
+        with transcript.open("a") as file:
+            file.write("later ask\n")
+        reflector.ask_turn()
+    finally:
+        release.set()
+        reflector.finish()
+    assert len(prompts) == 2
+    assert "first run" in prompts[0]
+    assert "later ask" not in prompts[0]
+    assert "later ask" in prompts[1]
+    assert "first run" not in prompts[1]
+
+
+def test_after_run_fires_reflect_on_a_background_thread(tmp_path):
+    transcript = _transcript(tmp_path, "turn one\n")
+    calls = []
+    reflector = Reflector(
+        root=tmp_path,
+        transcript=transcript,
+        cfg={},
+        reflect=_recording_reflect(calls),
+    )
+    reflector.after_run("run-1")
+    reflector.finish()
+    assert len(calls) == 1
+    assert calls[0]["transcript"] == transcript
+    assert calls[0]["offset"] == 0
+
+
+def test_after_run_returns_before_reflect_finishes(tmp_path):
+    entered = threading.Event()
+    release = threading.Event()
+
+    def slow(**_kw):
+        entered.set()
+        assert release.wait(5)
+
+    reflector = Reflector(
+        root=tmp_path,
+        transcript=_transcript(tmp_path, "x\n"),
+        cfg={},
+        reflect=slow,
+    )
+    reflector.after_run("run-1")  # returns at once
+    assert entered.wait(5)
+
+
+def test_finish_waits_for_a_running_reflect(tmp_path):
+    entered = threading.Event()
+    release = threading.Event()
+    done = []
+
+    def slow(**_kw):
+        entered.set()
+        assert release.wait(5)
+
+    reflector = Reflector(
+        root=tmp_path,
+        transcript=_transcript(tmp_path, "x\n"),
+        cfg={},
+        reflect=slow,
+    )
+    reflector.after_run("run-1")
+    assert entered.wait(5)
+    finisher = threading.Thread(target=lambda: done.append(reflector.finish()))
+    finisher.start()
+    assert not done
+    release.set()
+    finisher.join(5)
+    assert done == [None]
+
+
+def test_finish_reflects_ask_turns_once(tmp_path):
+    calls = []
+    reflector = Reflector(
+        root=tmp_path,
+        transcript=_transcript(tmp_path, "/ask what\nanswer\n"),
+        cfg={},
+        reflect=_recording_reflect(calls),
+    )
+    reflector.ask_turn()
+    reflector.finish()
+    assert len(calls) == 1
+
+
+def test_finish_without_ask_turns_fires_nothing(tmp_path):
+    calls = []
+    reflector = Reflector(
+        root=tmp_path,
+        transcript=_transcript(tmp_path, "banner only\n"),
+        cfg={},
+        reflect=_recording_reflect(calls),
+    )
+    reflector.finish()
+    assert calls == []
+
+
+def test_a_run_reflect_covers_earlier_ask_turns(tmp_path):
+    calls = []
+    reflector = Reflector(
+        root=tmp_path,
+        transcript=_transcript(tmp_path, "/ask one\n/fast two\nrun done\n"),
+        cfg={},
+        reflect=_recording_reflect(calls),
+    )
+    reflector.ask_turn()
+    reflector.after_run("run-1")
+    reflector.finish()
+    # the run's reflect already read the /ask lines; nothing new at /quit
+    assert len(calls) == 1
+
+
+def test_each_reflect_reads_only_what_is_new(tmp_path):
+    transcript = _transcript(tmp_path, "first slice\n")
+    calls = []
+    reflector = Reflector(
+        root=tmp_path,
+        transcript=transcript,
+        cfg={},
+        reflect=_recording_reflect(calls),
+    )
+    reflector.after_run("run-1")
+    reflector.finish()
+    with transcript.open("a", encoding="utf-8") as file:
+        file.write("second slice\n")
+    reflector.ask_turn()
+    reflector.finish()
+    assert len(calls) == 2
+    assert calls[1]["offset"] == len("first slice\n")
+
+
+def test_reflector_model_events_carry_the_run_they_reflect_on(tmp_path):
+    transcript = _transcript(tmp_path, "turn one\n")
+    model = FakeChatModel(
+        messages=[
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "reflect",
+                        "args": {"facts": ["uses sqlite"], "mem": []},
+                        "id": "c1",
+                    }
+                ],
+            )
+        ]
+    )
+    cfg = cfg_with(helpers={"reflect": {"provider": "anthropic", "model": "m"}})
+    reflector = Reflector(
+        root=tmp_path,
+        transcript=transcript,
+        cfg=cfg,
+        init=lambda *a, **k: model,
+    )
+    reflector.after_run("run-42")
+    reflector.finish()
+    (event,) = _events(tmp_path)
+    assert event["kind"] == "model"
+    assert event["helper"] == "reflect"
+    assert event["run"] == "run-42"
+    assert [item["body"] for item in list_facts(tmp_path)] == ["uses sqlite"]
+
+
+def test_finish_reflect_uses_the_chat_scope(tmp_path):
+    transcript = _transcript(tmp_path, "/ask q\na\n")
+    model = FakeChatModel(
+        messages=[
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {"name": "reflect", "args": {"facts": [], "mem": []}, "id": "c1"}
+                ],
+            )
+        ]
+    )
+    cfg = cfg_with(helpers={"reflect": {"provider": "anthropic", "model": "m"}})
+    reflector = Reflector(
+        root=tmp_path,
+        transcript=transcript,
+        cfg=cfg,
+        init=lambda *a, **k: model,
+    )
+    reflector.ask_turn()
+    reflector.finish()
+    (event,) = _events(tmp_path)
+    assert event["kind"] == "model"
+    assert "chat" in event
+    assert "run" not in event
+
+
+def test_a_failed_reflect_never_raises_and_reports_once(tmp_path):
+    shown = []
+
+    def boom(**_kw):
+        raise RuntimeError("kaput")
+
+    reflector = Reflector(
+        root=tmp_path,
+        transcript=_transcript(tmp_path, "x\n"),
+        cfg={},
+        reflect=boom,
+        write=shown.append,
+    )
+    reflector.after_run("run-1")
+    reflector.finish()  # no exception
+    assert shown == ["reflect failed: kaput"]

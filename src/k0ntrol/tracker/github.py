@@ -61,6 +61,20 @@ class GhTracker:
         out = self._run(["gh", "issue", "create", "--title", title, "--body", body])
         return self.read_work_item(_number_from_url(out.stdout))
 
+    def ensure_work_item(self, title: str, body: str, *, run: str, node: str) -> WorkItem:
+        marker = comment_marker(run, node)
+        for issue in self._work_items():
+            if "pull_request" not in issue and marker in (issue.get("body") or ""):
+                return self.read_work_item(str(issue["number"]))
+        return self.create_work_item(title, f"{body}\n\n{marker}")
+
+    def _work_items(self) -> list[dict]:
+        pages = self._gh_json([
+            "gh", "api", "--paginate", "--slurp",
+            "repos/{owner}/{repo}/issues?state=all&per_page=100",
+        ])
+        return [issue for page in pages for issue in page]
+
     def comment_work_item(self, ref: str, body: str, *, run: str, node: str) -> None:
         marker = comment_marker(run, node)
         if self.find_comment(ref, marker) is not None:

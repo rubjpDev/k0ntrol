@@ -105,7 +105,7 @@ def test_start_without_a_task_is_refused(tmp_path):
 
 def test_unknown_run_kind_is_refused(tmp_path):
     with pytest.raises(RunRefused, match="unknown"):
-        start("full", "add a feature", root=tmp_path, cfg=fast_cfg())
+        start("wat", "add a feature", root=tmp_path, cfg=fast_cfg())
 
 
 def test_doctor_errors_refuse_the_run(tmp_path):
@@ -204,8 +204,9 @@ def test_events_record_the_run(tmp_path):
 # --- loops and limits ----------------------------------------------------------
 
 
-def test_tests_that_pass_send_tester_back_until_stuck(tmp_path):
-    """Tests that never go red exhaust max_attempts; the run ends stuck."""
+def test_tests_that_pass_send_tester_back_until_limit_hit(tmp_path):
+    """Tests that never go red exhaust max_attempts; the run pauses at
+    limit_hit, and `stop` ends it stuck (issue #20, ticket #42)."""
     git_repo(tmp_path)
     always_green_tests = "def test_ok():\n    assert True\n"
     tester = scripted_tester(
@@ -216,15 +217,20 @@ def test_tests_that_pass_send_tester_back_until_stuck(tmp_path):
     )
     coder = scripted_tester()
 
-    outcome = run_fast(tmp_path, fast_cfg(max_attempts=2), tester, coder)
+    result = run_fast(tmp_path, fast_cfg(max_attempts=2), tester, coder)
+
+    assert isinstance(result, Pending)
+    assert result.gate == "limit_hit"
+    # TESTER ran twice (two model calls each), CODER never ran
+    assert len(tester.invocations) == 4
+    assert coder.invocations == []
+
+    outcome = resume(result.run, "stop", root=tmp_path, cfg=fast_cfg(), init=models_init())
 
     assert isinstance(outcome, Outcome)
     assert outcome.outcome == "stuck"
     assert outcome.reason == "max_attempts"
     assert outcome.node == "red_check"
-    # TESTER ran twice (two model calls each), CODER never ran
-    assert len(tester.invocations) == 4
-    assert coder.invocations == []
 
 
 def test_validator_red_sends_coder_back_with_raw_output(tmp_path):
@@ -248,7 +254,7 @@ def test_validator_red_sends_coder_back_with_raw_output(tmp_path):
     assert len(coder.invocations) == 3
 
 
-def test_validator_red_exhausts_attempts_to_stuck(tmp_path):
+def test_validator_red_exhausts_attempts_to_limit_hit(tmp_path):
     git_repo(tmp_path)
     tester = scripted_tester(
         write_call("tests/test_calc.py", TEST_SRC), AIMessage(content="tests")
@@ -257,31 +263,44 @@ def test_validator_red_exhausts_attempts_to_stuck(tmp_path):
         AIMessage(content="nothing"), AIMessage(content="still nothing")
     )
 
-    outcome = run_fast(tmp_path, fast_cfg(max_attempts=2), tester, coder)
+    result = run_fast(tmp_path, fast_cfg(max_attempts=2), tester, coder)
+
+    assert isinstance(result, Pending)
+    assert result.gate == "limit_hit"
+
+    outcome = resume(result.run, "stop", root=tmp_path, cfg=fast_cfg(), init=models_init())
 
     assert outcome.outcome == "stuck"
     assert outcome.reason == "max_attempts"
     assert outcome.node == "validator"
 
 
-def test_model_call_limit_ends_the_run_stuck(tmp_path):
-    git_repo(tmp_path)
-    # Every reply wants another tool call: the model-call limit must fire.
-    tester = scripted_tester(
-        *[
-            AIMessage(
-                content="",
-                tool_calls=[
-                    {"name": "read_file", "args": {"path": "README.md"}, "id": f"t{i}"}
-                ],
-            )
-            for i in range(5)
-        ]
+def read_call(path="README.md", call_id="r1"):
+    return AIMessage(
+        content="",
+        tool_calls=[{"name": "read_file", "args": {"path": path}, "id": call_id}],
     )
+
+
+def looping_model(calls=8):
+    """A model that always wants another tool call: hits any call limit."""
+    return scripted_tester(*[read_call(call_id=f"r{i}") for i in range(calls)])
+
+
+def test_model_call_limit_pauses_at_limit_hit(tmp_path):
+    git_repo(tmp_path)
+    tester = looping_model()
     cfg = fast_cfg()
     cfg["agents"]["tester"]["model_calls"] = 3
 
-    outcome = run_fast(tmp_path, cfg, tester)
+    result = run_fast(tmp_path, cfg, tester)
+
+    assert isinstance(result, Pending)
+    assert result.gate == "limit_hit"
+    assert result.answers == ("retry", "stop")
+    assert "model calls 3/3" in result.question + result.detail
+
+    outcome = resume(result.run, "stop", root=tmp_path, cfg=cfg, init=models_init())
 
     assert outcome.outcome == "stuck"
     assert outcome.reason == "model_call_limit"
@@ -392,3 +411,207 @@ def test_a_broken_event_log_ends_the_run_stuck(tmp_path):
     outcome = run_fast(tmp_path, fast_cfg(), tester, coder)
 
     assert outcome.outcome == "stuck"
+
+
+# --- the limit_hit pause (#42) ---------------------------------------------------
+
+
+def test_limit_hit_pending_shows_node_limit_output_and_diff_stat(tmp_path):
+    """The pause shows the node, the limit, the tail of the last failing
+    output and `git diff --stat` (issue #20)."""
+    git_repo(tmp_path)
+    green = "def test_ok():\n    assert True\n"
+    tester = scripted_tester(
+        write_call("tests/test_ok.py", green),
+        AIMessage(content="tests"),
+        write_call("tests/test_ok.py", green, "t2"),
+        AIMessage(content="tests again"),
+    )
+
+    result = run_fast(tmp_path, fast_cfg(max_attempts=2), tester)
+
+    assert isinstance(result, Pending)
+    assert result.gate == "limit_hit"
+    assert "red_check" in result.question
+    assert "attempts 2/2" in result.question + result.detail
+    # tail of the last failing output: the green pytest run
+    assert "passed" in result.detail
+    # git diff --stat: the untracked test file the agent wrote is listed
+    assert "test_ok.py" in result.detail
+
+
+def test_limit_hit_stop_leaves_the_fast_tree_and_writes_events(tmp_path):
+    git_repo(tmp_path)
+    green = "def test_ok():\n    assert True\n"
+    tester = scripted_tester(
+        write_call("tests/test_ok.py", green), AIMessage(content="tests"),
+        write_call("tests/test_ok.py", green, "t2"), AIMessage(content="more"),
+    )
+
+    result = run_fast(tmp_path, fast_cfg(max_attempts=2), tester)
+    assert isinstance(result, Pending)
+
+    outcome = resume(result.run, "stop", root=tmp_path, cfg=fast_cfg(), init=models_init())
+
+    assert outcome.outcome == "stuck"
+    # /fast leaves the working tree exactly as it is: nothing reverted
+    assert (tmp_path / "tests" / "test_ok.py").read_text() == green
+    # one gate event per decision, and run_end carries reason + node
+    gates = [(e.get("gate"), e.get("result")) for e in events(tmp_path) if e["kind"] == "gate"]
+    assert ("limit_hit", "waiting") in gates
+    assert ("limit_hit", "stop") in gates
+    end = events(tmp_path)[-1]
+    assert end["kind"] == "run_end"
+    assert end["outcome"] == "stuck"
+    assert end["reason"] == "max_attempts"
+    assert end["node"] == "red_check"
+
+
+def test_limit_hit_retry_reruns_the_node_with_note_tail_and_feedback(tmp_path):
+    git_repo(tmp_path)
+    green = "def test_ok():\n    assert True\n"
+    tester = scripted_tester(
+        write_call("tests/test_ok.py", green), AIMessage(content="tests"),
+        write_call("tests/test_ok.py", green, "t2"), AIMessage(content="more"),
+    )
+
+    result = run_fast(tmp_path, fast_cfg(max_attempts=2), tester)
+    assert isinstance(result, Pending)
+
+    # retry [feedback]: the node reruns on a fresh context — a new model
+    # behind the init seam, the same limit, the counter reset.
+    tester2 = scripted_tester(
+        write_call("tests/test_calc.py", TEST_SRC, "r1"), AIMessage(content="red now")
+    )
+    coder = scripted_tester(write_call("calc.py", CALC_SRC), AIMessage(content="code"))
+    again = resume(
+        result.run,
+        "retry make it fail for real",
+        root=tmp_path,
+        cfg=fast_cfg(),
+        init=models_init(tester2, coder),
+    )
+
+    assert isinstance(again, Pending)
+    assert again.gate == "diff"
+    brief = tester2.invocations[0][-1].content
+    assert "limit" in brief.lower()          # the note that it hit its limit
+    assert "attempts 2/2" in brief           # which limit
+    assert "passed" in brief                 # the output tail
+    assert "make it fail for real" in brief  # the human's feedback
+    # files are kept: the earlier green test file was never reverted
+    assert (tmp_path / "tests" / "test_ok.py").read_text() == green
+    gates = [(e.get("gate"), e.get("result")) for e in events(tmp_path) if e["kind"] == "gate"]
+    assert ("limit_hit", "retry") in gates
+
+
+def test_limit_hit_retries_are_unlimited(tmp_path):
+    git_repo(tmp_path)
+    green = "def test_ok():\n    assert True\n"
+    tester = scripted_tester(
+        write_call("tests/test_ok.py", green), AIMessage(content="tests"),
+        write_call("tests/test_ok.py", green, "t2"), AIMessage(content="more"),
+    )
+
+    first = run_fast(tmp_path, fast_cfg(max_attempts=2), tester)
+    assert isinstance(first, Pending) and first.gate == "limit_hit"
+
+    # a retry that still does not go red pauses again after a fresh
+    # max_attempts, not after fewer (the counter reset)
+    tester2 = scripted_tester(
+        write_call("tests/test_ok.py", green, "r1"), AIMessage(content="one"),
+        write_call("tests/test_ok.py", green, "r2"), AIMessage(content="two"),
+    )
+    second = resume(
+        first.run, "retry", root=tmp_path, cfg=fast_cfg(), init=models_init(tester2)
+    )
+    assert isinstance(second, Pending) and second.gate == "limit_hit"
+    assert len(tester2.invocations) == 4  # two full attempts again
+
+
+def test_model_call_limit_never_runs_the_check_nor_spends_an_attempt(tmp_path):
+    """A model-call limit goes straight to the pause: it never falls
+    through to the red check or VALIDATOR, and it never uses up an
+    attempt (issue #20)."""
+    git_repo(tmp_path)
+    tester = looping_model()
+    cfg = fast_cfg(max_attempts=2)
+    cfg["agents"]["tester"]["model_calls"] = 3
+
+    result = run_fast(tmp_path, cfg, tester)
+    assert isinstance(result, Pending) and result.gate == "limit_hit"
+
+    gates = [(e.get("gate"), e.get("result")) for e in events(tmp_path) if e["kind"] == "gate"]
+    assert not any(gate == "red_check" for gate, _ in gates)
+
+    # retry: TESTER now writes green tests, and it still gets the full
+    # max_attempts loop — the limited run did not spend an attempt
+    green = "def test_ok():\n    assert True\n"
+    tester2 = scripted_tester(
+        write_call("tests/test_ok.py", green, "r1"), AIMessage(content="one"),
+        write_call("tests/test_ok.py", green, "r2"), AIMessage(content="two"),
+    )
+    second = resume(
+        result.run, "retry", root=tmp_path, cfg=cfg, init=models_init(tester2)
+    )
+    assert isinstance(second, Pending) and second.gate == "limit_hit"
+    assert "attempts 2/2" in second.question + second.detail
+    assert len(tester2.invocations) == 4
+
+
+def test_coder_model_call_limit_pauses_at_limit_hit(tmp_path):
+    git_repo(tmp_path)
+    tester = scripted_tester(
+        write_call("tests/test_calc.py", TEST_SRC), AIMessage(content="tests")
+    )
+    coder = looping_model()
+    cfg = fast_cfg()
+    cfg["agents"]["coder"]["model_calls"] = 3
+
+    result = run_fast(tmp_path, cfg, tester, coder)
+
+    assert isinstance(result, Pending)
+    assert result.gate == "limit_hit"
+    assert "coder" in result.question
+    assert "model calls 3/3" in result.question + result.detail
+    # VALIDATOR never ran for the limited CODER
+    gates = [(e.get("gate"), e.get("result")) for e in events(tmp_path) if e["kind"] == "gate"]
+    assert not any(gate == "validator" for gate, _ in gates)
+
+
+def test_limit_hit_quit_resumes_from_a_fresh_process(tmp_path):
+    """Quitting while paused leaves the run resumable, like any gate."""
+    git_repo(tmp_path)
+    green = "def test_ok():\n    assert True\n"
+    tester = scripted_tester(
+        write_call("tests/test_ok.py", green), AIMessage(content="tests"),
+        write_call("tests/test_ok.py", green, "t2"), AIMessage(content="more"),
+    )
+
+    result = run_fast(tmp_path, fast_cfg(max_attempts=2), tester)
+    assert isinstance(result, Pending) and result.gate == "limit_hit"
+
+    # "fresh process": resume builds a new connection and a new graph
+    outcome = resume(result.run, "stop", root=tmp_path, cfg=fast_cfg(), init=models_init())
+    assert outcome.outcome == "stuck"
+
+
+def test_an_unhandled_failure_stops_resumably_and_never_stuck(tmp_path):
+    """Other failures — a provider error here — stop the run so it can
+    resume; they are never `stuck` (no run_end, checkpoint kept)."""
+    git_repo(tmp_path)
+    broken_tester = scripted_tester()  # empty script raises on the call
+
+    with pytest.raises(AssertionError, match="script exhausted"):
+        run_fast(tmp_path, fast_cfg(), broken_tester)
+
+    assert not any(e["kind"] == "run_end" for e in events(tmp_path))
+
+    tester = scripted_tester(
+        write_call("tests/test_calc.py", TEST_SRC), AIMessage(content="tests")
+    )
+    coder = scripted_tester(write_call("calc.py", CALC_SRC), AIMessage(content="code"))
+    run_id = events(tmp_path)[0]["run"]
+    result = resume(run_id, "", root=tmp_path, cfg=fast_cfg(), init=models_init(tester, coder))
+    assert isinstance(result, Pending)
+    assert result.gate == "diff"

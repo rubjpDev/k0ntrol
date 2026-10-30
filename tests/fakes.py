@@ -264,6 +264,13 @@ class FakeTracker:
         self._item_labels[ref] = set()
         return self.read_work_item(ref)
 
+    def ensure_work_item(self, title: str, body: str, *, run: str, node: str) -> WorkItem:
+        marker = comment_marker(run, node)
+        for ref, item in self._items.items():
+            if marker in item["body"]:
+                return self.read_work_item(ref)
+        return self.create_work_item(title, f"{body}\n\n{marker}")
+
     def comment_work_item(self, ref: str, body: str, *, run: str, node: str) -> None:
         marker = comment_marker(run, node)
         self.calls.append(("comment_work_item", ref))
