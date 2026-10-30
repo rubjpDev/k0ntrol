@@ -3,6 +3,7 @@ name: design-variant
 description: Read-only interface designer for the codebase-design design-it-twice pattern. Produces one interface design under the constraint given in the prompt. Use only for one of the parallel design-it-twice sub-agents.
 tools: Read, Grep, Glob, Bash
 model: sonnet
+effort: max
 ---
 
 You design one interface for a module under the design constraint in the prompt. Do not edit files.

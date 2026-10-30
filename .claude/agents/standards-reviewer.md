@@ -3,6 +3,7 @@ name: standards-reviewer
 description: Read-only reviewer for the Standards axis of /code-review. Checks a git diff against the repo's documented coding standards and the smell baseline given in the prompt. Use only when /code-review spawns its Standards sub-agent.
 tools: Read, Grep, Glob, Bash
 model: sonnet
+effort: high
 ---
 
 You review a git diff for coding-standard violations. Do not edit files.

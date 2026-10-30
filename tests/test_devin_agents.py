@@ -89,3 +89,15 @@ def test_code_review_skill_uses_named_profiles() -> None:
     assert "same model as the parent" not in text
     assert "standards-reviewer" in text
     assert "spec-reviewer" in text
+
+
+DEVIN_TO_CLAUDE_EFFORT = {"swe-2-medium": "medium", "swe-2-high": "high", "swe-2-max": "max"}
+
+
+@pytest.mark.parametrize("path", sorted(DEVIN_AGENTS.glob("*.md")), ids=lambda p: p.stem)
+def test_claude_profile_mirrors_devin_tier(path: Path) -> None:
+    devin_fm, _devin_body = parse_frontmatter(path)
+    claude_fm, _claude_body = parse_frontmatter(LEGACY_AGENTS / path.name)
+
+    assert claude_fm["model"] == "sonnet"
+    assert claude_fm["effort"] == DEVIN_TO_CLAUDE_EFFORT[devin_fm["model"]]
