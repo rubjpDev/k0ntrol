@@ -955,4 +955,3 @@ def test_after_redo_the_test_gate_shows_the_new_red_check_output(tmp_path):
     assert isinstance(redo, Pending)
     assert redo.gate == "test"
     assert "No module named 'nonexistent_mod_xyz'" in redo.detail
->>>>>>> origin/spec/33-review-bugfixes
