@@ -218,6 +218,53 @@ def test_after_run_fires_reflect_on_a_background_thread(tmp_path):
     assert calls[0]["offset"] == 0
 
 
+def test_workers_reflect_in_dispatch_order_when_invoker_setup_is_reordered(tmp_path):
+    transcript = _transcript(tmp_path, "first run\n")
+    first_entered = threading.Event()
+    release_first = threading.Event()
+    second_ready = threading.Event()
+    second_invoked = threading.Event()
+    prompts = []
+
+    def make_invoke(handler):
+        if not first_entered.is_set():
+            first_entered.set()
+            assert release_first.wait(5)
+            label = "first"
+        else:
+            label = "second"
+            second_ready.set()
+
+        def invoke(prompt):
+            prompts.append((label, prompt))
+            handler.on_llm_end(None, run_id=label)
+            if label == "second":
+                second_invoked.set()
+            return {"facts": [label], "mem": []}
+
+        return invoke
+
+    reflector = Reflector(
+        root=tmp_path, transcript=transcript, cfg={}, make_invoke=make_invoke,
+    )
+    reflector.after_run("run-A")
+    try:
+        assert first_entered.wait(5)
+        with transcript.open("a", encoding="utf-8") as file:
+            file.write("second run\n")
+        reflector.after_run("run-B")
+        assert second_ready.wait(5)
+        second_invoked.wait(0.3)
+    finally:
+        release_first.set()
+        reflector.finish()
+    assert [label for label, _ in prompts] == ["first", "second"]
+    assert "first run" in prompts[0][1] and "second run" not in prompts[0][1]
+    assert "second run" in prompts[1][1] and "first run" not in prompts[1][1]
+    assert [event["run"] for event in _events(tmp_path)] == ["run-A", "run-B"]
+    assert [item["body"] for item in list_facts(tmp_path)] == ["first", "second"]
+
+
 def test_after_run_returns_before_reflect_finishes(tmp_path):
     entered = threading.Event()
     release = threading.Event()

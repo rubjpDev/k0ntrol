@@ -185,7 +185,8 @@ class Reflector:
         self._cfg = cfg
         self._init = init
         self._make_invoke = make_invoke or self._reflect_invoker
-        self._lock = threading.Lock()
+        self._tail = threading.Event()
+        self._tail.set()
 
     def ask_turn(self) -> None:
         """One ``/ask`` exchange happened since the last reflect check."""
@@ -208,13 +209,20 @@ class Reflector:
     def _fire(self, *, run: str | None = None, chat: str | None = None) -> None:
         self._dispatched = _transcript_size(self._transcript)
         self._ask_turns = 0
+        previous = self._tail
+        self._tail = threading.Event()
         thread = threading.Thread(
-            target=self._run, args=(self._dispatched, run, chat), daemon=True, name="k0-reflect"
+            target=self._run,
+            args=(self._dispatched, run, chat, previous, self._tail),
+            daemon=True, name="k0-reflect",
         )
         self._threads.append(thread)
         thread.start()
 
-    def _run(self, end: int, run: str | None, chat: str | None) -> None:
+    def _run(
+        self, end: int, run: str | None, chat: str | None,
+        previous: threading.Event, completed: threading.Event,
+    ) -> None:
         try:
             handler = K0EventHandler(
                 EventWriter(
@@ -225,22 +233,24 @@ class Reflector:
                 )
             )
             invoke = self._make_invoke(handler)
-            # One reflect at a time: session.sqlite has no writer queue.
-            with self._lock:
-                offset = self._completed
-                if offset >= end:
-                    return
-                self._reflect(
-                    root=self._root,
-                    invoke=invoke,
-                    transcript=self._transcript,
-                    offset=offset,
-                    end=end,
-                )
-                self._completed = end
+            previous.wait()
+            offset = self._completed
+            if offset >= end:
+                return
+            self._reflect(
+                root=self._root,
+                invoke=invoke,
+                transcript=self._transcript,
+                offset=offset,
+                end=end,
+            )
+            self._completed = end
         except Exception as error:
             if self._write is not None:
                 self._write(f"reflect failed: {_short(error)}")
+        finally:
+            previous.wait()
+            completed.set()
 
     def _progress(self) -> ProgressRenderer | None:
         if self._write is None:
