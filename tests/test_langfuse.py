@@ -19,6 +19,7 @@ from langchain_core.messages import AIMessage
 
 from fakes import FakeChatModel, FakeTracker, cfg_with
 from k0ntrol import __version__
+from k0ntrol.events import EventWriter
 from k0ntrol.frontends.ask import answer_ask
 from k0ntrol.langfuse import build_mask, build_trace, langfuse_enabled
 from k0ntrol.providers import Check
@@ -248,6 +249,26 @@ def test_mask_replaces_exact_secret_values_anywhere_in_the_payload():
 
 
 # --- finish and flush -----------------------------------------------------------
+
+def test_mask_includes_known_provider_credentials(monkeypatch, tmp_path):
+    env = {
+        "AWS_BEARER_TOKEN_BEDROCK": "bedrock-bearer-value",
+        "AWS_ACCESS_KEY_ID": "aws-access-value",
+        "AWS_PROFILE": "private-profile-value",
+        "AWS_DEFAULT_PROFILE": "default-profile-value",
+        "GOOGLE_APPLICATION_CREDENTIALS": "/private/credentials.json",
+        "GOOGLE_GENAI_USE_VERTEXAI": "vertex-setting-value",
+        "GOOGLE_CLOUD_PROJECT": "private-project-value",
+    }
+    for name, value in env.items():
+        monkeypatch.setenv(name, value)
+    payload = " ".join(env.values())
+    expected = " ".join(["***"] * len(env))
+    assert build_mask(env)(data=payload) == expected
+    event = EventWriter(tmp_path / "events.jsonl", run="r").emit(
+        "model", err=payload,
+    )
+    assert event["err"] == expected
 
 
 def test_finish_tags_kind_and_outcome_then_flushes(fake_sdk):
