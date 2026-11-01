@@ -118,11 +118,11 @@ def diff_since(root: Path, since: str, path: str) -> str:
     Raises ``DiffError`` when git fails (say ``since`` is missing from the
     repo): a diff that cannot be computed is never an empty diff.
     """
-    done = _git(root, "diff", since, "HEAD", "--", path)
-    if done.returncode != 0:
-        detail = done.stderr.strip() or f"git diff exited {done.returncode}"
+    proc = _git(root, "diff", since, "HEAD", "--", path)
+    if proc.returncode != 0:
+        detail = proc.stderr.strip() or f"git diff exited {proc.returncode}"
         raise DiffError(f"cannot diff {path} since {since}: {detail}")
-    text = done.stdout.rstrip()
+    text = proc.stdout.rstrip()
     if len(text) > _SUMMARY_MAX_CHARS:
         text = text[:_SUMMARY_MAX_CHARS] + "\n... diff truncated ..."
     return text
