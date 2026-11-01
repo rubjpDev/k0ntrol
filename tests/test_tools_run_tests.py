@@ -140,6 +140,23 @@ def test_run_command_ignores_a_pyc_cached_before_the_call(root):
     assert run_command(probe, root=root, timeout=30).output.strip() == "41"
 
 
+def test_run_command_pytest_ignores_a_cached_assertion_rewrite(root):
+    """pytest's assertion rewriter caches its own .pyc: it must be bypassed too."""
+    test_file = root / "tests" / "test_answer.py"
+    test_file.write_text("def test_answer():\n    assert 42 == 42\n")
+    pytest_cmd = [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", str(test_file)]
+    subprocess.run(pytest_cmd, cwd=root, env=_plain_python_env(), check=True, capture_output=True)
+    assert list((root / "tests" / "__pycache__").glob("test_answer*.pyc"))
+    stamp = test_file.stat().st_mtime_ns
+    test_file.write_text("def test_answer():\n    assert 41 == 42\n")
+    os.utime(test_file, ns=(stamp, stamp))
+
+    result = run_command(pytest_cmd, root=root, timeout=60)
+
+    assert not result.ok
+    assert "41 == 42" in result.output
+
+
 def test_run_command_leaves_no_cache_dir_and_no_new_repo_bytecode(
     root, tmp_path_factory, monkeypatch
 ):
