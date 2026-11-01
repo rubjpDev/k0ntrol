@@ -108,9 +108,21 @@ def _empty_tree(root: Path) -> str:
     return _git(root, "hash-object", "-w", "-t", "tree", "/dev/null").stdout.strip()
 
 
+class DiffError(RuntimeError):
+    """``git diff`` failed, so a gate cannot tell what changed."""
+
+
 def diff_since(root: Path, since: str, path: str) -> str:
-    """``git diff <since> HEAD -- <path>``, capped like every gate detail."""
-    text = _git(root, "diff", since, "HEAD", "--", path).stdout.rstrip()
+    """``git diff <since> HEAD -- <path>``, capped like every gate detail.
+
+    Raises ``DiffError`` when git fails (say ``since`` is missing from the
+    repo): a diff that cannot be computed is never an empty diff.
+    """
+    proc = _git(root, "diff", since, "HEAD", "--", path)
+    if proc.returncode != 0:
+        detail = proc.stderr.strip() or f"git diff exited {proc.returncode}"
+        raise DiffError(f"cannot diff {path} since {since}: {detail}")
+    text = proc.stdout.rstrip()
     if len(text) > _SUMMARY_MAX_CHARS:
         text = text[:_SUMMARY_MAX_CHARS] + "\n... diff truncated ..."
     return text
