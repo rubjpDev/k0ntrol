@@ -245,6 +245,38 @@ def test_the_gate_detail_is_capped(tmp_path):
     assert diff_since(tmp_path, base, ".github/").endswith("... diff truncated ...")
 
 
+def test_a_diff_git_cannot_compute_is_an_error_not_an_empty_diff(tmp_path):
+    from k0ntrol.workflow.change import DiffError, diff_since
+    from test_workflow_full import git, git_repo
+
+    git_repo(tmp_path)
+    (tmp_path / ".github").mkdir()
+    (tmp_path / ".github" / "x.yml").write_text("name: x\n")
+    git(tmp_path, "add", "-A")
+    git(tmp_path, "commit", "-qm", "ci")
+
+    with pytest.raises(DiffError, match="0000000"):
+        diff_since(tmp_path, "0" * 40, ".github/")
+
+
+def test_a_baseline_missing_from_the_repo_never_clears_head_for_a_push(tmp_path):
+    from k0ntrol.workflow.change import DiffError
+    from k0ntrol.workflow.ci_gate import CiGateError, gated_push, run_ci_gate
+    from k0ntrol.workflow.context import RunContext
+    from test_workflow_full import git_repo
+
+    git_repo(tmp_path)
+    tracker = FakeTracker()
+    ctx = RunContext(root=tmp_path, cfg={}, kind="full", tracker=tracker)
+    state = {"branch": "k0/1-x", "ci_approved_sha": "0" * 40}
+
+    with pytest.raises(DiffError, match="0000000"):
+        run_ci_gate(ctx, state)
+    with pytest.raises(CiGateError, match="not cleared"):
+        gated_push(ctx, state)
+    assert pushes(tracker) == []
+
+
 # --- the CI gate on the stuck paths --------------------------------------------
 
 
