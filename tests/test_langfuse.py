@@ -17,7 +17,7 @@ import pytest
 from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.messages import AIMessage
 
-from fakes import FakeChatModel, FakeTracker, cfg_with
+from fakes import STUB_TEST_CMD, FakeChatModel, FakeTracker, cfg_with
 from k0ntrol import __version__
 from k0ntrol.events import EventWriter
 from k0ntrol.frontends.ask import answer_ask
@@ -60,7 +60,7 @@ def _fast_cfg():
     )
     cfg.update(
         {
-            "test_cmd": f"{sys.executable} -m pytest -q",
+            "test_cmd": STUB_TEST_CMD,
             "gates": [],
             "max_attempts": 2,
             "test_timeout": 60,
@@ -81,7 +81,7 @@ def _full_cfg():
         {
             "tracker": "github",
             "base_branch": "main",
-            "test_cmd": f"{sys.executable} -m pytest -q",
+            "test_cmd": STUB_TEST_CMD,
             "gates": [],
             "max_attempts": 2,
             "test_timeout": 60,

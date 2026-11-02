@@ -3,17 +3,18 @@
 Tests drive ``start``/``resume`` with a real temp git repo, a real
 ``test_cmd`` and scripted ``FakeChatModel``s behind the ``init`` seam —
 the only injected seams besides the tracker (spec #33, Testing Decisions).
+The ``test_cmd`` is the stdlib ``stub_runner.py``; the tests that assert on
+pytest's output, and the happy path, keep real pytest (ADR 0009).
 """
 
 import json
 import subprocess
-import sys
 from pathlib import Path
 
 import pytest
 from langchain_core.messages import AIMessage
 
-from fakes import FakeChatModel, cfg_with
+from fakes import PYTEST_CMD, STUB_TEST_CMD, FakeChatModel, cfg_with
 from k0ntrol.workflow import Outcome, Pending, RunRefused, resume, start
 
 TEST_SRC = "from calc import answer\n\n\ndef test_answer():\n    assert answer() == 42\n"
@@ -31,7 +32,7 @@ def fast_cfg(**overrides):
     )
     cfg.update(
         {
-            "test_cmd": f"{sys.executable} -m pytest -q",
+            "test_cmd": STUB_TEST_CMD,
             "gates": [],
             "max_attempts": 2,
             "test_timeout": 60,
@@ -183,7 +184,8 @@ def test_fast_runs_to_the_diff_gate_and_done(tmp_path):
         AIMessage(content="implemented calc"),
     )
 
-    result = run_fast(tmp_path, fast_cfg(), tester, coder, scan=lambda r: scanned.append(r))
+    cfg = fast_cfg(test_cmd=PYTEST_CMD)  # the /fast happy path keeps real pytest
+    result = run_fast(tmp_path, cfg, tester, coder, scan=lambda r: scanned.append(r))
 
     assert isinstance(result, Pending)
     assert result.gate == "diff"
@@ -193,7 +195,7 @@ def test_fast_runs_to_the_diff_gate_and_done(tmp_path):
     assert (tmp_path / "tests" / "test_calc.py").read_text() == TEST_SRC
     assert (tmp_path / "calc.py").read_text() == CALC_SRC
 
-    outcome = resume(result.run, "y", root=tmp_path, cfg=fast_cfg(), init=models_init())
+    outcome = resume(result.run, "y", root=tmp_path, cfg=cfg, init=models_init())
 
     assert isinstance(outcome, Outcome)
     assert outcome.outcome == "done"
@@ -276,7 +278,7 @@ def test_validator_red_sends_coder_back_with_raw_output(tmp_path):
         write_call("calc.py", CALC_SRC, "c2"),
         AIMessage(content="implemented"),
     )
-    cfg = fast_cfg()
+    cfg = fast_cfg(test_cmd=PYTEST_CMD)
     result = run_fast(tmp_path, cfg, tester, coder)
 
     assert isinstance(result, Pending)
@@ -461,7 +463,7 @@ def test_limit_hit_pending_shows_node_limit_output_and_diff_stat(tmp_path):
         AIMessage(content="tests again"),
     )
 
-    result = run_fast(tmp_path, fast_cfg(max_attempts=2), tester)
+    result = run_fast(tmp_path, fast_cfg(max_attempts=2, test_cmd=PYTEST_CMD), tester)
 
     assert isinstance(result, Pending)
     assert result.gate == "limit_hit"
@@ -508,7 +510,7 @@ def test_limit_hit_retry_reruns_the_node_with_note_tail_and_feedback(tmp_path):
         write_call("tests/test_ok.py", green, "t2"), AIMessage(content="more"),
     )
 
-    result = run_fast(tmp_path, fast_cfg(max_attempts=2), tester)
+    result = run_fast(tmp_path, fast_cfg(max_attempts=2, test_cmd=PYTEST_CMD), tester)
     assert isinstance(result, Pending)
 
     # retry [feedback]: the node reruns on a fresh context — a new model
@@ -521,7 +523,7 @@ def test_limit_hit_retry_reruns_the_node_with_note_tail_and_feedback(tmp_path):
         result.run,
         "retry make it fail for real",
         root=tmp_path,
-        cfg=fast_cfg(),
+        cfg=fast_cfg(test_cmd=PYTEST_CMD),
         init=models_init(tester2, coder),
     )
 

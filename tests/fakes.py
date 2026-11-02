@@ -13,13 +13,20 @@ in ``self.calls`` so tests can assert what the harness did on the tracker.
 Pass ``git_runner=argv -> subprocess.CompletedProcess`` (e.g. one that runs
 real git in a tmp repo) when a test wants create_branch/commit/push to
 act on real git state; otherwise those calls are only recorded.
+
+``STUB_TEST_CMD`` is the workflow fixtures' default ``test_cmd``: the
+stdlib ``stub_runner.py``. ``PYTEST_CMD`` is real pytest, kept only by the
+tests ADR 0009 names.
 """
 
 from __future__ import annotations
 
 import json
 import re
+import shlex
 import subprocess
+import sys
+from pathlib import Path
 from typing import Any, Iterator
 
 from langchain_core.language_models.fake_chat_models import GenericFakeChatModel
@@ -159,6 +166,10 @@ def recording_init(calls, profiles=None, replies=None):
 
 
     return init
+
+
+STUB_TEST_CMD = shlex.join([sys.executable, str(Path(__file__).parent / "stub_runner.py")])
+PYTEST_CMD = shlex.join([sys.executable, "-m", "pytest", "-q"])
 
 
 def cfg_with(agent_entries=None, helpers=None, providers=None):

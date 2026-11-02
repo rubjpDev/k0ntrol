@@ -6,6 +6,7 @@ k0ntrol (`k0`) is a local harness for coding agents (Python). The 0.1.0 pivot to
 
 - Work from a GitHub issue on `rubjpDev/k0ntrol`. Use one issue per branch and PR, and commit with `#<issue>: <what>`.
 - TDD, always: write the failing test, run it and see it fail (RED), minimal code to pass (GREEN), then refactor. No production code without a failing test first.
+- During red/green, run only the tests in play: the test file or node id you are changing (`uv run pytest -q tests/test_x.py::test_y`), or `uv run pytest -q --lf -x` to re-run what last failed. Run the full suite once, at the end, as the done gate below.
 - A task is done only when `uv run pytest -q` passes **in full** (whole suite, not just the new tests) and you have shown the output.
 - Stuck after 2 attempts on the same task: stop, write what failed and why, and hand back to the human. Do not improvise a workaround.
 
@@ -50,6 +51,7 @@ Run from the repo root:
 
 - Setup: `uv sync`
 - Tests: `uv run pytest -q`
+- Tests (while iterating): `uv run pytest -q <file or node id>`
 - Complexity: `uv run complexipy src --max-complexity-allowed 6`
 - Coverage: `uv run pytest --cov=k0ntrol --cov-fail-under=90`
 - CLI: `uv run k0 --help`

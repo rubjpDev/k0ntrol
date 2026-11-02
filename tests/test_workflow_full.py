@@ -3,7 +3,8 @@
 Same seams as the /fast suite: a real temp git repo, a real ``test_cmd``,
 scripted ``FakeChatModel``s behind the ``init`` seam, and a ``FakeTracker``
 whose ``calls`` and git state the tests assert on (spec #33, Testing
-Decisions; ticket #44's last criterion).
+Decisions; ticket #44's last criterion). The ``test_cmd`` is the stdlib
+``stub_runner.py``; one happy path keeps real pytest (ADR 0009).
 """
 
 import json
@@ -15,7 +16,7 @@ from pathlib import Path
 import pytest
 from langchain_core.messages import AIMessage
 
-from fakes import FakeChatModel, FakeTracker, cfg_with
+from fakes import PYTEST_CMD, STUB_TEST_CMD, FakeChatModel, FakeTracker, cfg_with
 from k0ntrol import __version__
 from k0ntrol.agents import MissingStructuredOutput
 from k0ntrol.events import EventWriter
@@ -91,7 +92,7 @@ def full_cfg(**overrides):
         {
             "tracker": "github",
             "base_branch": "main",
-            "test_cmd": f"{sys.executable} -m pytest -q",
+            "test_cmd": STUB_TEST_CMD,
             "gates": [],
             "max_attempts": 2,
             "test_timeout": 60,
@@ -408,18 +409,21 @@ def test_issue_creation_recovers_after_readback_failure(tmp_path):
     assert len([c for c in tracker.calls if c[0] == "create_work_item"]) == 1
 
 
-def full_to_test_gate(tmp_path, *, tester=None, scan=writing_scan):
+def full_to_test_gate(
+    tmp_path, *, tester=None, scan=writing_scan, test_cmd=STUB_TEST_CMD
+):
     """``/full <text>`` past an approved spec gate, up to the test gate."""
     git_repo(tmp_path)
     tracker = FakeTracker(git_runner=git_runner_for(tmp_path))
     spec = spec_model()
     tester = tester or write_red_tests()
-    first = run_full(tmp_path, full_cfg(), tracker, spec, tester, scan=scan)
+    cfg = full_cfg(test_cmd=test_cmd)
+    first = run_full(tmp_path, cfg, tracker, spec, tester, scan=scan)
     result = resume(
         first.run,
         "ok",
         root=tmp_path,
-        cfg=full_cfg(),
+        cfg=full_cfg(test_cmd=test_cmd),
         tracker=tracker,
         init=models_init(tester),
         scan=scan,
@@ -591,9 +595,11 @@ def read_call(path, call_id):
     )
 
 
-def full_to_review_gate(tmp_path, *, coder=None, reviewer=None):
+def full_to_review_gate(
+    tmp_path, *, coder=None, reviewer=None, test_cmd=STUB_TEST_CMD
+):
     """``/full <text>`` past both gates to the review gate (coder green)."""
-    tracker, spec, tester, test_result = full_to_test_gate(tmp_path)
+    tracker, spec, tester, test_result = full_to_test_gate(tmp_path, test_cmd=test_cmd)
     coder = coder or fake_tester(
         write_call("calc.py", CALC_SRC), AIMessage(content="implemented")
     )
@@ -602,7 +608,7 @@ def full_to_review_gate(tmp_path, *, coder=None, reviewer=None):
         test_result.run,
         "ok",
         root=tmp_path,
-        cfg=full_cfg(),
+        cfg=full_cfg(test_cmd=test_cmd),
         tracker=tracker,
         init=models_init(coder, reviewer),
         scan=writing_scan,
@@ -632,7 +638,8 @@ def test_the_draft_pr_carries_the_contract_and_the_review_is_posted(tmp_path):
 
 
 def test_full_runs_to_done_with_one_review_redo(tmp_path):
-    tracker, coder, reviewer, result = full_to_review_gate(tmp_path)
+    """The /full happy path that keeps real pytest as ``test_cmd`` (ADR 0009)."""
+    tracker, coder, reviewer, result = full_to_review_gate(tmp_path, test_cmd=PYTEST_CMD)
 
     coder2 = fake_tester(
         write_call("calc.py", 'def answer():\n    """Return the answer."""\n    return 42\n', "c2"),
@@ -643,7 +650,7 @@ def test_full_runs_to_done_with_one_review_redo(tmp_path):
         result.run,
         "redo tighten the edge case",
         root=tmp_path,
-        cfg=full_cfg(),
+        cfg=full_cfg(test_cmd=PYTEST_CMD),
         tracker=tracker,
         init=models_init(coder2, reviewer2),
         scan=writing_scan,
@@ -667,7 +674,7 @@ def test_full_runs_to_done_with_one_review_redo(tmp_path):
         redo.run,
         "ok",
         root=tmp_path,
-        cfg=full_cfg(),
+        cfg=full_cfg(test_cmd=PYTEST_CMD),
         tracker=tracker,
         init=models_init(),
     )
