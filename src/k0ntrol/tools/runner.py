@@ -49,29 +49,38 @@ def scrubbed_env(environ: Mapping[str, str] | None = None) -> dict[str, str]:
 
 
 @functools.cache
-def _process_cache() -> Path:
+def _bytecode_cache_dir() -> Path:
     """This process's bytecode cache: made on first use, removed at exit."""
-    prefix = Path(tempfile.mkdtemp(prefix="k0-pycache-"))
-    atexit.register(shutil.rmtree, prefix, ignore_errors=True)
-    return prefix
+    cache_dir = Path(tempfile.mkdtemp(prefix="k0-pycache-"))
+    atexit.register(shutil.rmtree, cache_dir, ignore_errors=True)
+    return cache_dir
 
 
-def _fresh_imports_env(base: Mapping[str, str], root: Path) -> dict[str, str]:
-    """``base`` plus the process's bytecode cache, minus anything from ``root``.
+def _purge_root_bytecode(cache_dir: Path, root: Path) -> None:
+    """Delete the part of ``cache_dir`` that mirrors ``root``.
 
     A cached ``.pyc`` is trusted on (mtime in seconds, size), so an edit
     landing in the same second with the same size would be tested as the old
-    code. ``PYTHONDONTWRITEBYTECODE`` only stops writes; Python still reads
-    existing caches. Under ``PYTHONPYCACHEPREFIX`` Python and pytest's
-    assertion rewriter ignore in-tree ``__pycache__`` (never touched) and
-    mirror each source's absolute path inside the prefix. Deleting the
-    mirror of ``root`` before every command recompiles the repo's code
+    code (#70). Under ``PYTHONPYCACHEPREFIX`` each source's cache sits at the
+    prefix joined with the path it was imported through: the root as given or
+    resolved. Purging both before every command recompiles the repo's code,
     while dependencies compile once per process.
     """
-    prefix = _process_cache()
     for path in {root.absolute(), root.resolve()}:
-        shutil.rmtree(prefix.joinpath(*path.parts[1:]), ignore_errors=True)
-    return {**base, "PYTHONPYCACHEPREFIX": str(prefix)}
+        shutil.rmtree(cache_dir.joinpath(*path.parts[1:]), ignore_errors=True)
+
+
+def _bytecode_env(base: Mapping[str, str], root: Path) -> dict[str, str]:
+    """``base`` plus the process's bytecode cache, purged of ``root``.
+
+    ``PYTHONDONTWRITEBYTECODE`` only stops writes; Python still reads
+    existing caches. ``PYTHONPYCACHEPREFIX`` makes Python and pytest's
+    assertion rewriter ignore in-tree ``__pycache__`` (never touched) and
+    leaves nothing behind in the repo.
+    """
+    cache_dir = _bytecode_cache_dir()
+    _purge_root_bytecode(cache_dir, root)
+    return {**base, "PYTHONPYCACHEPREFIX": str(cache_dir)}
 
 
 @dataclass(frozen=True)
@@ -105,7 +114,7 @@ def run_command(
             capture_output=True,
             text=True,
             timeout=timeout,
-            env=_fresh_imports_env(scrubbed_env(environ), root),
+            env=_bytecode_env(scrubbed_env(environ), root),
             check=False,
         )
     except subprocess.TimeoutExpired as error:
