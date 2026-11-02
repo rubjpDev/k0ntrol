@@ -3,8 +3,9 @@
 Every agent — CHATTY for ``/ask`` today, the workflow agents as their nodes
 land — is built here from ``create_agent``: the agent's allowlist, k0's
 closed middleware set (a run-scoped model-call limit with
-``exit_behavior="end"``), an explicit recursion limit derived from the
-model-call limit, and a fresh-context wrapper (``K0Agent``).
+``exit_behavior="end"``, and tool errors surfaced to the model), an explicit
+recursion limit derived from the model-call limit, and a fresh-context
+wrapper (``K0Agent``).
 
 The allowlist is enforced in code, twice: ``agent_tools`` builds exactly
 the tools on ``ALLOWLISTS[name]``, and ``build_agent`` refuses any tool set
@@ -22,10 +23,20 @@ from typing import Any
 from uuid import uuid4
 
 from langchain.agents import create_agent
-from langchain.agents.middleware import ModelCallLimitMiddleware
+from langchain.agents.middleware import (
+    AgentMiddleware,
+    ModelCallLimitMiddleware,
+    ToolCallRequest,
+)
 from langchain.chat_models import init_chat_model
-from langchain_core.messages import AIMessage, AIMessageChunk, BaseMessage
+from langchain_core.messages import (
+    AIMessage,
+    AIMessageChunk,
+    BaseMessage,
+    ToolMessage,
+)
 from langchain_core.tools import BaseTool
+from langgraph.types import Command
 from pydantic import BaseModel
 
 from k0ntrol.events import META_AGENT, META_EFFORT
@@ -182,7 +193,8 @@ def build_agent(
         middleware=[
             ModelCallLimitMiddleware(
                 run_limit=entry["model_calls"], exit_behavior="end"
-            )
+            ),
+            ToolErrorMiddleware(),
         ],
         name=name,
     )
@@ -193,6 +205,31 @@ def build_agent(
         model_calls=entry["model_calls"],
         effort=entry.get("effort"),
     )
+
+
+class ToolErrorMiddleware(AgentMiddleware):
+    """Turn a ``ToolError`` into an error ``ToolMessage`` the model sees.
+
+    The tool node only handles argument errors by default and re-raises any
+    other ``ToolException``, which would end the run. The error has already
+    reached the event handler by the time it gets here, so the ``tool``
+    event keeps ``err`` and ``denied``. Any other exception propagates.
+    """
+
+    def wrap_tool_call(
+        self,
+        request: ToolCallRequest,
+        handler: Callable[[ToolCallRequest], ToolMessage | Command],
+    ) -> ToolMessage | Command:
+        try:
+            return handler(request)
+        except ToolError as error:
+            return ToolMessage(
+                content=str(error),
+                name=request.tool_call["name"],
+                tool_call_id=request.tool_call["id"],
+                status="error",
+            )
 
 
 def _check_allowlist(
