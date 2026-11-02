@@ -21,7 +21,7 @@ from collections.abc import Callable, Iterator
 from pathlib import Path
 from types import ModuleType
 
-Test = tuple[str, Callable[[], object]]
+NamedTest = tuple[str, Callable[[], object]]
 
 
 def main(argv: list[str]) -> int:
@@ -54,7 +54,7 @@ def load(path: Path) -> ModuleType:
     return module
 
 
-def collect(path: str, module: ModuleType) -> Iterator[Test]:
+def collect(path: str, module: ModuleType) -> Iterator[NamedTest]:
     for name, obj in list(vars(module).items()):
         if name.startswith("test_") and inspect.isfunction(obj):
             yield f"{path}::{name}", obj
@@ -62,7 +62,7 @@ def collect(path: str, module: ModuleType) -> Iterator[Test]:
             yield from collect_class(f"{path}::{name}", obj)
 
 
-def collect_class(prefix: str, cls: type) -> Iterator[Test]:
+def collect_class(prefix: str, cls: type) -> Iterator[NamedTest]:
     for name, obj in list(vars(cls).items()):
         if name.startswith("test_") and inspect.isfunction(obj):
             yield f"{prefix}::{name}", getattr(cls(), name)

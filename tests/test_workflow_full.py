@@ -423,7 +423,7 @@ def full_to_test_gate(
         first.run,
         "ok",
         root=tmp_path,
-        cfg=full_cfg(test_cmd=test_cmd),
+        cfg=cfg,
         tracker=tracker,
         init=models_init(tester),
         scan=scan,
@@ -639,6 +639,7 @@ def test_the_draft_pr_carries_the_contract_and_the_review_is_posted(tmp_path):
 
 def test_full_runs_to_done_with_one_review_redo(tmp_path):
     """The /full happy path that keeps real pytest as ``test_cmd`` (ADR 0009)."""
+    cfg = full_cfg(test_cmd=PYTEST_CMD)
     tracker, coder, reviewer, result = full_to_review_gate(tmp_path, test_cmd=PYTEST_CMD)
 
     coder2 = fake_tester(
@@ -650,7 +651,7 @@ def test_full_runs_to_done_with_one_review_redo(tmp_path):
         result.run,
         "redo tighten the edge case",
         root=tmp_path,
-        cfg=full_cfg(test_cmd=PYTEST_CMD),
+        cfg=cfg,
         tracker=tracker,
         init=models_init(coder2, reviewer2),
         scan=writing_scan,
@@ -674,7 +675,7 @@ def test_full_runs_to_done_with_one_review_redo(tmp_path):
         redo.run,
         "ok",
         root=tmp_path,
-        cfg=full_cfg(test_cmd=PYTEST_CMD),
+        cfg=cfg,
         tracker=tracker,
         init=models_init(),
     )
