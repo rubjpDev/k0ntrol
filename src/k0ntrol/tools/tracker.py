@@ -10,7 +10,8 @@ import re
 
 from langchain_core.tools import BaseTool, tool
 
-from k0ntrol.tracker import TRUSTED_ASSOCIATIONS, Comment, Tracker, WorkItem
+from k0ntrol.tools.errors import ToolError
+from k0ntrol.tracker import TRUSTED_ASSOCIATIONS, Comment, Tracker, TrackerError, WorkItem
 
 _BRIEF_HEADING = re.compile(r"^## Agent Brief", re.MULTILINE)
 
@@ -48,12 +49,18 @@ def tracker_read_tools(tracker: Tracker) -> list[BaseTool]:
     @tool
     def read_work_item(work_item: str) -> str:
         """Read a work item's body and trusted-author comments. The latest Agent Brief comment is the contract."""
-        return render_work_item(tracker.read_work_item(work_item))
+        try:
+            return render_work_item(tracker.read_work_item(work_item))
+        except TrackerError as error:
+            raise ToolError(str(error)) from error
 
     @tool
     def read_change_diff(change: str) -> str:
         """Read the diff of the change (pull request) for a work item."""
-        return tracker.read_change_diff(change)
+        try:
+            return tracker.read_change_diff(change)
+        except TrackerError as error:
+            raise ToolError(str(error)) from error
 
     return [read_work_item, read_change_diff]
 

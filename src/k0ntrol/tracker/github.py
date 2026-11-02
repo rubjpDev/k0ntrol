@@ -46,6 +46,7 @@ class GhTracker:
     # -- work items ------------------------------------------------------
 
     def read_work_item(self, ref: str) -> WorkItem:
+        ref = _number(ref, "work item")
         issue = self._gh_json(["gh", "api", f"repos/{{owner}}/{{repo}}/issues/{ref}"])
         return WorkItem(
             ref=str(issue["number"]),
@@ -201,7 +202,7 @@ class GhTracker:
         )
 
     def read_change_diff(self, ref: str) -> str:
-        return self._run(["gh", "pr", "diff", ref]).stdout
+        return self._run(["gh", "pr", "diff", _number(ref, "change")]).stdout
 
     # -- internals ---------------------------------------------------------
 
@@ -242,6 +243,14 @@ def _preferred_pr(prs: list[dict]) -> dict:
     """
     open_prs = [pr for pr in prs if pr["state"].lower() == "open"]
     return max(open_prs or prs, key=lambda pr: pr["number"])
+
+
+def _number(ref: str, kind: str) -> str:
+    """`42` or `#42` as `42`; a `#` left in a gh api path starts a URL fragment."""
+    number = ref.removeprefix("#")
+    if not number.isascii() or not number.isdigit():
+        raise TrackerError(f"expected a {kind} number like 42 or #42, got {ref!r}")
+    return number
 
 
 def _number_from_url(url: str) -> str:

@@ -11,10 +11,12 @@ import pytest
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_core.tools import BaseTool, tool
 
-from fakes import FakeChatModel, cfg_with
+from fakes import FakeChatModel, FakeTracker, cfg_with
 from k0ntrol.agents import ALLOWLISTS, agent_tools, allowlist_for, build_agent
 from k0ntrol.events import EventWriter, K0EventHandler
 from k0ntrol.tools.errors import ToolError
+from k0ntrol.tools.tracker import tracker_read_tools
+from k0ntrol.tracker import TrackerError
 
 
 def _scripted(*messages) -> FakeChatModel:
@@ -306,6 +308,35 @@ def test_tool_error_reaches_the_agent_and_the_run_finishes(tmp_path):
     assert [(m.status, m.content, m.tool_call_id) for m in seen] == [
         ("error", "not a readable file: x", "t1")
     ]
+
+
+def test_tracker_error_from_a_read_tool_reaches_the_agent_and_the_run_finishes(tmp_path):
+    class FailingTracker(FakeTracker):
+        def read_work_item(self, ref):
+            raise TrackerError(f"gh api failed: {ref}")
+
+    model = _scripted(
+        AIMessage(
+            content="",
+            tool_calls=[{"name": "read_work_item", "args": {"work_item": "x"}, "id": "t1"}],
+        ),
+        AIMessage(content="recovered"),
+    )
+    cfg = cfg_with({"chatty": {"provider": "anthropic", "model": "m", "model_calls": 5}})
+    agent = build_agent(
+        "chatty",
+        cfg,
+        tracker_read_tools(FailingTracker()),
+        root=tmp_path,
+        init=_init(model),
+        allowlist=["read_work_item", "read_change_diff"],
+    )
+
+    result = agent.invoke([HumanMessage("go")])
+
+    assert result.text == "recovered"
+    seen = [m for m in model.invocations[1] if isinstance(m, ToolMessage)]
+    assert [(m.status, m.content) for m in seen] == [("error", "gh api failed: x")]
 
 
 def test_tool_error_keeps_ok_err_and_denied_in_the_tool_event(tmp_path):
