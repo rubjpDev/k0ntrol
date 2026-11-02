@@ -206,12 +206,22 @@ def _start_or_resume(
             result, None, show=show, root=root, config=config, resume=resume
         )
         return None if resumed is result else resumed
-    if answer == "n" and _abandoned(result, task, show=show, root=root, abandon=abandon):
-        return _try_start(kind, task, show=show, root=root, config=config, start=start)
-    return None
+    if answer != "n":
+        return None
+    if not _try_abandon(result, kind, task, show=show, root=root, abandon=abandon):
+        return None
+    return _try_start(kind, task, show=show, root=root, config=config, start=start)
 
 
-def _abandoned(unfinished, task, *, show, root, abandon) -> bool:
+def _try_abandon(
+    unfinished: Unfinished,
+    kind: str,
+    task: str,
+    *,
+    show: Callable[[str], None],
+    root: Path,
+    abandon: Callable,
+) -> bool:
     """Drop the run; a refusal (dirty tree) keeps it and says how to go on."""
     try:
         abandon(unfinished.run, root=root)
@@ -219,7 +229,7 @@ def _abandoned(unfinished, task, *, show, root, abandon) -> bool:
         _show_refusal(error, show)
         show(
             f"run {unfinished.run} is kept: clean the tree yourself, or run "
-            f"/full {task} again and answer y to resume it"
+            f"/{kind} {task} again and answer y to resume it"
         )
         return False
     return True
