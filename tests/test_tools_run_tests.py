@@ -3,7 +3,6 @@
 import os
 import subprocess
 import sys
-import tempfile
 from pathlib import Path
 
 import pytest
@@ -157,29 +156,92 @@ def test_run_command_pytest_ignores_a_cached_assertion_rewrite(root):
     assert "41 == 42" in result.output
 
 
-def test_run_command_leaves_no_cache_dir_and_no_new_repo_bytecode(
-    root, tmp_path_factory, monkeypatch
-):
-    scratch = tmp_path_factory.mktemp("scratch")
-    monkeypatch.setattr(tempfile, "tempdir", str(scratch))
+def _same_stamp_edit(module: Path, text: str) -> None:
+    """Rewrite ``module`` with same-size ``text`` and its old mtime (#70)."""
+    stamp = module.stat().st_mtime_ns
+    module.write_text(text)
+    os.utime(module, ns=(stamp, stamp))
+
+
+def test_run_command_reuses_bytecode_compiled_outside_the_root(root, tmp_path_factory):
+    """Dependencies compile once per process: the second call reuses the cache.
+
+    The stale value proves reuse without timing: only a cached .pyc can still
+    say 42 after a same-size, same-mtime edit outside the root.
+    """
+    outside = tmp_path_factory.mktemp("site")
+    module = outside / "dep.py"
+    module.write_text("ANSWER = 42\n")
+    environ = {**os.environ, "PYTHONPATH": str(outside)}
+    probe = [sys.executable, "-c", "import dep; print(dep.ANSWER)"]
+    assert run_command(probe, root=root, timeout=30, environ=environ).output.strip() == "42"
+    _same_stamp_edit(module, "ANSWER = 41\n")
+
+    result = run_command(probe, root=root, timeout=30, environ=environ)
+
+    assert result.output.strip() == "42"
+
+
+@pytest.mark.parametrize("via", ["cwd", "link"])
+def test_run_command_sees_a_same_stamp_edit_under_a_symlinked_root(root, tmp_path_factory, via):
+    """The cache mirrors whichever path the child imports through.
+
+    Through the cwd the child sees the real path; through ``sys.path`` it
+    sees the link. Both mirrors must go before each command.
+    """
+    link = tmp_path_factory.mktemp("links") / "checkout"
+    link.symlink_to(root, target_is_directory=True)
+    module = root / "calc.py"
+    module.write_text("ANSWER = 42\n")
+    head = f"import sys; sys.path.insert(0, {str(link)!r}); " if via == "link" else ""
+    probe = [sys.executable, "-c", head + "import calc; print(calc.ANSWER)"]
+    assert run_command(probe, root=link, timeout=30).output.strip() == "42"
+    _same_stamp_edit(module, "ANSWER = 41\n")
+
+    assert run_command(probe, root=link, timeout=30).output.strip() == "41"
+
+
+def test_run_command_leaves_no_new_repo_bytecode(root):
     (root / "calc.py").write_text("ANSWER = 42\n")
     before = sorted(root.rglob("*.pyc"))
     probe = [sys.executable, "-c", "import calc; print(calc.ANSWER)"]
 
     assert run_command(probe, root=root, timeout=30).ok
 
-    assert list(scratch.iterdir()) == []
     assert sorted(root.rglob("*.pyc")) == before
 
 
-def test_run_command_cleans_its_cache_dir_after_a_timeout(root, tmp_path_factory, monkeypatch):
-    scratch = tmp_path_factory.mktemp("scratch")
-    monkeypatch.setattr(tempfile, "tempdir", str(scratch))
+_PRINT_CACHE_DIR = """
+import sys
+from pathlib import Path
+from k0ntrol.tools.runner import run_command
+probe = [sys.executable, "-c", "import os; print(os.environ['PYTHONPYCACHEPREFIX'])"]
+cache = run_command(probe, root=Path(sys.argv[1]), timeout=30).output.strip()
+print(cache, Path(cache).is_dir())
+"""
 
-    result = run_command([sys.executable, "-c", "import time; time.sleep(30)"], root=root, timeout=0.5)
 
-    assert result.timed_out
-    assert list(scratch.iterdir()) == []
+def test_run_command_cache_dir_is_gone_after_the_process_exits(root):
+    child = subprocess.run(
+        [sys.executable, "-c", _PRINT_CACHE_DIR, str(root)],
+        capture_output=True, text=True, check=True,
+    )
+    cache, existed = child.stdout.split()
+
+    assert existed == "True"
+    assert not Path(cache).exists()
+
+
+def test_run_command_still_runs_after_a_timeout(root):
+    timed_out = run_command(
+        [sys.executable, "-c", "import time; time.sleep(30)"], root=root, timeout=0.5
+    )
+    assert timed_out.timed_out
+    assert not timed_out.ok
+
+    after = run_command([sys.executable, "-m", "pytest", "-q"], root=root, timeout=60)
+
+    assert after.ok, after.output
 
 
 def test_run_tests_runs_the_configured_test_cmd(root):
