@@ -56,6 +56,49 @@ def test_read_work_item_parses_issue_and_comments():
     assert [c.author for c in item.comments] == ["octo"]
 
 
+@pytest.mark.parametrize("ref", ["42", "#42"])
+def test_read_work_item_accepts_a_bare_or_hash_number(ref):
+    runner, tracker = _tracker()
+
+    item = tracker.read_work_item(ref)
+
+    assert item.ref == "42"
+    assert ["gh", "api", "repos/{owner}/{repo}/issues/#42"] not in runner.calls
+    assert ISSUE_ENDPOINT in runner.calls
+    assert COMMENTS_ENDPOINT in runner.calls
+
+
+@pytest.mark.parametrize(
+    "ref", ["o/r#42", "https://github.com/o/r/issues/42", "four", "", "#", "4 2"]
+)
+def test_read_work_item_refuses_other_ref_forms(ref):
+    runner, tracker = _tracker()
+
+    with pytest.raises(TrackerError, match="expected a work item number like 42 or #42"):
+        tracker.read_work_item(ref)
+
+    assert runner.calls == []
+
+
+@pytest.mark.parametrize("ref", ["7", "#7"])
+def test_read_change_diff_accepts_a_bare_or_hash_number(ref):
+    runner = FakeRunner()
+    runner.script(["gh", "pr", "diff"], stdout="diff --git a/x b/x\n+1\n")
+
+    GhTracker(runner).read_change_diff(ref)
+
+    assert runner.calls == [["gh", "pr", "diff", "7"]]
+
+
+def test_read_change_diff_refuses_other_ref_forms():
+    runner = FakeRunner()
+
+    with pytest.raises(TrackerError, match="expected a change number like 42 or #42"):
+        GhTracker(runner).read_change_diff("o/r#7")
+
+    assert runner.calls == []
+
+
 @pytest.mark.parametrize("existing", [False, True])
 def test_ensure_work_item_uses_creation_marker(existing):
     marker = comment_marker("r1", "create_issue")

@@ -3,8 +3,9 @@
 import pytest
 
 from fakes import FakeTracker
+from k0ntrol.tools.errors import ToolError
 from k0ntrol.tools.tracker import tracker_read_tools
-from k0ntrol.tracker import comment_marker
+from k0ntrol.tracker import TrackerError, comment_marker
 
 
 def test_created_work_item_reads_back():
@@ -209,6 +210,23 @@ def test_read_change_diff_tool_returns_the_diff():
     _, read_change_diff = tracker_read_tools(tracker)
 
     assert read_change_diff.invoke({"change": change.ref}) == "diff --git a/x b/x\n+1\n"
+
+
+class _FailingTracker(FakeTracker):
+    def read_work_item(self, ref):
+        raise TrackerError(f"gh api failed: {ref}")
+
+    def read_change_diff(self, ref):
+        raise TrackerError(f"gh pr diff failed: {ref}")
+
+
+def test_read_tools_turn_a_tracker_error_into_a_tool_error():
+    read_work_item, read_change_diff = tracker_read_tools(_FailingTracker())
+
+    with pytest.raises(ToolError, match="gh api failed: x"):
+        read_work_item.invoke({"work_item": "x"})
+    with pytest.raises(ToolError, match="gh pr diff failed: y"):
+        read_change_diff.invoke({"change": "y"})
 
 
 def test_tracker_read_tools_are_named_for_the_allowlist():
