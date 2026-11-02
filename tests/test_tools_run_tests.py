@@ -3,6 +3,7 @@
 import os
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -119,6 +120,66 @@ def test_run_command_never_tests_a_stale_pyc(root):
     os.utime(module, ns=(stamp, stamp))
 
     assert "41" in run_command(probe, root=root, timeout=30).output
+
+
+def _plain_python_env() -> dict[str, str]:
+    return {k: v for k, v in os.environ.items() if not k.startswith("PYTHON")}
+
+
+def test_run_command_ignores_a_pyc_cached_before_the_call(root):
+    """A .pyc written by plain Python must not mask a same-size, same-mtime edit."""
+    module = root / "calc.py"
+    module.write_text("ANSWER = 42\n")
+    probe = [sys.executable, "-c", "import calc; print(calc.ANSWER)"]
+    subprocess.run(probe, cwd=root, env=_plain_python_env(), check=True, capture_output=True)
+    assert list((root / "__pycache__").glob("calc.*.pyc"))
+    stamp = module.stat().st_mtime_ns
+    module.write_text("ANSWER = 41\n")
+    os.utime(module, ns=(stamp, stamp))
+
+    assert run_command(probe, root=root, timeout=30).output.strip() == "41"
+
+
+def test_run_command_pytest_ignores_a_cached_assertion_rewrite(root):
+    """pytest's assertion rewriter caches its own .pyc: it must be bypassed too."""
+    test_file = root / "tests" / "test_answer.py"
+    test_file.write_text("def test_answer():\n    assert 42 == 42\n")
+    pytest_cmd = [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", str(test_file)]
+    subprocess.run(pytest_cmd, cwd=root, env=_plain_python_env(), check=True, capture_output=True)
+    assert list((root / "tests" / "__pycache__").glob("test_answer*.pyc"))
+    stamp = test_file.stat().st_mtime_ns
+    test_file.write_text("def test_answer():\n    assert 41 == 42\n")
+    os.utime(test_file, ns=(stamp, stamp))
+
+    result = run_command(pytest_cmd, root=root, timeout=60)
+
+    assert not result.ok
+    assert "41 == 42" in result.output
+
+
+def test_run_command_leaves_no_cache_dir_and_no_new_repo_bytecode(
+    root, tmp_path_factory, monkeypatch
+):
+    scratch = tmp_path_factory.mktemp("scratch")
+    monkeypatch.setattr(tempfile, "tempdir", str(scratch))
+    (root / "calc.py").write_text("ANSWER = 42\n")
+    before = sorted(root.rglob("*.pyc"))
+    probe = [sys.executable, "-c", "import calc; print(calc.ANSWER)"]
+
+    assert run_command(probe, root=root, timeout=30).ok
+
+    assert list(scratch.iterdir()) == []
+    assert sorted(root.rglob("*.pyc")) == before
+
+
+def test_run_command_cleans_its_cache_dir_after_a_timeout(root, tmp_path_factory, monkeypatch):
+    scratch = tmp_path_factory.mktemp("scratch")
+    monkeypatch.setattr(tempfile, "tempdir", str(scratch))
+
+    result = run_command([sys.executable, "-c", "import time; time.sleep(30)"], root=root, timeout=0.5)
+
+    assert result.timed_out
+    assert list(scratch.iterdir()) == []
 
 
 def test_run_tests_runs_the_configured_test_cmd(root):

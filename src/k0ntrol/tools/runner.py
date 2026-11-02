@@ -9,7 +9,9 @@ before an agent sees it. Agent-written code still runs unsandboxed.
 import os
 import shlex
 import subprocess
-from collections.abc import Mapping
+import tempfile
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -44,10 +46,19 @@ def scrubbed_env(environ: Mapping[str, str] | None = None) -> dict[str, str]:
     }
 
 
-# A cached ``.pyc`` is trusted on (mtime in seconds, size): an edit landing
-# in the same second as an earlier run, with the same size, would be
-# tested as the old code. Never writing bytecode keeps every run fresh.
-_FRESH_IMPORTS_ENV = {"PYTHONDONTWRITEBYTECODE": "1"}
+@contextmanager
+def _fresh_imports_env(base: Mapping[str, str]) -> Iterator[dict[str, str]]:
+    """``base`` plus a private, empty bytecode cache that is gone on exit.
+
+    A cached ``.pyc`` is trusted on (mtime in seconds, size), so an edit
+    landing in the same second with the same size would be tested as the old
+    code. ``PYTHONDONTWRITEBYTECODE`` only stops writes; Python still reads
+    existing caches. A fresh ``PYTHONPYCACHEPREFIX`` makes Python and pytest's
+    assertion rewriter ignore in-tree ``__pycache__`` (never touched) and
+    leaves nothing behind in the repo.
+    """
+    with tempfile.TemporaryDirectory(prefix="k0-pycache-", ignore_cleanup_errors=True) as prefix:
+        yield {**base, "PYTHONPYCACHEPREFIX": prefix}
 
 
 @dataclass(frozen=True)
@@ -75,15 +86,16 @@ def run_command(
     """Run one argv list under ``root`` with a scrubbed env and a timeout."""
     argv = _argv(cmd, extra_args)
     try:
-        proc = subprocess.run(
-            argv,
-            cwd=root,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            env={**scrubbed_env(environ), **_FRESH_IMPORTS_ENV},
-            check=False,
-        )
+        with _fresh_imports_env(scrubbed_env(environ)) as env:
+            proc = subprocess.run(
+                argv,
+                cwd=root,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                env=env,
+                check=False,
+            )
     except subprocess.TimeoutExpired as error:
         return _timeout_result(argv, error, timeout)
     except OSError as error:
