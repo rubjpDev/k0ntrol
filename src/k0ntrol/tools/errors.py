@@ -1,7 +1,9 @@
 """The structured tool-error contract shared with the event log (#37).
 
 Every failure a tool wants an agent to see is a ``ToolError`` (a
-``ToolException``, so the tool node surfaces the message to the agent).
+``ToolException``; ``ToolErrorMiddleware`` in ``agents.py`` turns it into an
+error ``ToolMessage`` the agent sees, since the tool node alone would
+re-raise it and end the run).
 A refusal carries ``denied`` — ``"path_guard"`` for a path-guard refusal,
 ``"allowlist"`` for a call to a tool outside the agent's allowlist — which
 the event handler copies into the ``tool`` event's ``denied`` field.

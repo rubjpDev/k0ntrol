@@ -5,12 +5,15 @@ allowlist, k0's closed middleware set, a model-call limit and an explicit
 derived recursion limit, behind a fresh-context wrapper.
 """
 
+import json
+
 import pytest
-from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_core.tools import BaseTool, tool
 
 from fakes import FakeChatModel, cfg_with
 from k0ntrol.agents import ALLOWLISTS, agent_tools, allowlist_for, build_agent
+from k0ntrol.events import EventWriter, K0EventHandler
 from k0ntrol.tools.errors import ToolError
 
 
@@ -260,6 +263,83 @@ def test_fresh_context_between_invocations(tmp_path):
     second_call_messages = model.invocations[1]
     human_texts = [m.content for m in second_call_messages if isinstance(m, HumanMessage)]
     assert human_texts == ["two"]
+
+
+# --- tool errors reach the agent ---------------------------------------------
+
+
+@tool
+def read_file(path: str) -> str:
+    """A read that always refuses."""
+    raise ToolError(f"not a readable file: {path}", denied="path_guard")
+
+
+def _refused_read_agent(tmp_path, model):
+    cfg = cfg_with({"chatty": {"provider": "anthropic", "model": "m", "model_calls": 5}})
+    return build_agent(
+        "chatty",
+        cfg,
+        [read_file],
+        root=tmp_path,
+        init=_init(model),
+        allowlist=["read_file"],
+    )
+
+
+def _read_then_finish() -> FakeChatModel:
+    return _scripted(
+        AIMessage(
+            content="",
+            tool_calls=[{"name": "read_file", "args": {"path": "x"}, "id": "t1"}],
+        ),
+        AIMessage(content="recovered"),
+    )
+
+
+def test_tool_error_reaches_the_agent_and_the_run_finishes(tmp_path):
+    model = _read_then_finish()
+
+    result = _refused_read_agent(tmp_path, model).invoke([HumanMessage("go")])
+
+    assert result.text == "recovered"
+    seen = [m for m in model.invocations[1] if isinstance(m, ToolMessage)]
+    assert [(m.status, m.content, m.tool_call_id) for m in seen] == [
+        ("error", "not a readable file: x", "t1")
+    ]
+
+
+def test_tool_error_keeps_ok_err_and_denied_in_the_tool_event(tmp_path):
+    agent = _refused_read_agent(tmp_path, _read_then_finish())
+    events_path = tmp_path / "events.jsonl"
+    writer = EventWriter(events_path, chat="chat-1", mask=[])
+
+    agent.invoke([HumanMessage("go")], config={"callbacks": [K0EventHandler(writer)]})
+
+    events = [json.loads(line) for line in events_path.read_text().splitlines()]
+    tool_event = next(e for e in events if e["kind"] == "tool")
+    assert tool_event["ok"] is False
+    assert tool_event["err"] == "not a readable file: x"
+    assert tool_event["denied"] == "path_guard"
+
+
+def test_other_tool_exceptions_still_propagate(tmp_path):
+    @tool
+    def read_file(path: str) -> str:
+        """A read that crashes."""
+        raise RuntimeError("boom")
+
+    cfg = cfg_with({"chatty": {"provider": "anthropic", "model": "m", "model_calls": 5}})
+    agent = build_agent(
+        "chatty",
+        cfg,
+        [read_file],
+        root=tmp_path,
+        init=_init(_read_then_finish()),
+        allowlist=["read_file"],
+    )
+
+    with pytest.raises(RuntimeError, match="boom"):
+        agent.invoke([HumanMessage("go")])
 
 
 # --- limits -------------------------------------------------------------------
