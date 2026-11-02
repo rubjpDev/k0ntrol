@@ -1229,6 +1229,25 @@ def test_abandoning_a_run_frees_the_checkout_for_a_new_one(tmp_path):
     assert isinstance(fresh, Pending) and fresh.gate == "spec"
 
 
+def test_abandoning_at_the_test_gate_keeps_the_run_and_the_files(tmp_path):
+    from k0ntrol.workflow import abandon
+
+    tracker, spec, tester, gate = full_to_test_gate(tmp_path)
+    dirty_before = git(tmp_path, "status", "--porcelain")
+    assert dirty_before  # the uncommitted tests TESTER wrote
+
+    with pytest.raises(RunRefused, match="dirty working tree") as refused:
+        abandon(gate.run, root=tmp_path)
+
+    assert any("tests/" in line for line in refused.value.lines)
+    assert git(tmp_path, "status", "--porcelain") == dirty_before
+    again = resume(
+        gate.run, None, root=tmp_path, cfg=full_cfg(), tracker=tracker,
+        init=models_init(),
+    )
+    assert again == gate
+
+
 DOUBLE_TEST = "from calc import double\n\n\ndef test_double():\n    assert double(2) == 4\n"
 DOUBLE_SRC = "\n\ndef double(x):\n    return 2 * x\n"
 

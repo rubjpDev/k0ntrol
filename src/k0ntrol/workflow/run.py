@@ -15,7 +15,7 @@ One run per checkout (ADR 0007): any unfinished checkpoint thread refuses
 a second ``/fast`` with a git-worktree hint. A ``/full #<n>`` for the open
 run's own work item gets it back as ``Unfinished`` (#46): the REPL asks
 whether to resume it, and ``abandon`` drops its checkpoint thread on a
-``n``. Any other second run is refused.
+``n`` (#69: not while the tree is dirty). Any other second run is refused.
 """
 
 import os
@@ -232,7 +232,15 @@ def resume(
 
 
 def abandon(run_id: str, *, root: Path) -> None:
-    """Drop run ``run_id``'s checkpoint thread: the run can no longer resume."""
+    """Drop run ``run_id``'s checkpoint thread: the run can no longer resume.
+
+    Refuses — ``RunRefused``, the ``/full`` dirty-tree refusal — and keeps
+    the checkpoint while the tree is dirty: the fresh run that follows
+    would be refused too, and a run paused at the test gate holds
+    uncommitted files only its own checkpoint can finish. Files are never
+    touched.
+    """
+    _refuse_dirty(root)
     conn, saver = _open_checkpoints(root)
     try:
         saver.delete_thread(run_id)
