@@ -562,3 +562,31 @@ def test_full_n_at_the_unfinished_prompt_abandons_and_starts_fresh(tmp_path):
         ("start", "full", "#7"), ("abandon", "r1"), ("start", "full", "#7"),
     ]
     assert "run done" in text
+
+
+def test_full_n_with_a_dirty_tree_keeps_the_run_and_says_how_to_go_on(tmp_path):
+    from k0ntrol.workflow import RunRefused, Unfinished
+
+    calls = []
+
+    def fake_start(kind, task, **kwargs):
+        calls.append("start")
+        return Unfinished(run="r1", node="test_gate")
+
+    def refusing_abandon(run_id, **kwargs):
+        calls.append("abandon")
+        raise RunRefused(
+            ["refusing to run /full on a dirty working tree:", "?? tests/t.py"]
+        )
+
+    lines = iter(["/full #7", "n", "/quit"])
+    shown = []
+    run_session(
+        lambda: next(lines), shown.append, root=tmp_path, config=config(),
+        start=fake_start, resume=lambda *a, **k: None, abandon=refusing_abandon,
+    )
+
+    text = "\n".join(shown)
+    assert calls == ["start", "abandon"]  # no fresh start after the refusal
+    assert "dirty working tree" in text and "?? tests/t.py" in text
+    assert "run r1 is kept" in text and "answer y to resume it" in text
