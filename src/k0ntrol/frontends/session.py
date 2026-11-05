@@ -28,7 +28,14 @@ def run_session(
     abandon: Callable = abandon_run,
     init: Callable = init_chat_model,
     reflector=None,
+    stream: Callable[[str], None] | None = None,
 ) -> int:
+    """The REPL. ``write`` prints whole lines; ``stream``, when given,
+    prints ``/ask`` answer deltas without line breaks."""
+    if stream is None:
+        stream = write
+    else:
+        write, stream = _terminal(write, stream)
     transcript = _new_transcript(root)
     show = _transcript_writer(write, transcript)
     if reflector is None:
@@ -55,7 +62,7 @@ def run_session(
                 ask=ask,
                 root=root,
                 config=config,
-                write=write,
+                stream=stream,
                 show=show,
                 transcript=transcript,
                 reflector=reflector,
@@ -75,6 +82,28 @@ def run_session(
         )
     finally:
         reflector.finish()
+
+
+def _terminal(
+    write: Callable[[str], None], stream: Callable[[str], None]
+) -> tuple[Callable[[str], None], Callable[[str], None]]:
+    """Line and delta writers sharing one terminal: a line written after
+    streamed text starts on a line of its own."""
+    mid_line = False
+
+    def line(text: str) -> None:
+        nonlocal mid_line
+        if mid_line:
+            stream("\n")
+            mid_line = False
+        write(text)
+
+    def delta(text: str) -> None:
+        nonlocal mid_line
+        stream(text)
+        mid_line = not text.endswith("\n")
+
+    return line, delta
 
 
 def _chatty_provider(config: dict) -> str | None:
@@ -130,7 +159,7 @@ def _run_ask(
     ask: Callable,
     root: Path,
     config: dict,
-    write: Callable[[str], None],
+    stream: Callable[[str], None],
     show: Callable[[str], None],
     transcript: Path,
     reflector,
@@ -142,7 +171,7 @@ def _run_ask(
         root=root,
         config=config,
         write=show,
-        on_text=lambda delta: (write(delta), deltas.append(delta)),
+        on_text=lambda delta: (stream(delta), deltas.append(delta)),
     )
     if result is not None:
         reflector.ask_turn()
