@@ -1267,6 +1267,22 @@ def test_an_open_run_for_another_work_item_still_refuses(tmp_path, input_text):
         run_full(tmp_path, full_cfg(), tracker, input=input_text)
 
 
+def test_a_full_text_run_paused_before_its_issue_is_offered_back(tmp_path):
+    """No issue exists yet, so ``/full <text>`` is the only way back to it."""
+    from k0ntrol.workflow import Unfinished
+
+    git_repo(tmp_path)
+    tracker = FakeTracker()
+    pending = run_full(tmp_path, full_cfg(), tracker, spec_model())
+    assert pending.gate == "spec"
+
+    again = run_full(tmp_path, full_cfg(), tracker, input="a different task")
+
+    assert again == Unfinished(run=pending.run, node="spec_gate")
+    with pytest.raises(RunRefused, match=r"resume it with /full <task>"):
+        run_full(tmp_path, full_cfg(), tracker, input="#1")
+
+
 def test_an_open_run_for_a_closed_issue_is_refused_not_offered(tmp_path):
     tracker, coder, reviewer, pending = full_to_review_gate(tmp_path)
     tracker.close_work_item("1")

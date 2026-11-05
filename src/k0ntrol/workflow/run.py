@@ -11,11 +11,13 @@ Checkpoints are a ``SqliteSaver`` at ``.k0-mem/checkpoints.sqlite`` with
 survives the process dying: a later ``resume`` compiles a fresh graph on
 the same DB and picks up at the gate.
 
-One run per checkout (ADR 0007): any unfinished checkpoint thread refuses
-a second ``/fast`` with a git-worktree hint. A ``/full #<n>`` for the open
-run's own work item gets it back as ``Unfinished`` (#46): the REPL asks
-whether to resume it, and ``abandon`` drops its checkpoint thread on a
-``n`` (#69: not while the tree is dirty). Any other second run is refused.
+One run per checkout (ADR 0007). A ``/full #<n>`` for the open run's own
+work item gets it back as ``Unfinished`` (#46), and so does a ``/fast`` or
+``/full <text>`` when the open run is of the same kind and has no work item
+to name: the REPL asks whether to resume it, and ``abandon`` drops its
+checkpoint thread on a ``n`` (#69: not while the tree is dirty). Any other
+second run is refused with the command that resumes the open one, or a
+git-worktree hint.
 """
 
 import os
@@ -152,13 +154,13 @@ def start(
         ctx = RunContext(
             root=root, cfg=cfg, kind=kind, init=init, tracker=tracker, scan=scan
         )
-        graph = _BUILDERS[kind](ctx, saver)
-        busy = _busy_run(saver, graph, kind, input_text, tracker, root)
+        busy = _busy_run(saver, ctx, input_text, tracker, root)
         if busy is not None:
             return busy
         _doctor_gate(check, cfg, kind, root)
         _rescan(scan, root)
         item = _full_preflight(kind, input_text, tracker, root)
+        graph = _BUILDERS[kind](ctx, saver)
         run_id = new_run_id()
         _bind_events(ctx, root, run_id, write)
         ctx.trace = tracing(run_id)
@@ -249,17 +251,21 @@ def abandon(run_id: str, *, root: Path) -> None:
         conn.close()
 
 
-def open_runs(saver: SqliteSaver, graph) -> list[tuple[str, str]]:
-    """``[(run_id, pending_node)]`` for every unfinished checkpoint thread."""
+def open_runs(saver: SqliteSaver, ctx: RunContext) -> list[tuple[str, str, dict]]:
+    """``[(run_id, pending_node, values)]`` for every unfinished checkpoint
+    thread, each read through its own kind's graph: another kind's graph
+    does not know the thread's nodes and would see it as finished."""
+    graphs = {kind: build(ctx, saver) for kind, build in _BUILDERS.items()}
     threads = {
         tuple_.config["configurable"]["thread_id"]
         for tuple_ in saver.list(None)
     }
     open_ = []
     for thread_id in sorted(threads):
+        graph = graphs[_run_kind(saver, thread_id)]
         state = graph.get_state(_thread(thread_id))
         if state.next:
-            open_.append((thread_id, state.next[0]))
+            open_.append((thread_id, state.next[0], state.values))
     return open_
 
 
@@ -271,38 +277,61 @@ def _open_checkpoints(root: Path) -> tuple[sqlite3.Connection, SqliteSaver]:
 
 
 def _busy_run(
-    saver: SqliteSaver, graph, kind: str, input_text: str, tracker, root: Path
+    saver: SqliteSaver, ctx: RunContext, input_text: str, tracker, root: Path
 ) -> Unfinished | None:
-    """An open run answers ``/full #<n>`` only for its own work item.
+    """An open run answers ``/full #<n>`` for its own work item, and a run
+    of its own kind when it has no work item (``/fast``, or ``/full <text>``
+    before the spec gate published the issue).
 
     Anything else is refused. The refusals for an ended work item (closed
     issue, merged or closed PR) come before the resume prompt.
     """
-    busy = open_runs(saver, graph)
+    busy = open_runs(saver, ctx)
     if not busy:
         return None
-    if kind == "full":
-        same = _same_item_run(busy, graph, input_text)
+    if ctx.kind == "full":
+        same = _same_item_run(busy, input_text)
         if same is not None:
             _work_item(input_text, tracker, root)
             return Unfinished(run=same[0], node=same[1])
-    run_id, node = busy[0]
+    itemless = _itemless_run(busy, ctx.kind, input_text)
+    if itemless is not None:
+        return Unfinished(run=itemless[0], node=itemless[1])
+    run_id, node, values = busy[0]
     raise RunRefused(
         f"a run is already open in this checkout: {run_id} at {node}\n"
-        "resume it, or run k0 from another git worktree: "
-        "git worktree add <path>"
+        f"resume it with {_resume_command(values)}, or run k0 from another "
+        "git worktree: git worktree add <path>"
     )
 
 
-def _same_item_run(busy: list[tuple[str, str]], graph, input_text: str):
+def _same_item_run(busy: list[tuple[str, str, dict]], input_text: str):
     """The open ``(run, node)`` whose work item is ``/full #<n>``'s, if any."""
     if not input_text.startswith("#"):
         return None
     ref = input_text[1:].strip()
-    for run_id, node in busy:
-        if graph.get_state(_thread(run_id)).values.get("item_ref") == ref:
+    for run_id, node, values in busy:
+        if values.get("item_ref") == ref:
             return run_id, node
     return None
+
+
+def _itemless_run(busy: list[tuple[str, str, dict]], kind: str, input_text: str):
+    """The open ``(run, node)`` of ``kind`` with no work item, if any:
+    ``/fast`` or ``/full <text>`` is the only way back to it."""
+    if input_text.startswith("#"):
+        return None
+    for run_id, node, values in busy:
+        if values.get("kind") == kind and not values.get("item_ref"):
+            return run_id, node
+    return None
+
+
+def _resume_command(values: dict) -> str:
+    """The REPL command that offers an open run back."""
+    if values.get("item_ref"):
+        return f"/full #{values['item_ref']}"
+    return f"/{values.get('kind')} <task>"
 
 
 def _doctor_gate(check: Callable, cfg: dict, kind: str, root: Path) -> None:
