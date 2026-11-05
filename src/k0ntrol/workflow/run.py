@@ -41,7 +41,8 @@ from k0ntrol.events import (  # noqa: E402
     new_run_id,
 )
 from k0ntrol.langfuse import build_trace  # noqa: E402
-from k0ntrol.memory.scan import ScanError, run_scan  # noqa: E402
+from k0ntrol.memory.refresh import refresh_memory  # noqa: E402
+from k0ntrol.memory.scan import ScanError  # noqa: E402
 from k0ntrol.providers import free_checks, has_errors, report_lines  # noqa: E402
 from k0ntrol.tracker import TRUSTED_ASSOCIATIONS, TrackerError  # noqa: E402
 from k0ntrol.tracker.github import GhTracker, subprocess_runner  # noqa: E402
@@ -130,7 +131,7 @@ def start(
     write: Callable[[str], None] | None = None,
     init: Callable = init_chat_model,
     check: Callable = free_checks,
-    scan: Callable = run_scan,
+    scan: Callable = refresh_memory,
     tracker=None,
     tracing: Callable = build_trace,
 ) -> Result:
@@ -190,7 +191,7 @@ def resume(
     cfg: dict,
     write: Callable[[str], None] | None = None,
     init: Callable = init_chat_model,
-    scan: Callable = run_scan,
+    scan: Callable = refresh_memory,
     tracker=None,
     tracing: Callable = build_trace,
 ) -> Result:

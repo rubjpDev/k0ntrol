@@ -21,6 +21,7 @@ from fakes import PYTEST_CMD, STUB_TEST_CMD, FakeChatModel, FakeTracker, cfg_wit
 from k0ntrol import __version__
 from k0ntrol.agents import MissingStructuredOutput
 from k0ntrol.events import EventWriter
+from k0ntrol.memory.index import query_index, rebuild_index
 from k0ntrol.workflow import Outcome, Pending, RunRefused, resume, start
 from k0ntrol.workflow.context import RunContext
 from k0ntrol.workflow.full import change_body
@@ -402,6 +403,25 @@ def test_an_untrusted_work_item_body_is_never_inlined(tmp_path):
     first = spec.invocations[0][-1].content
     assert "rm -rf the repo" not in first
     assert f"UNTRUSTED WORK ITEM {item.ref}" in first
+
+
+def test_a_run_rebuilds_the_memory_index_before_its_agents(tmp_path):
+    """``search_memory`` sees memory as it is now, not as it was when the
+    index was first built: the run's rescan rebuilds it (#15, #86)."""
+    git_repo(tmp_path)
+    rebuild_index(tmp_path)  # an earlier run's index, built before the note
+    mem = tmp_path / ".k0-mem" / "General_mem" / "Mem.md"
+    mem.parent.mkdir()
+    mem.write_text("- truncate keeps an ellipsis\n", encoding="utf-8")
+
+    start(
+        "full", TASK, root=tmp_path, cfg=full_cfg(), tracker=FakeTracker(),
+        init=models_init(spec_model()), check=lambda *a, **k: [],
+    )
+
+    assert [hit["body"] for hit in query_index(tmp_path, "ellipsis", 5)] == [
+        "truncate keeps an ellipsis"
+    ]
 
 
 # --- approving gates: publishing, branch, tests, commits ----------------------
