@@ -76,11 +76,15 @@ def _bytecode_env(base: Mapping[str, str], root: Path) -> dict[str, str]:
     ``PYTHONDONTWRITEBYTECODE`` only stops writes; Python still reads
     existing caches. ``PYTHONPYCACHEPREFIX`` makes Python and pytest's
     assertion rewriter ignore in-tree ``__pycache__`` (never touched) and
-    leaves nothing behind in the repo.
+    leaves nothing behind in the repo. That is why a user's
+    ``PYTHONDONTWRITEBYTECODE`` is dropped: it would only stop k0's own
+    cache, so every command would recompile its dependencies.
     """
     cache_dir = _bytecode_cache_dir()
     _purge_root_bytecode(cache_dir, root)
-    return {**base, "PYTHONPYCACHEPREFIX": str(cache_dir)}
+    env = {**base, "PYTHONPYCACHEPREFIX": str(cache_dir)}
+    env.pop("PYTHONDONTWRITEBYTECODE", None)
+    return env
 
 
 @dataclass(frozen=True)

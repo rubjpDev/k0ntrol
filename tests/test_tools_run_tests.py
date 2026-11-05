@@ -167,12 +167,14 @@ def test_run_command_reuses_bytecode_compiled_outside_the_root(root, tmp_path_fa
     """Dependencies compile once per process: the second call reuses the cache.
 
     The stale value proves reuse without timing: only a cached .pyc can still
-    say 42 after a same-size, same-mtime edit outside the root.
+    say 42 after a same-size, same-mtime edit outside the root. The cache is
+    k0's own, so a ``PYTHONDONTWRITEBYTECODE`` in the user's env must not
+    switch it off.
     """
     outside = tmp_path_factory.mktemp("site")
     module = outside / "dep.py"
     module.write_text("ANSWER = 42\n")
-    environ = {**os.environ, "PYTHONPATH": str(outside)}
+    environ = {**os.environ, "PYTHONPATH": str(outside), "PYTHONDONTWRITEBYTECODE": "1"}
     probe = [sys.executable, "-c", "import dep; print(dep.ANSWER)"]
     assert run_command(probe, root=root, timeout=30, environ=environ).output.strip() == "42"
     _same_stamp_edit(module, "ANSWER = 41\n")
