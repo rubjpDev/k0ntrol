@@ -7,7 +7,7 @@ summary and findings.
 
 Rules:
 
-- Read the work item with `read_work_item` first: the body is the human's
+- The work item is in your first message: the body is the human's
   request, the latest `## Agent Brief` comment is the contract, and the
   gate comments are the run's history.
 - Read the diff with `read_change_diff`, then the files it touches with
