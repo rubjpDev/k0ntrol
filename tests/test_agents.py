@@ -7,7 +7,9 @@ derived recursion limit, behind a fresh-context wrapper.
 
 import json
 
+import httpx
 import pytest
+from langchain.agents.middleware import model_retry
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_core.tools import BaseTool, tool
 
@@ -371,6 +373,91 @@ def test_other_tool_exceptions_still_propagate(tmp_path):
 
     with pytest.raises(RuntimeError, match="boom"):
         agent.invoke([HumanMessage("go")])
+
+
+# --- transient model errors are retried (#85) ----------------------------------
+
+
+class ProviderError(Exception):
+    """A provider HTTP error, shaped like ollama's ``ResponseError``."""
+
+    def __init__(self, status_code: int) -> None:
+        super().__init__(f"provider said {status_code}")
+        self.status_code = status_code
+
+
+@pytest.fixture
+def no_backoff(monkeypatch):
+    monkeypatch.setattr(model_retry.time, "sleep", lambda seconds: None)
+
+
+def _chatty(tmp_path, model, model_calls=5):
+    cfg = cfg_with(
+        {"chatty": {"provider": "anthropic", "model": "m", "model_calls": model_calls}}
+    )
+    return build_agent(
+        "chatty", cfg, [], root=tmp_path, init=_init(model), allowlist=[]
+    )
+
+
+def test_a_transient_model_error_is_retried_with_one_event_per_try(
+    tmp_path, no_backoff
+):
+    model = _scripted(ProviderError(500), AIMessage(content="recovered"))
+    events_path = tmp_path / "events.jsonl"
+    handler = K0EventHandler(EventWriter(events_path, chat="chat-1", mask=[]))
+
+    result = _chatty(tmp_path, model).invoke(
+        [HumanMessage("go")], config={"callbacks": [handler]}
+    )
+
+    assert result.text == "recovered"
+    events = [json.loads(line) for line in events_path.read_text().splitlines()]
+    assert [e["ok"] for e in events if e["kind"] == "model"] == [False, True]
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        ConnectionError("refused"),
+        TimeoutError("slow"),
+        ProviderError(429),
+        httpx.ConnectError("ollama is not running"),
+    ],
+)
+def test_connection_timeout_and_rate_limit_errors_are_transient(
+    tmp_path, no_backoff, error
+):
+    model = _scripted(error, AIMessage(content="recovered"))
+
+    assert _chatty(tmp_path, model).invoke([HumanMessage("go")]).text == "recovered"
+
+
+@pytest.mark.parametrize("status", [400, 401, 404])
+def test_a_client_error_is_not_retried(tmp_path, no_backoff, status):
+    model = _scripted(ProviderError(status), AIMessage(content="never reached"))
+
+    with pytest.raises(ProviderError):
+        _chatty(tmp_path, model).invoke([HumanMessage("go")])
+    assert len(model.invocations) == 1
+
+
+def test_retries_give_up_and_the_error_stops_the_run(tmp_path, no_backoff):
+    model = _scripted(*[ProviderError(500)] * 3, AIMessage(content="too late"))
+
+    with pytest.raises(ProviderError):
+        _chatty(tmp_path, model).invoke([HumanMessage("go")])
+    assert len(model.invocations) == 3
+
+
+def test_retries_do_not_count_toward_the_model_call_limit(tmp_path, no_backoff):
+    """One agent turn is one model call, however many tries it took."""
+    model = _scripted(ProviderError(503), AIMessage(content="recovered"))
+
+    result = _chatty(tmp_path, model, model_calls=1).invoke([HumanMessage("go")])
+
+    assert result.text == "recovered"
+    assert result.limit_hit is False
 
 
 # --- limits -------------------------------------------------------------------

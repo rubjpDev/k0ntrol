@@ -3,9 +3,9 @@
 Every agent — CHATTY for ``/ask`` today, the workflow agents as their nodes
 land — is built here from ``create_agent``: the agent's allowlist, k0's
 closed middleware set (a run-scoped model-call limit with
-``exit_behavior="end"``, and tool errors surfaced to the model), an explicit
-recursion limit derived from the model-call limit, and a fresh-context
-wrapper (``K0Agent``).
+``exit_behavior="end"``, a retry of transient model errors, and tool errors
+surfaced to the model), an explicit recursion limit derived from the
+model-call limit, and a fresh-context wrapper (``K0Agent``).
 
 The allowlist is enforced in code, twice: ``agent_tools`` builds exactly
 the tools on ``ALLOWLISTS[name]``, and ``build_agent`` refuses any tool set
@@ -26,6 +26,7 @@ from langchain.agents import create_agent
 from langchain.agents.middleware import (
     AgentMiddleware,
     ModelCallLimitMiddleware,
+    ModelRetryMiddleware,
     ToolCallRequest,
 )
 from langchain.chat_models import init_chat_model
@@ -83,6 +84,15 @@ _WRITE_SCOPES = {"tester": "test", "coder": "non_test"}
 # and hitting a recursion limit means a k0 bug (#20).
 _STEPS_PER_CALL = 4
 _STEPS_SLACK = 8
+
+# Tries after a transient provider error before the run stops (#85). The
+# retries happen inside one model call, so they never count toward
+# ``model_calls``; each try still emits its own ``model`` event.
+_MODEL_RETRIES = 2
+
+# Connection-level failures the provider SDKs raise without a status code:
+# httpx's (ollama) and the OpenAI/Anthropic clients' (timeouts included).
+_TRANSIENT_ERROR_TYPES = frozenset({"TransportError", "APIConnectionError"})
 
 
 class AgentBrief(BaseModel):
@@ -194,6 +204,11 @@ def build_agent(
             ModelCallLimitMiddleware(
                 run_limit=entry["model_calls"], exit_behavior="end"
             ),
+            ModelRetryMiddleware(
+                max_retries=_MODEL_RETRIES,
+                retry_on=is_transient,
+                on_failure="error",
+            ),
             ToolErrorMiddleware(),
         ],
         name=name,
@@ -204,6 +219,19 @@ def build_agent(
         checked,
         model_calls=entry["model_calls"],
         effort=entry.get("effort"),
+    )
+
+
+def is_transient(error: Exception) -> bool:
+    """A model error worth another try: a provider 5xx or 429, or a
+    connection or timeout failure. Auth and bad-request errors are not."""
+    if isinstance(error, (ConnectionError, TimeoutError)):
+        return True
+    status = getattr(error, "status_code", None)
+    if isinstance(status, int):
+        return status >= 500 or status == 429
+    return any(
+        cls.__name__ in _TRANSIENT_ERROR_TYPES for cls in type(error).__mro__
     )
 
 
