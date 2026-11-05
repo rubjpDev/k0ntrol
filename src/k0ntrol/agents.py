@@ -223,13 +223,14 @@ def build_agent(
 
 
 def is_transient(error: Exception) -> bool:
-    """A model error worth another try: a provider 5xx or 429, or a
-    connection or timeout failure. Auth and bad-request errors are not."""
+    """A model error worth another try: anything but a 4xx client error
+    (408 and 429 excepted), or a connection or timeout failure. Ollama
+    reports an error inside its response stream with status ``-1``."""
     if isinstance(error, (ConnectionError, TimeoutError)):
         return True
     status = getattr(error, "status_code", None)
     if isinstance(status, int):
-        return status >= 500 or status == 429
+        return status in (408, 429) or not 400 <= status < 500
     return any(
         cls.__name__ in _TRANSIENT_ERROR_TYPES for cls in type(error).__mro__
     )

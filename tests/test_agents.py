@@ -422,6 +422,7 @@ def test_a_transient_model_error_is_retried_with_one_event_per_try(
         ConnectionError("refused"),
         TimeoutError("slow"),
         ProviderError(429),
+        ProviderError(-1),  # ollama: an error inside the stream has no status
         httpx.ConnectError("ollama is not running"),
     ],
 )
