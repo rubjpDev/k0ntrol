@@ -890,6 +890,9 @@ def test_reviewer_hitting_its_call_limit_pauses(tmp_path):
     assert isinstance(result, Pending)
     assert result.gate == "limit_hit"
     assert "reviewer" in result.question
+    # the last tool result, not the limit marker the middleware injects
+    assert "last output:\ntmp repo" in result.detail
+    assert "Model call limits exceeded" not in result.detail
 
 
 def test_reviewer_gets_trusted_pr_comments_not_untrusted(tmp_path):
