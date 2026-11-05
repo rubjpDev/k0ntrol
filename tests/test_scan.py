@@ -117,6 +117,22 @@ def test_scan_skips_binary_and_untracked_files(tmp_path):
     assert [node["path"] for node in graph["nodes"]] == ["ok.py"]
 
 
+def test_scan_skips_its_own_committed_output(tmp_path):
+    """The graph never lists itself or its notes, so it only changes when
+    the code does (#84)."""
+    git_tracked(tmp_path, {"ok.py": "print(1)\n", ".k0-mem/General_mem/Rules.md": "- r\n"})
+    run_scan(tmp_path)
+    subprocess.run(["git", "add", "-A"], cwd=tmp_path, check=True)
+    graph_path = _memory(tmp_path) / "graph.json"
+    before = graph_path.read_bytes()
+
+    run_scan(tmp_path)
+
+    paths = [node["path"] for node in _graph(tmp_path)["nodes"]]
+    assert paths == [".k0-mem/General_mem/Rules.md", "ok.py"]
+    assert graph_path.read_bytes() == before
+
+
 def test_scan_without_git_does_not_write_empty_graph(tmp_path):
     (tmp_path / "a.py").write_text("print(1)\n", encoding="utf-8")
     with pytest.raises(ScanError):
