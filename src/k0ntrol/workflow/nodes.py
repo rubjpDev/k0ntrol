@@ -15,7 +15,7 @@ from langgraph.types import interrupt
 
 from k0ntrol.tools.path_guard import is_test_path
 from k0ntrol.tools.runner import run_command
-from k0ntrol.workflow.change import diff_stat, worktree_summary
+from k0ntrol.workflow.change import changed_paths, diff_stat, worktree_summary
 from k0ntrol.workflow.context import RunContext
 
 _WRITE_TOOLS = ("write_file", "edit_file")
@@ -108,10 +108,16 @@ def _last_output(result) -> str:
 
 
 def make_red_check(ctx: RunContext) -> Callable[[dict], dict]:
-    """The red check: ``test_cmd`` on TESTER's files must fail (ADR 0001)."""
+    """The red check: ``test_cmd`` on TESTER's files must fail (ADR 0001).
+
+    TESTER's files are the ones its runs recorded plus the test files the
+    working tree changed: a TESTER run that stopped part-way leaves files
+    no later run writes again (#99).
+    """
 
     def node(state: dict) -> dict:
-        files = [p for p in state.get("test_files", []) if _test_file(ctx, p)]
+        candidates = set(state.get("test_files", [])) | set(changed_paths(ctx.root))
+        files = sorted(p for p in candidates if _test_file(ctx, p))
         result = run_command(
             ctx.cfg["test_cmd"],
             root=ctx.root,
@@ -120,7 +126,7 @@ def make_red_check(ctx: RunContext) -> Callable[[dict], dict]:
         )
         red = bool(files) and not result.ok
         ctx.writer.gate("red_check", "pass" if red else "fail")
-        return _red_update(red, result, state)
+        return {"test_files": files, **_red_update(red, result, state)}
 
     return node
 

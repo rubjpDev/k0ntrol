@@ -28,10 +28,19 @@ def dirty_paths(root: Path, *, ignored_prefix: str = ".k0-mem/") -> list[str]:
     ]
 
 
+def changed_paths(root: Path) -> list[str]:
+    """The paths ``dirty_paths`` reports: what the working tree changed."""
+    return [_porcelain_path(line) for line in dirty_paths(root)]
+
+
 def _ignored_path(porcelain_line: str, prefix: str) -> bool:
-    path = porcelain_line[3:] if len(porcelain_line) > 3 else ""
-    path = path.split(" -> ")[-1].strip().strip('"')
+    path = _porcelain_path(porcelain_line)
     return path == prefix.rstrip("/") or path.startswith(prefix)
+
+
+def _porcelain_path(porcelain_line: str) -> str:
+    path = porcelain_line[3:] if len(porcelain_line) > 3 else ""
+    return path.split(" -> ")[-1].strip().strip('"')
 
 
 def slugify(title: str) -> str:
