@@ -1,9 +1,7 @@
 # Project overrides. An empty mapping inherits the package defaults.
 tracker: github
 base_branch: develop   # PRs go to develop; main only gets releases
-# Explicit `uv run`: k0 started through `uv run --project` puts its own venv
-# first on PATH, so a bare `pytest` would run k0's pytest, not this checkout's.
-test_cmd: "uv run pytest -q"
+test_cmd: "uv run pytest -q"   # this checkout's own .venv, synced by uv
 gates:
   - name: complexity
     cmd: uv run complexipy src --max-complexity-allowed 6

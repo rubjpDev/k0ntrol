@@ -2,7 +2,7 @@
 
 ADR 0006: every command k0 runs for agents or gates gets a scrubbed
 environment (provider and tracker vendor variables and secret-shaped names
-removed), a ``test_timeout`` (a timeout counts as red), and truncated output
+removed, and k0's own virtualenv taken off), a ``test_timeout`` (a timeout counts as red), and truncated output
 before an agent sees it. Agent-written code still runs unsandboxed.
 """
 
@@ -12,6 +12,7 @@ import os
 import shlex
 import shutil
 import subprocess
+import sys
 import tempfile
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -46,6 +47,23 @@ def scrubbed_env(environ: Mapping[str, str] | None = None) -> dict[str, str]:
         for name, value in source.items()
         if name not in _VENDOR_ENV_VARS and not name.endswith(_SECRET_SUFFIXES)
     }
+
+
+def _without_own_venv(env: dict[str, str]) -> dict[str, str]:
+    """``env`` without k0's own virtualenv, when k0 runs from one.
+
+    Started through ``uv run``, k0's venv is ``VIRTUAL_ENV`` and first on
+    ``PATH``: a bare ``pytest`` would be k0's, not the project's, and uv
+    warns on every project command. A venv the human activated for the
+    project is not k0's and stays.
+    """
+    if env.get("VIRTUAL_ENV") != sys.prefix:
+        return env
+    own_bin = str(Path(sys.executable).parent)
+    path = env.get("PATH", "").split(os.pathsep)
+    kept = {name: value for name, value in env.items() if name != "VIRTUAL_ENV"}
+    kept["PATH"] = os.pathsep.join(entry for entry in path if entry != own_bin)
+    return kept
 
 
 @functools.cache
@@ -118,7 +136,7 @@ def run_command(
             capture_output=True,
             text=True,
             timeout=timeout,
-            env=_bytecode_env(scrubbed_env(environ), root),
+            env=_bytecode_env(_without_own_venv(scrubbed_env(environ)), root),
             check=False,
         )
     except subprocess.TimeoutExpired as error:
