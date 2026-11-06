@@ -13,7 +13,6 @@ htmlcov/
 
 # k0's own runtime state while dogfooding
 # ponytail: whole .k0-mem/ ignored; 0.1.0 dogfood decides what memory to commit
-.k0-mem/
 /spec.md
 /review.md
 
