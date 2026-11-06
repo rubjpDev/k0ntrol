@@ -644,12 +644,17 @@ def tester_brief(state: dict) -> str:
     return text
 
 
+# A bullet the model wrote itself; the rendered checkbox replaces it.
+_BULLET = re.compile(r"^[-*]\s+")
+
+
 def render_brief(brief: dict | None) -> str:
     """The ``## Agent Brief`` markdown: gate detail and issue comment."""
     if not brief:
         return "(SPEC produced no brief)"
     criteria = "\n".join(
-        f"- [ ] {item}" for item in brief.get("acceptance_criteria", [])
+        f"- [ ] {_BULLET.sub('', item)}"
+        for item in brief.get("acceptance_criteria", [])
     )
     return (
         "## Agent Brief\n\n"

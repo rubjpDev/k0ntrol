@@ -24,7 +24,7 @@ from k0ntrol.events import EventWriter
 from k0ntrol.memory.index import query_index, rebuild_index
 from k0ntrol.workflow import Outcome, Pending, RunRefused, resume, start
 from k0ntrol.workflow.context import RunContext
-from k0ntrol.workflow.full import change_body
+from k0ntrol.workflow.full import change_body, render_brief
 from test_langfuse import _tracing
 
 TASK = "add a calc module that answers 42"
@@ -66,6 +66,16 @@ def test_full_public_functions_have_complete_annotations():
             parameter.annotation is not inspect.Parameter.empty
             for parameter in signature.parameters.values()
         ), name
+
+
+def test_render_brief_keeps_one_bullet_per_criterion():
+    """A model that writes its own ``- `` before each criterion gets one
+    checkbox, not ``- [ ] - …``."""
+    brief = {**BRIEF, "acceptance_criteria": ["- answer() returns 42", "* tests start red"]}
+
+    rendered = render_brief(brief)
+
+    assert "- [ ] answer() returns 42\n- [ ] tests start red" in rendered
 
 
 BRIEF = {
