@@ -475,13 +475,24 @@ def make_reviewer_node(ctx: RunContext) -> Callable[[dict], dict]:
 
 
 def _review_brief(ctx: RunContext) -> Callable[[dict], str]:
-    """The reviewer brief builder bound to the run's tracker reads."""
+    """The reviewer brief builder bound to the run's tracker reads: the PR
+    and its code diff go in, so REVIEWER never judges without reading the
+    change (#94)."""
 
     def brief(state: dict) -> str:
-        change = render_work_item(ctx.tracker.read_work_item(state["change_ref"]))
-        return f"{reviewer_brief(state)}\n\n{change}"
+        ref = state["change_ref"]
+        change = render_work_item(ctx.tracker.read_work_item(ref))
+        diff = code_diff(ctx.tracker.read_change_diff(ref))
+        return f"{reviewer_brief(state)}\n\n{change}\n\n## Diff\n\n{diff}"
 
     return brief
+
+
+def code_diff(diff: str) -> str:
+    """``diff`` without its ``.k0-mem/`` files: the harness's memory commits
+    are derived data, not part of the change to judge (#84)."""
+    files = re.split(r"(?m)^(?=diff --git )", diff)
+    return "".join(f for f in files if not f.startswith("diff --git a/.k0-mem/"))
 
 
 def make_post_review(ctx: RunContext) -> Callable[[dict], dict]:
@@ -712,9 +723,10 @@ def reviewer_brief(state: dict) -> str:
     return (
         f"Work item #{state['item_ref']}: {state['item_title']} — shown "
         "below; the latest ## Agent Brief comment is the contract.\n\n"
-        f"Review pull request {state['change_ref']}: read the diff with "
-        "read_change_diff and the files it touches with the read tools. "
-        "Call the Review tool exactly once with your summary and findings."
+        f"Review pull request {state['change_ref']}: its diff is below, "
+        "without the .k0-mem/ memory files. Read the files it touches with "
+        "the read tools. Call the Review tool exactly once with your summary "
+        "and findings."
     )
 
 
