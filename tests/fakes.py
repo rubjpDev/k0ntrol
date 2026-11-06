@@ -54,7 +54,8 @@ class FakeChatModel(GenericFakeChatModel):
       every invoke gives when no script is left.
     - The scripted tool-calling fake for agent tests: ``messages`` is the
       script — ``AIMessage`` (with ``tool_calls``), ``FakeReply`` or ``str``
-      entries consumed in order, one per model call. It works through
+      entries consumed in order, one per model call; an ``Exception`` entry
+      is raised by that call, like a failing provider. It works through
       ``create_agent`` on both ``invoke`` and ``stream``: ``_stream`` emits
       text in word chunks and tool calls as ``tool_call_chunks``, like a
       real provider.
@@ -111,6 +112,8 @@ class FakeChatModel(GenericFakeChatModel):
             raise AssertionError(
                 "FakeChatModel script exhausted; script one message per model call"
             )
+        if isinstance(item, Exception):
+            raise item
         return _to_ai_message(item)
 
 

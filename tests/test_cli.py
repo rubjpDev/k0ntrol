@@ -48,3 +48,24 @@ def test_bulk_read_is_not_a_command(capsys):
         main(["bulk-read", "--question", "q", "--paths", "a.py"])
     assert exc.value.code == 2
     assert "invalid choice" in capsys.readouterr().err
+
+
+def test_ask_streams_the_answer_on_one_line(capsys, monkeypatch, tmp_path):
+    """Deltas print without line breaks; the next line starts on its own."""
+    from k0ntrol.frontends import session
+
+    def fake_ask(question, **kwargs):
+        for delta in ("an ", "answer"):
+            kwargs["on_text"](delta)
+        kwargs["write"]("model chatty ok")
+
+    real = session.run_session
+    monkeypatch.setattr(
+        "k0ntrol.cli.run_session", lambda *a, **k: real(*a, ask=fake_ask, **k)
+    )
+    monkeypatch.chdir(tmp_path)
+    answers = iter(["/ask what is x?", "/quit"])
+    monkeypatch.setattr("builtins.input", lambda prompt="": next(answers))
+
+    assert main([]) == 0
+    assert "an answer\nmodel chatty ok\n" in capsys.readouterr().out

@@ -14,8 +14,8 @@ from pathlib import Path
 import pytest
 from langchain_core.messages import AIMessage
 
-from fakes import PYTEST_CMD, STUB_TEST_CMD, FakeChatModel, cfg_with
-from k0ntrol.workflow import Outcome, Pending, RunRefused, resume, start
+from fakes import PYTEST_CMD, STUB_TEST_CMD, FakeChatModel, FakeTracker, cfg_with
+from k0ntrol.workflow import Outcome, Pending, RunRefused, Unfinished, resume, start
 
 TEST_SRC = "from calc import answer\n\n\ndef test_answer():\n    assert answer() == 42\n"
 CALC_SRC = "def answer():\n    return 42\n"
@@ -345,7 +345,7 @@ def test_model_call_limit_pauses_at_limit_hit(tmp_path):
 # --- one run per checkout, kill + resume ---------------------------------------
 
 
-def test_a_second_run_in_the_same_checkout_is_refused(tmp_path):
+def fast_at_the_diff_gate(tmp_path):
     git_repo(tmp_path)
     tester = scripted_tester(
         write_call("tests/test_calc.py", TEST_SRC), AIMessage(content="tests")
@@ -353,9 +353,28 @@ def test_a_second_run_in_the_same_checkout_is_refused(tmp_path):
     coder = scripted_tester(write_call("calc.py", CALC_SRC), AIMessage(content="code"))
     result = run_fast(tmp_path, fast_cfg(), tester, coder)
     assert isinstance(result, Pending)
+    return result
 
-    with pytest.raises(RunRefused, match="worktree"):
-        run_fast(tmp_path, fast_cfg(), scripted_tester())
+
+def test_a_second_fast_run_gets_the_unfinished_run_back(tmp_path):
+    """An open /fast has no work item to name, so /fast offers it back to
+    resume or abandon instead of stranding it (spec #33, story 19)."""
+    pending = fast_at_the_diff_gate(tmp_path)
+
+    again = run_fast(tmp_path, fast_cfg(), scripted_tester())
+
+    assert again == Unfinished(run=pending.run, node="diff_gate")
+
+
+def test_a_full_run_is_refused_with_how_to_resume_the_open_fast(tmp_path):
+    pending = fast_at_the_diff_gate(tmp_path)
+
+    hint = f"{pending.run} at diff_gate\nresume it with /fast"
+    with pytest.raises(RunRefused, match=hint):
+        start(
+            "full", "#1", root=tmp_path, cfg=fast_cfg(tracker="github"),
+            tracker=FakeTracker(), check=lambda *a, **k: [],
+        )
 
 
 def test_kill_at_the_diff_gate_resumes_from_a_fresh_process(tmp_path):

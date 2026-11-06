@@ -1,0 +1,9 @@
+# Project overrides. An empty mapping inherits the package defaults.
+tracker: github
+base_branch: develop   # PRs go to develop; main only gets releases
+test_cmd: "uv run pytest -q"   # this checkout's own .venv, synced by uv
+gates:
+  - name: complexity
+    cmd: uv run complexipy src --max-complexity-allowed 6
+  - name: coverage
+    cmd: uv run pytest -q --cov=k0ntrol --cov-fail-under=90

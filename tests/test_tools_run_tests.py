@@ -167,12 +167,14 @@ def test_run_command_reuses_bytecode_compiled_outside_the_root(root, tmp_path_fa
     """Dependencies compile once per process: the second call reuses the cache.
 
     The stale value proves reuse without timing: only a cached .pyc can still
-    say 42 after a same-size, same-mtime edit outside the root.
+    say 42 after a same-size, same-mtime edit outside the root. The cache is
+    k0's own, so a ``PYTHONDONTWRITEBYTECODE`` in the user's env must not
+    switch it off.
     """
     outside = tmp_path_factory.mktemp("site")
     module = outside / "dep.py"
     module.write_text("ANSWER = 42\n")
-    environ = {**os.environ, "PYTHONPATH": str(outside)}
+    environ = {**os.environ, "PYTHONPATH": str(outside), "PYTHONDONTWRITEBYTECODE": "1"}
     probe = [sys.executable, "-c", "import dep; print(dep.ANSWER)"]
     assert run_command(probe, root=root, timeout=30, environ=environ).output.strip() == "42"
     _same_stamp_edit(module, "ANSWER = 41\n")
@@ -282,3 +284,33 @@ def test_run_tests_reports_a_timeout_as_red(root):
     )
     output = tool.invoke({"paths": []})
     assert "timed out" in output
+
+
+ENV_PROBE = [
+    sys.executable,
+    "-c",
+    "import os; print(os.environ.get('VIRTUAL_ENV')); print(os.environ['PATH'])",
+]
+
+
+def test_run_command_drops_k0s_own_virtualenv(root):
+    """Started through ``uv run``, k0's venv would lead PATH (a bare
+    ``pytest`` is k0's) and uv would warn on every project command."""
+    own_bin = str(Path(sys.executable).parent)
+    environ = {"VIRTUAL_ENV": sys.prefix, "PATH": os.pathsep.join([own_bin, "/usr/bin"])}
+
+    virtualenv, path = run_command(ENV_PROBE, root=root, timeout=30, environ=environ).output.split()
+
+    assert virtualenv == "None"
+    assert path == "/usr/bin"
+
+
+def test_run_command_keeps_another_virtualenv(root, tmp_path_factory):
+    """A venv the human activated for the project stays theirs."""
+    other = str(tmp_path_factory.mktemp("project-venv"))
+    environ = {"VIRTUAL_ENV": other, "PATH": os.pathsep.join([f"{other}/bin", "/usr/bin"])}
+
+    virtualenv, path = run_command(ENV_PROBE, root=root, timeout=30, environ=environ).output.split()
+
+    assert virtualenv == other
+    assert path == os.pathsep.join([f"{other}/bin", "/usr/bin"])

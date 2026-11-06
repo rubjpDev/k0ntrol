@@ -90,13 +90,21 @@ def build_full_graph(
     graph.add_node("spec_comment", make_spec_comment(ctx))
     graph.add_node("branch_setup", make_branch_setup(ctx))
     graph.add_node(
-        "tester", make_agent_node(ctx, "tester", "test_files", tester_brief)
+        "tester",
+        make_agent_node(
+            ctx, "tester", "test_files", with_work_item(ctx, tester_brief)
+        ),
     )
     graph.add_node("red_check", make_red_check(ctx))
     graph.add_node("test_gate", make_test_gate(ctx))
     graph.add_node("commit_tests", make_commit_tests(ctx))
     graph.add_node("test_comment", make_test_comment(ctx))
-    graph.add_node("coder", make_agent_node(ctx, "coder", "code_files", coder_brief))
+    graph.add_node(
+        "coder",
+        make_agent_node(
+            ctx, "coder", "code_files", with_work_item(ctx, coder_brief)
+        ),
+    )
     graph.add_node("validator", make_validator(ctx))
     graph.add_node("publish", make_publish(ctx))
     graph.add_node("ci_gate", make_ci_gate(ctx))
@@ -160,11 +168,12 @@ def build_full_graph(
 
 def make_spec_node(ctx: RunContext) -> Callable[[dict], dict]:
     """SPEC drafts the brief; the structured AgentBrief lands on ``brief``."""
+    brief = with_work_item(ctx, spec_brief)
 
     def node(state: dict) -> dict:
         attempt = state.get("spec_attempts", 0) + 1
         result = ctx.agent("spec").invoke(
-            [HumanMessage(_brief_with_retry(spec_brief, state))],
+            [HumanMessage(_brief_with_retry(brief, state))],
             config=ctx.agent_config(attempt),
         )
         updates: dict[str, Any] = {
@@ -440,11 +449,12 @@ def make_push(ctx: RunContext) -> Callable[[dict], dict]:
 
 def make_reviewer_node(ctx: RunContext) -> Callable[[dict], dict]:
     """REVIEWER reads the item and the diff, returns a structured Review."""
+    brief = with_work_item(ctx, _review_brief(ctx))
 
     def node(state: dict) -> dict:
         attempt = state.get("reviewer_attempts", 0) + 1
         result = ctx.agent("reviewer").invoke(
-            [HumanMessage(_brief_with_retry(_review_brief(ctx), state))],
+            [HumanMessage(_brief_with_retry(brief, state))],
             config=ctx.agent_config(attempt),
         )
         updates: dict[str, Any] = {
@@ -465,13 +475,24 @@ def make_reviewer_node(ctx: RunContext) -> Callable[[dict], dict]:
 
 
 def _review_brief(ctx: RunContext) -> Callable[[dict], str]:
-    """The reviewer brief builder bound to the run's tracker reads."""
+    """The reviewer brief builder bound to the run's tracker reads: the PR
+    and its code diff go in, so REVIEWER never judges without reading the
+    change (#94)."""
 
     def brief(state: dict) -> str:
-        change = render_work_item(ctx.tracker.read_work_item(state["change_ref"]))
-        return f"{reviewer_brief(state)}\n\n{change}"
+        ref = state["change_ref"]
+        change = render_work_item(ctx.tracker.read_work_item(ref))
+        diff = code_diff(ctx.tracker.read_change_diff(ref))
+        return f"{reviewer_brief(state)}\n\n{change}\n\n## Diff\n\n{diff}"
 
     return brief
+
+
+def code_diff(diff: str) -> str:
+    """``diff`` without its ``.k0-mem/`` files: the harness's memory commits
+    are derived data, not part of the change to judge (#84)."""
+    files = re.split(r"(?m)^(?=diff --git )", diff)
+    return "".join(f for f in files if not f.startswith("diff --git a/.k0-mem/"))
 
 
 def make_post_review(ctx: RunContext) -> Callable[[dict], dict]:
@@ -558,14 +579,36 @@ def make_mark_ready(ctx: RunContext) -> Callable[[dict], dict]:
 # --- briefs and rendering --------------------------------------------------------
 
 
+def with_work_item(
+    ctx: RunContext, brief: Callable[[dict], str]
+) -> Callable[[dict], str]:
+    """``brief`` plus the run's work item, rendered as an agent sees it.
+
+    Agents get the request in their first message instead of depending on
+    the model to call ``read_work_item`` (#86); ``render_work_item`` keeps
+    the trusted-author filter and the untrusted-body refusal. Before the
+    issue exists (``/full <text>`` up to the spec gate) the brief is
+    unchanged.
+    """
+
+    def build(state: dict) -> str:
+        text = brief(state)
+        if not state.get("item_ref"):
+            return text
+        item = ctx.tracker.read_work_item(state["item_ref"])
+        return f"{text}\n\n{render_work_item(item)}"
+
+    return build
+
+
 def spec_brief(state: dict) -> str:
     """SPEC's fresh context: the request, plus rejection feedback on redo."""
     if state.get("item_ref"):
         text = (
-            f"Refine work item #{state['item_ref']}: read it with "
-            "read_work_item — its body is the human's request, the latest "
-            "## Agent Brief comment the contract to revise — and call the "
-            "AgentBrief tool with the updated brief."
+            f"Refine work item #{state['item_ref']}, shown below — its body "
+            "is the human's request, the latest ## Agent Brief comment the "
+            "contract to revise — and call the AgentBrief tool with the "
+            "updated brief."
         )
     else:
         text = (
@@ -584,9 +627,9 @@ def spec_brief(state: dict) -> str:
 def tester_brief(state: dict) -> str:
     """TESTER's fresh context: the work item, gate feedback, red-check output."""
     text = (
-        f"Work item #{state['item_ref']}: {state['item_title']} — read it "
-        "with read_work_item; the latest ## Agent Brief comment is the "
-        "contract.\n\nWrite tests that prove the contract — and that FAIL "
+        f"Work item #{state['item_ref']}: {state['item_title']} — shown "
+        "below; the latest ## Agent Brief comment is the contract."
+        "\n\nWrite tests that prove the contract — and that FAIL "
         "right now, before the change exists. Write test files only."
     )
     if state.get("test_feedback"):
@@ -601,12 +644,17 @@ def tester_brief(state: dict) -> str:
     return text
 
 
+# A bullet the model wrote itself; the rendered checkbox replaces it.
+_BULLET = re.compile(r"^[-*]\s+")
+
+
 def render_brief(brief: dict | None) -> str:
     """The ``## Agent Brief`` markdown: gate detail and issue comment."""
     if not brief:
         return "(SPEC produced no brief)"
     criteria = "\n".join(
-        f"- [ ] {item}" for item in brief.get("acceptance_criteria", [])
+        f"- [ ] {_BULLET.sub('', item)}"
+        for item in brief.get("acceptance_criteria", [])
     )
     return (
         "## Agent Brief\n\n"
@@ -652,9 +700,8 @@ def coder_brief(state: dict) -> str:
     """CODER's fresh context: the item, the tests, review or VALIDATOR output."""
     files = ", ".join(state.get("test_files", [])) or "(none)"
     text = (
-        f"Work item #{state['item_ref']}: {state['item_title']} — read it "
-        "with read_work_item; the latest ## Agent Brief comment is the "
-        "contract.\n\n"
+        f"Work item #{state['item_ref']}: {state['item_title']} — shown "
+        "below; the latest ## Agent Brief comment is the contract.\n\n"
         f"The tests defining the contract live in: {files}. "
         "Implement the task so they pass. Write non-test files only."
     )
@@ -679,12 +726,12 @@ def coder_brief(state: dict) -> str:
 def reviewer_brief(state: dict) -> str:
     """REVIEWER's fresh context: the work item and the change to judge."""
     return (
-        f"Work item #{state['item_ref']}: {state['item_title']} — read it "
-        "with read_work_item; the latest ## Agent Brief comment is the "
-        "contract.\n\n"
-        f"Review pull request {state['change_ref']}: read the diff with "
-        "read_change_diff and the files it touches with the read tools. "
-        "Call the Review tool exactly once with your summary and findings."
+        f"Work item #{state['item_ref']}: {state['item_title']} — shown "
+        "below; the latest ## Agent Brief comment is the contract.\n\n"
+        f"Review pull request {state['change_ref']}: its diff is below, "
+        "without the .k0-mem/ memory files. Read the files it touches with "
+        "the read tools. Call the Review tool exactly once with your summary "
+        "and findings."
     )
 
 

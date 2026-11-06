@@ -3,9 +3,10 @@
 Every agent — CHATTY for ``/ask`` today, the workflow agents as their nodes
 land — is built here from ``create_agent``: the agent's allowlist, k0's
 closed middleware set (a run-scoped model-call limit with
-``exit_behavior="end"``, and tool errors surfaced to the model), an explicit
-recursion limit derived from the model-call limit, and a fresh-context
-wrapper (``K0Agent``).
+``exit_behavior="end"``, a retry of transient model errors, invalid tool
+names cleaned from what the provider receives, and tool errors surfaced to
+the model), an explicit recursion limit derived from the model-call limit,
+and a fresh-context wrapper (``K0Agent``).
 
 The allowlist is enforced in code, twice: ``agent_tools`` builds exactly
 the tools on ``ALLOWLISTS[name]``, and ``build_agent`` refuses any tool set
@@ -15,6 +16,7 @@ instances are accepted: dict tools (provider built-ins) would bypass the
 allowlist check in the tool node.
 """
 
+import re
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from importlib.resources import files
@@ -26,6 +28,9 @@ from langchain.agents import create_agent
 from langchain.agents.middleware import (
     AgentMiddleware,
     ModelCallLimitMiddleware,
+    ModelRequest,
+    ModelResponse,
+    ModelRetryMiddleware,
     ToolCallRequest,
 )
 from langchain.chat_models import init_chat_model
@@ -83,6 +88,19 @@ _WRITE_SCOPES = {"tester": "test", "coder": "non_test"}
 # and hitting a recursion limit means a k0 bug (#20).
 _STEPS_PER_CALL = 4
 _STEPS_SLACK = 8
+
+# Tries after a transient provider error before the run stops (#85). The
+# retries happen inside one model call, so they never count toward
+# ``model_calls``; each try still emits its own ``model`` event.
+_MODEL_RETRIES = 2
+
+# Connection-level failures the provider SDKs raise without a status code:
+# httpx's (ollama) and the OpenAI/Anthropic clients' (timeouts included).
+_TRANSIENT_ERROR_TYPES = frozenset({"TransportError", "APIConnectionError"})
+
+# The tool names a provider accepts in the history (Bedrock's rule, the
+# strictest one k0 talks to).
+_TOOL_NAME = re.compile(r"[a-zA-Z0-9_-]{1,64}")
 
 
 class AgentBrief(BaseModel):
@@ -194,6 +212,12 @@ def build_agent(
             ModelCallLimitMiddleware(
                 run_limit=entry["model_calls"], exit_behavior="end"
             ),
+            ModelRetryMiddleware(
+                max_retries=_MODEL_RETRIES,
+                retry_on=is_transient,
+                on_failure="error",
+            ),
+            ToolNameMiddleware(),
             ToolErrorMiddleware(),
         ],
         name=name,
@@ -205,6 +229,52 @@ def build_agent(
         model_calls=entry["model_calls"],
         effort=entry.get("effort"),
     )
+
+
+def is_transient(error: Exception) -> bool:
+    """A model error worth another try: anything but a 4xx client error
+    (408 and 429 excepted), or a connection or timeout failure. Ollama
+    reports an error inside its response stream with status ``-1``."""
+    if isinstance(error, (ConnectionError, TimeoutError)):
+        return True
+    status = getattr(error, "status_code", None)
+    if isinstance(status, int):
+        return status in (408, 429) or not 400 <= status < 500
+    return any(
+        cls.__name__ in _TRANSIENT_ERROR_TYPES for cls in type(error).__mro__
+    )
+
+
+class ToolNameMiddleware(AgentMiddleware):
+    """Send the provider only valid tool names.
+
+    A model can call a tool named ``functions.edit_file``. The tool node
+    answers with a "not a valid tool" error the model sees, but the bad
+    name stays in the history, and Bedrock rejects every later request.
+    Only the request copy is cleaned: the agent's messages keep what the
+    model said.
+    """
+
+    def wrap_model_call(
+        self,
+        request: ModelRequest,
+        handler: Callable[[ModelRequest], ModelResponse],
+    ) -> ModelResponse:
+        messages = [_clean_tool_names(message) for message in request.messages]
+        return handler(request.override(messages=messages))
+
+
+def _clean_tool_names(message: BaseMessage) -> BaseMessage:
+    if not isinstance(message, AIMessage) or all(
+        _TOOL_NAME.fullmatch(call["name"]) for call in message.tool_calls
+    ):
+        return message
+    calls = [{**call, "name": _clean_name(call["name"])} for call in message.tool_calls]
+    return message.model_copy(update={"tool_calls": calls})
+
+
+def _clean_name(name: str) -> str:
+    return re.sub(r"[^a-zA-Z0-9_-]", "_", name)[:64] or "invalid_tool"
 
 
 class ToolErrorMiddleware(AgentMiddleware):

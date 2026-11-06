@@ -42,6 +42,10 @@ SCAN_QUESTION = (
     "  - gotchas: <gotchas, or none>"
 )
 
+# The scan's own output: listing it would make the graph change on every
+# scan and land in every change k0 commits (#84).
+_OUTPUT_DIR = ".k0-mem/Project_context/"
+
 _NOTE_HEADERS = (
     ("- FILE ", ""),
     ("- FUNCTION ", "fn:"),
@@ -194,7 +198,8 @@ def _text_tracked_files(root: Path, stdout: bytes) -> list[Path]:
 
 
 def _nul_split_paths(stdout: bytes) -> list[str]:
-    return [item.decode() for item in stdout.split(b"\0") if item]
+    paths = [item.decode() for item in stdout.split(b"\0") if item]
+    return [path for path in paths if not path.startswith(_OUTPUT_DIR)]
 
 
 def _is_text_file(path: Path) -> bool:

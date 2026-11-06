@@ -102,9 +102,8 @@ def _last_output(result) -> str:
     if result.text:
         return _tail(result.text)
     for message in reversed(result.messages):
-        content = getattr(message, "content", "")
-        if isinstance(content, str) and content.strip():
-            return _tail(content)
+        if isinstance(message, ToolMessage) and str(message.content).strip():
+            return _tail(str(message.content))
     return ""
 
 

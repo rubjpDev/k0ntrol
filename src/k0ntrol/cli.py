@@ -103,6 +103,7 @@ def _run_session(*, init=init_chat_model) -> int:
         color=color_enabled(sys.stdout),
         echo_input=False,
         init=init,
+        stream=lambda text: print(text, end="", flush=True),
     )
 
 
