@@ -375,6 +375,30 @@ def test_other_tool_exceptions_still_propagate(tmp_path):
         agent.invoke([HumanMessage("go")])
 
 
+# --- a malformed tool name never reaches the provider ----------------------------
+
+
+def test_an_invalid_tool_name_is_cleaned_before_the_next_model_call(tmp_path):
+    """Bedrock rejects a request whose history holds a tool name outside
+    ``[a-zA-Z0-9_-]``; the model still sees the "not a valid tool" error."""
+    model = _scripted(
+        AIMessage(
+            content="",
+            tool_calls=[{"name": "functions.read_file", "args": {}, "id": "t1"}],
+        ),
+        AIMessage(content="recovered"),
+    )
+
+    result = _chatty(tmp_path, model).invoke([HumanMessage("go")])
+
+    assert result.text == "recovered"
+    sent = model.invocations[1]
+    names = [c["name"] for m in sent if isinstance(m, AIMessage) for c in m.tool_calls]
+    assert names == ["functions_read_file"]
+    errors = [m for m in sent if isinstance(m, ToolMessage) and m.status == "error"]
+    assert "functions.read_file is not a valid tool" in errors[0].content
+
+
 # --- transient model errors are retried (#85) ----------------------------------
 
 
