@@ -601,6 +601,41 @@ def test_green_tests_loop_back_to_tester(tmp_path):
     assert "PASSED" in second_brief
 
 
+class BadRequest(Exception):
+    """A provider 400: never retried, so it stops the run (#85)."""
+
+    status_code = 400
+
+
+def test_red_check_sees_tests_a_stopped_tester_left_behind(tmp_path):
+    """TESTER writes a failing test and the run stops; the resumed TESTER
+    writes nothing, and the red check still runs the kept test (#99)."""
+    git_repo(tmp_path)
+    tracker = FakeTracker(git_runner=git_runner_for(tmp_path))
+    first = run_full(tmp_path, full_cfg(), tracker, spec_model(), scan=writing_scan)
+    stopped = fake_tester(write_call("tests/test_calc.py", TEST_SRC), BadRequest())
+    with pytest.raises(BadRequest):
+        resume(
+            first.run, "ok", root=tmp_path, cfg=full_cfg(), tracker=tracker,
+            init=models_init(stopped), scan=writing_scan,
+        )
+
+    idle = fake_tester(AIMessage(content="the failing tests are already there"))
+    result = resume(
+        first.run, None, root=tmp_path, cfg=full_cfg(), tracker=tracker,
+        init=models_init(idle), scan=writing_scan,
+    )
+
+    assert isinstance(result, Pending) and result.gate == "test"
+    assert "tests/test_calc.py" in result.detail
+    coder = fake_tester(write_call("calc.py", CALC_SRC), AIMessage(content="done"))
+    resume(
+        first.run, "ok", root=tmp_path, cfg=full_cfg(), tracker=tracker,
+        init=models_init(coder, reviewer_model()), scan=writing_scan,
+    )
+    assert "live in: tests/test_calc.py" in coder.invocations[0][-1].content
+
+
 def test_gate_comment_lists_earlier_rejections(tmp_path):
     git_repo(tmp_path)
     tracker = FakeTracker(git_runner=git_runner_for(tmp_path))
