@@ -393,6 +393,49 @@ def test_live_respects_the_names_subset():
     assert all(call["model"] == "m" for call in calls)
 
 
+# --- provider error truncation ---
+
+
+def test_live_long_error_first_line_preserved():
+    """A provider error with first line >200 chars shows the whole line."""
+    # AWS ValidationException message from the bug report
+    long_error = (
+        "An error occurred (ValidationException) when calling the Converse operation: "
+        "Invocation of model ID openai.gpt-6.1-terra with on-demand throughput isn't "
+        "supported. Retry your request with the ID or ARN of an inference profile that "
+        "contains this model"
+    )
+    assert len(long_error) > 200
+
+    def init(model, *, model_provider=None, **kwargs):
+        raise RuntimeError(long_error)
+
+    cfg = cfg_with(agent_entries={"coder": {"provider": "bedrock", "model": "m"}})
+    checks = live_checks(cfg, init)
+    error_detail = [c.detail for c in checks if c.status == "error"][0]
+    # The entire first line should be preserved
+    assert long_error in error_detail
+    # Should contain the fix guidance
+    assert "ARN of an inference profile" in error_detail
+
+
+def test_live_multiline_error_shows_only_first_line():
+    """A multi-line provider error shows only its first line in doctor output."""
+    multi_line_error = "first line: something went wrong\nsecond line: stack trace\nthird line: more info"
+
+    def init(model, *, model_provider=None, **kwargs):
+        raise RuntimeError(multi_line_error)
+
+    cfg = cfg_with(agent_entries={"coder": {"provider": "bedrock", "model": "m"}})
+    checks = live_checks(cfg, init)
+    error_detail = [c.detail for c in checks if c.status == "error"][0]
+    # Only the first line should be returned
+    assert "first line: something went wrong" in error_detail
+    # Subsequent lines should not appear
+    assert "second line" not in error_detail
+    assert "third line" not in error_detail
+
+
 # --- the `k0 doctor` command ---
 
 

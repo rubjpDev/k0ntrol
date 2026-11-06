@@ -278,3 +278,6 @@ def test_tool_calling_models_uses_the_project_base_url():
     )
     assert models == ["m"]
     assert urls == ["http://gpu-box:1234/v1/models"]
+
+
+
