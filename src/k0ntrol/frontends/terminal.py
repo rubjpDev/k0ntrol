@@ -7,6 +7,8 @@ through a handful of methods (``read``, ``line``, ``event``, ``stream``,
 ``gate``, ``confirm``); without a terminal the session keeps plain lines.
 """
 
+import time
+from collections.abc import Callable
 from pathlib import Path
 
 import yaml
@@ -15,8 +17,9 @@ from rich.text import Text
 
 from k0ntrol.frontends.prompt import Prompt, render_welcome, terminal_key_reader
 from k0ntrol.credentials import load_credentials
-from k0ntrol.frontends.render import LiveRenderer, render_gate
+from k0ntrol.frontends.render import LiveRenderer, format_elapsed, format_tokens, render_gate
 from k0ntrol.frontends.setup import run_project_setup, run_provider_setup
+from k0ntrol.pricing import estimate_cost
 from k0ntrol.frontends.theme import ACCENT, BULLET, DIM, ERROR, WARN
 
 COMMANDS = {
@@ -54,13 +57,59 @@ FEEDBACK_LABELS = {
 }
 
 
+class SessionStats:
+    """What this session has spent so far: time, tokens, estimated cost."""
+
+    def __init__(self, clock: Callable[[], float] = time.monotonic) -> None:
+        self._clock = clock
+        self._start = clock()
+        self.tokens_in = 0
+        self.tokens_out = 0
+        self.cost = 0.0
+        self.cost_complete = True  # False once a call had no known price
+
+    def add(self, event: dict) -> None:
+        if event.get("kind") != "model":
+            return
+        tokens_in, tokens_out = event.get("tokens_in") or 0, event.get("tokens_out") or 0
+        self.tokens_in += tokens_in
+        self.tokens_out += tokens_out
+        cost = estimate_cost(event.get("provider"), event.get("model"), tokens_in, tokens_out)
+        if cost is None:
+            self.cost_complete = False
+            return
+        self.cost += cost
+
+    def summary(self) -> list[str]:
+        """``12m``, ``↑ 45.2k ↓ 3.1k``, ``≈ $0.04``: the parts there is data for."""
+        parts = [format_elapsed(self._clock() - self._start)]
+        if self.tokens_in or self.tokens_out:
+            parts.append(f"↑ {format_tokens(self.tokens_in)} ↓ {format_tokens(self.tokens_out)}")
+        if self.cost or self.cost_complete and self.tokens_in:
+            parts.append(f"≈ {format_cost(self.cost)}" + ("" if self.cost_complete else "+"))
+        return parts
+
+
+def format_cost(usd: float) -> str:
+    """Cents for real spend, four decimals while it is still under a cent."""
+    return f"${usd:.2f}" if usd >= 0.01 or usd == 0 else f"${usd:.4f}"
+
+
 class Terminal:
     """The REPL front for an interactive terminal."""
 
-    def __init__(self, console: Console, prompt: Prompt, renderer: LiveRenderer) -> None:
+    def __init__(
+        self,
+        console: Console,
+        prompt: Prompt,
+        renderer: LiveRenderer,
+        stats: SessionStats | None = None,
+    ) -> None:
         self._console = console
         self._prompt = prompt
         self._renderer = renderer
+        self._stats = stats or SessionStats()
+        self._provider: str | None = None
         self._answering = False
         self._at_line_start = True
         self._answered_gate = False
@@ -70,29 +119,44 @@ class Terminal:
     def open(cls, history: Path | None = None) -> "Terminal":
         """The terminal front on the real stdin/stdout."""
         console = Console(highlight=False)
+        stats = SessionStats()
+        terminal: Terminal | None = None
         prompt = Prompt(
-            console, commands=COMMANDS, history=history, read_key=terminal_key_reader()
+            console, commands=COMMANDS, history=history, read_key=terminal_key_reader(),
+            status=lambda: terminal.status_line() if terminal else "",
         )
-        return cls(console, prompt, LiveRenderer(console))
+        terminal = cls(console, prompt, LiveRenderer(console), stats)
+        return terminal
 
     def welcome(self, *, version: str, provider: str | None, cwd: str) -> None:
         """The welcome screen, once per session (first-run setup shows it early)."""
         if self._welcomed:
             return
         self._welcomed = True
+        self._provider = provider
+        self._console.clear()  # k0 starts on a clean screen (no-op off a terminal)
         color = self._console.color_system is not None
         short = short_path(cwd, self._console.width - 40)
         render_welcome(self._console, version=version, provider=provider, cwd=short, color=color)
 
     def read(self) -> str:
         self._settle()
-        return self._prompt.read()
+        self._console.set_window_title(" · ".join(["k0", *self._stats.summary()]))
+        line = self._prompt.read()
+        self._renderer.new_turn()
+        return line
+
+    def status_line(self) -> str:
+        """The bar under the input: provider · time · tokens · cost · hint."""
+        parts = [self._provider] if self._provider else []
+        return " · ".join([*parts, *self._stats.summary(), "? for shortcuts"])
 
     def line(self, text: str) -> None:
         self._settle()
         self._console.print(Text.from_ansi(text, style=line_style(text)))
 
     def event(self, event: dict) -> None:
+        self._stats.add(event)
         if self._continues_after_gate(event):
             return
         self._end_answer()

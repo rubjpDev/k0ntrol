@@ -1,3 +1,4 @@
+import re
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -53,6 +54,7 @@ def run_session(
     else:
         write, stream = _terminal(write, stream)
     transcript = _new_transcript(root)
+    chat: list[tuple[str, str]] = []  # this session's questions and answers
     show = _transcript_writer(write, transcript, events=getattr(ui, "event", None))
     front = _ui_front(ui, show, transcript) if ui else _plain_front(read_line, show)
     if reflector is None:
@@ -72,6 +74,7 @@ def run_session(
             commands=_commands(ui, show, config, root),
             ask=lambda question: _run_ask(
                 question,
+                chat=chat,
                 ask=ask,
                 root=root,
                 config=config,
@@ -282,9 +285,26 @@ def _session_should_quit(
     return _handle_command(line, show, ask=ask, work=work, commands=commands)
 
 
+# The last exchanges an answer reads, and how much of each old answer.
+_CHAT_TURNS = 4
+_CHAT_ANSWER_CHARS = 1500
+
+
+def _chat_history(chat: list[tuple[str, str]]) -> str:
+    """The conversation so far as plain text for CHATTY's next question."""
+    if not chat:
+        return ""
+    turns = [
+        f"Q: {question}\nA: {answer[:_CHAT_ANSWER_CHARS]}"
+        for question, answer in chat[-_CHAT_TURNS:]
+    ]
+    return "Earlier in this conversation:\n\n" + "\n\n".join(turns) + "\n\nNow:"
+
+
 def _run_ask(
     question: str,
     *,
+    chat: list[tuple[str, str]],
     ask: Callable,
     root: Path,
     config: dict,
@@ -302,12 +322,14 @@ def _run_ask(
             config=config,
             write=show,
             on_text=lambda delta: (stream(delta), deltas.append(delta)),
+            history=_chat_history(chat),
         )
     except KeyboardInterrupt:
         show("answer interrupted")
         result = None
     if result is not None:
         reflector.ask_turn()
+        chat.append((question, "".join(deltas)))
     if deltas:
         _append_transcript(transcript, "".join(deltas))
 
@@ -517,6 +539,15 @@ def _echo_session_input(
     _append_transcript(transcript, input_line)
 
 
+def _route_text(line: str, *, ask: Callable[[str], None], work: Callable[[str, str], None]) -> None:
+    """Plain text is a question for CHATTY; ``#12`` alone works issue 12."""
+    text = line.strip()
+    if re.fullmatch(r"#\d+", text):
+        work("full", text)
+        return
+    ask(text)
+
+
 def _new_transcript(root: Path) -> Path:
     directory = root / ".k0-mem" / "sessions"
     directory.mkdir(parents=True, exist_ok=True)
@@ -579,6 +610,9 @@ def _handle_command(
     command, _, argument = line.partition(" ")
     if command == "/quit":
         return True
+    if not command.startswith("/") and command != "?":
+        _route_text(line, ask=ask, work=work)
+        return False
     handlers = {
         "/ask": ask,
         "/fast": lambda task: work("fast", task),

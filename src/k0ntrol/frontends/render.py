@@ -251,6 +251,11 @@ class LiveRenderer:
     def close(self) -> None:
         self._stop_spinner()
 
+    def new_turn(self) -> None:
+        """The human spoke: the next agent prints its header again."""
+        self._stop_spinner()
+        self._stretch = None
+
     # event handlers
 
     def _on_run_start(self, event: dict) -> None:

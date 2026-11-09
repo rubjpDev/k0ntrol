@@ -36,12 +36,12 @@ CHOOSE_HINT = "↑/↓ to move · enter to select · 1-9 to pick"
 SHORTCUTS = "↑/↓ history · tab completes /commands · ctrl-c pauses a run · ctrl-d quits"
 WELCOME_LINES = (
     "",
-    "  /help for commands · /status for your setup · ? for shortcuts",
+    "  Just type to ask about this repo · /help for commands · ? for shortcuts",
     "",
     "  Tips for getting started:",
-    "  1. /ask a question about this repo",
-    "  2. /full #<issue> to take a work item to a pull request",
-    "  3. /fast <task> for a quick test-first change",
+    "  1. type a question: k0 answers and remembers the conversation",
+    "  2. #<issue> takes a work item to a pull request",
+    "  3. /fast <task> for a quick test-first change · /full <task> for new work",
 )
 _UP_KEYS = {"up", "k"}
 _DOWN_KEYS = {"down", "j"}
@@ -157,8 +157,10 @@ class Prompt:
         tty: bool | None = None,
         read_input: Callable[[str], str] = input,
         read_key: Callable[[], str] | None = None,
+        status: Callable[[], str] | None = None,
     ) -> None:
         self._console = console
+        self._status = status
         self._commands = commands
         self._history = history
         self._tty = _is_tty() if tty is None else tty
@@ -216,7 +218,8 @@ class Prompt:
         self._console.print(rule, overflow="crop", no_wrap=True)
         self._raw("\n")
         self._console.print(rule, overflow="crop", no_wrap=True)
-        self._console.print(Text("  " + INPUT_HINT, style=DIM))
+        hint = self._status() if self._status is not None else INPUT_HINT
+        self._console.print(Text("  " + hint, style=DIM), overflow="ellipsis", no_wrap=True)
         self._raw("\x1b[3A")
 
     def _replace_frame(self, line: str) -> None:

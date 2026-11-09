@@ -43,8 +43,12 @@ def answer_ask(
     check: Callable = free_checks,
     refresh: Callable = refresh_memory,
     tracing: Callable = build_trace,
+    history: str = "",
 ) -> AgentResult | None:
     """Answer ``question`` with CHATTY.
+
+    ``history`` is the conversation so far, as text: each answer is still a
+    fresh agent run, it just reads what was said before.
 
     ``write`` takes progress lines and errors; ``on_text`` takes the
     streamed answer deltas (defaults to ``write``). Returns the agent
@@ -54,6 +58,7 @@ def answer_ask(
     prompt = _prepare(question, root, config, write, check)
     if prompt is None:
         return None
+    prompt = f"{history}\n\n{prompt}" if history else prompt
     writer, handler, chat_id = _chat_events(root, write)
     trace = tracing(chat_id)  # each /ask is its own trace (#49)
     if not _refresh(root, config, init, handler, write, refresh, trace):

@@ -140,3 +140,58 @@ def test_short_path_uses_tilde_and_cuts_from_the_left():
 
     assert short_path("/Users/me/code/k0", 60, home="/Users/me") == "~/code/k0"
     assert short_path("/srv/a/very/long/path/to/repo", 12, home="/Users/me") == "…ath/to/repo"
+
+
+def test_session_stats_sum_tokens_and_estimate_cost():
+    from k0ntrol.frontends.terminal import SessionStats
+
+    now = [0.0]
+    stats = SessionStats(clock=lambda: now[0])
+    stats.add({"kind": "model", "provider": "amazon_bedrock", "model": "qwen.qwen3-next-80b-a3b",
+               "tokens_in": 1_000_000, "tokens_out": 100_000})
+    stats.add({"kind": "tool", "tool": "read_file"})
+    now[0] = 125
+
+    assert stats.summary() == ["2m 5s", "↑ 1M ↓ 100k", "≈ $0.27"]
+    stats.add({"kind": "model", "provider": "anthropic", "model": "claude-opus-5-5",
+               "tokens_in": 10, "tokens_out": 10})
+    assert stats.summary()[-1] == "≈ $0.27+"  # one call had no known price
+
+
+def test_local_models_cost_nothing():
+    from k0ntrol.pricing import estimate_cost
+
+    assert estimate_cost("ollama", "gpt-oss:20b", 5_000, 500) == 0.0
+    assert estimate_cost("anthropic", "unknown", 5_000, 500) is None
+
+
+def test_plain_text_chats_with_memory_and_a_bare_issue_number_works_it(tmp_path):
+    asked, worked = [], []
+    ui, _ = terminal(["what does slugify do?", "and where is it tested?", "#12", "/quit"])
+
+    def fake_ask(question, **kwargs):
+        asked.append((question, kwargs["history"]))
+        kwargs["on_text"]("it makes slugs")
+        return object()
+
+    run_session(
+        lambda: "unused", print, root=tmp_path, config={"agents": {}}, ui=ui,
+        ask=fake_ask, start=lambda kind, task, **k: worked.append((kind, task)),
+    )
+
+    assert asked[0] == ("what does slugify do?", "")
+    assert "Q: what does slugify do?\nA: it makes slugs" in asked[1][1]
+    assert worked == [("full", "#12")]
+
+
+def test_small_costs_keep_four_decimals_and_each_question_reprints_its_agent():
+    from k0ntrol.frontends.terminal import format_cost
+
+    assert format_cost(0.0012) == "$0.0012"
+    assert format_cost(0.27) == "$0.27"
+    ui, console = terminal(["first?", "second?"])
+    chatty = {"kind": "tool", "agent": "chatty", "tool": "grep", "ok": True}
+    for _ in range(2):
+        ui.read()
+        ui.event(chatty)
+    assert console.export_text().count("CHATTY") == 2

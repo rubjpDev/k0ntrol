@@ -62,9 +62,9 @@ def test_welcome_prints_banner_and_tips():
     render_welcome(console, version="0.1.0", provider="ollama", cwd="/w", color=False)
     text = console.export_text()
     assert "k0ntrol v0.1.0" in text and "ollama" in text and "/w" in text
-    assert "/help for commands · /status for your setup · ? for shortcuts" in text
-    assert "1. /ask a question about this repo" in text
-    assert "3. /fast <task> for a quick test-first change" in text
+    assert "Just type to ask about this repo · /help for commands" in text
+    assert "1. type a question: k0 answers and remembers the conversation" in text
+    assert "2. #<issue> takes a work item to a pull request" in text
 
 
 def test_complete_command_matches_prefix_only_for_slash():
