@@ -18,11 +18,13 @@ from rich.live import Live
 from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.text import Text
+from rich.theme import Theme
 
 from k0ntrol.frontends.diffview import render_diff
 from k0ntrol.frontends.theme import (
     ACCENT,
     BORDER,
+    BRAND,
     BULLET,
     CHECK,
     CROSS,
@@ -434,6 +436,16 @@ def _gate_body(detail: str) -> RenderableType:
     return Group(body, Text(f"… {hidden} more lines", style=DIM))
 
 
+# Rich draws markdown headings underlined, like links; in a gate panel they
+# are section labels, so they take the palette instead.
+_GATE_MARKDOWN = Theme({
+    "markdown.h1": f"bold {ACCENT}",
+    "markdown.h2": f"bold {ACCENT}",
+    "markdown.h3": "bold",
+    "markdown.code": BRAND,
+})
+
+
 def render_gate(
     console: Console, *, gate: str, question: str, detail: str, diff: str = ""
 ) -> None:
@@ -442,6 +454,13 @@ def render_gate(
 
     `question` is not printed: the option selector shows it.
     """
+    with console.use_theme(_GATE_MARKDOWN):
+        _print_gate_panel(console, gate, detail)
+    if diff.strip():
+        console.print(render_diff(diff))
+
+
+def _print_gate_panel(console: Console, gate: str, detail: str) -> None:
     console.print(
         Panel(
             _gate_body(detail),
@@ -452,5 +471,3 @@ def render_gate(
             padding=(0, 1),
         )
     )
-    if diff.strip():
-        console.print(render_diff(diff))

@@ -121,7 +121,7 @@ def render_diff(diff: str) -> RenderableType:
 
 def _file_panel(file: FileDiff) -> Panel:
     title = Text.assemble(
-        (file.path, "bold"), (f" +{file.count('+')}", OK), (f" -{file.count('-')}", ERROR)
+        (file.path, "bold default"), (f" +{file.count('+')}", OK), (f" -{file.count('-')}", ERROR)
     )
     return Panel(
         _file_body(file),

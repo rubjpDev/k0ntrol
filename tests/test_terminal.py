@@ -234,3 +234,22 @@ def test_a_gate_with_a_diff_draws_it_below_the_panel():
     text = console.export_text()
     assert text.index("Review gate") < text.index("calc.py +1 -1")
     assert "x = 41" in text and "x = 42" in text
+
+
+def test_status_keeps_a_long_path_on_one_line_cut_from_the_left():
+    ui, console = terminal([])
+    ui.status([("cwd", "/home/" + "x" * 200 + "/repo"), ("vcs", "github")])
+    rows = [row.rstrip() for row in console.export_text().splitlines() if row.strip()]
+    assert len(rows) == 2
+    assert rows[0].startswith("  cwd  …") and rows[0].endswith("/repo")
+
+
+def test_status_rows_show_the_effort_of_each_model():
+    from pathlib import Path
+
+    from k0ntrol.frontends.session import _status_rows
+
+    rows = dict(_status_rows({"agents": {"spec": {"provider": "anthropic", "model": "m", "effort": "high"},
+                                         "chatty": {"provider": "anthropic", "model": "h"}}}, Path("/r")))
+    assert rows["spec"] == "anthropic/m · high"
+    assert rows["chatty"] == "anthropic/h"

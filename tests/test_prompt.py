@@ -1,3 +1,4 @@
+import os
 import io
 from pathlib import Path
 
@@ -223,7 +224,7 @@ def test_choose_with_keys_arrows_then_enter():
     assert "↑/↓ to move · enter to select · 1-9 to pick" in out
     assert "\x1b[3A" in out
     # once chosen, the menu collapses to the answer, like Claude Code
-    assert out.rstrip().endswith("❯ Send back with feedback")
+    assert out.rstrip().endswith("⎿  Send back with feedback")
 
 
 def test_choose_with_keys_enter_takes_first_and_digit_picks():
@@ -324,3 +325,42 @@ def test_without_readline_everything_still_works(monkeypatch, tmp_path):
     )
     assert prompt.read() == "x"
     assert not Path(tmp_path / "h").exists()
+
+
+@pytest.mark.skipif(not hasattr(os, "openpty"), reason="needs a pseudo-terminal")
+def test_keys_typed_ahead_in_a_real_terminal_are_not_dropped():
+    """Down and Enter arriving in one read: entering cbreak mode must not
+    flush the Enter that is already waiting (tty.setcbreak's default does)."""
+    import select
+    import subprocess
+    import sys
+    import time
+
+    child = (
+        "from rich.console import Console\n"
+        "from k0ntrol.frontends.prompt import Prompt, read_key\n"
+        "p = Prompt(Console(), commands={}, tty=True, read_key=read_key)\n"
+        "print('GOT', p.choose('Q', [('a', 'A'), ('b', 'B')]), flush=True)\n"
+    )
+    main, side = os.openpty()
+    proc = subprocess.Popen([sys.executable, "-c", child], stdin=side, stdout=side, stderr=side)
+    os.close(side)
+
+    def read_until(marker: bytes, seconds: float) -> bytes:
+        out, end = b"", time.time() + seconds
+        while marker not in out and time.time() < end:
+            if select.select([main], [], [], 0.05)[0]:
+                try:
+                    out += os.read(main, 4096)
+                except OSError:
+                    break
+        return out
+
+    try:
+        assert b"to pick" in read_until(b"to pick", 10)
+        os.write(main, b"\x1b[B\r")
+        assert b"GOT b" in read_until(b"GOT", 5)
+    finally:
+        proc.kill()
+        proc.wait()
+        os.close(main)

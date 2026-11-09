@@ -539,3 +539,13 @@ def test_a_quiet_call_turns_the_spinner_into_a_stall_warning():
     text = renderer._spinner_text().plain
 
     assert "SPEC · no response for 2m 5s" in text and "ctrl-c pauses the run" in text
+
+
+def test_gate_markdown_headings_are_not_underlined_like_links() -> None:
+    import re
+
+    console = Console(record=True, width=100, force_terminal=True, color_system="truecolor", file=io.StringIO())
+    render_gate(console, gate="review", question="ok?", detail="PR 3\n\n## Review\n\n- `x` fine\n")
+    ansi = console.export_text(styles=True)
+    heading = ansi[ansi.index("Review", ansi.index("Review gate") + 6) - 40:]
+    assert not re.search(r"\x1b\[(?:\d+;)*4(?:;\d+)*m[^\x1b]*Review", heading)

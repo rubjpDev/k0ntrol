@@ -59,6 +59,13 @@ FEEDBACK_LABELS = {
 }
 
 
+def fit_left(text: str, width: int) -> str:
+    """``text`` cut from the left to ``width`` columns: a path keeps its end."""
+    if len(text) <= width or width < 2:
+        return text
+    return "…" + text[-(width - 1):]
+
+
 class SessionStats:
     """What this session has spent so far: time, tokens, estimated cost."""
 
@@ -210,10 +217,11 @@ class Terminal:
     def status(self, rows: list[tuple[str, str]]) -> None:
         self._settle()
         width = max((len(name) for name, _ in rows), default=0)
+        room = self._console.width - width - 4
         for name, value in rows:
             line = Text("  ")
             line.append(name.ljust(width), style=DIM)
-            line.append(f"  {value}")
+            line.append(f"  {fit_left(value, room)}")
             self._console.print(line)
 
     def first_run(self, root: Path, home: Path) -> None:

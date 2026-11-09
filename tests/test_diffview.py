@@ -136,3 +136,10 @@ def test_a_file_without_hunks_says_so() -> None:
     rows = rendered("diff --git a/logo.png b/logo.png\nBinary files a/logo.png and b/logo.png differ\n")
     assert "logo.png" in rows[0]
     assert any("no text changes" in row for row in rows)
+
+
+def test_a_panel_title_path_does_not_take_the_border_colour() -> None:
+    from k0ntrol.frontends import diffview
+
+    title = diffview._file_panel(parse_diff(CHANGE)[0]).title
+    assert "default" in str(title.spans[0].style)

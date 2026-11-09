@@ -15,7 +15,7 @@ from rich.console import Console
 from rich.text import Text
 
 from k0ntrol.frontends.banner import render_banner
-from k0ntrol.frontends.theme import ACCENT, BORDER, BRAND, DIM, POINTER
+from k0ntrol.frontends.theme import ACCENT, BORDER, BRAND, DIM, ELBOW, POINTER
 
 try:
     import readline
@@ -112,7 +112,7 @@ def _read_sequence() -> str:  # pragma: no cover - raw terminal I/O
     fd = sys.stdin.fileno()
     saved = termios.tcgetattr(fd)
     try:
-        tty_mode.setcbreak(fd)
+        tty_mode.setcbreak(fd, termios.TCSANOW)  # TCSAFLUSH would drop typed-ahead keys
         text = os.read(fd, 1).decode(errors="ignore")
         while text.startswith("\x1b") and len(text) < 3 and _key_pending(fd):
             text += os.read(fd, 1).decode(errors="ignore")
@@ -268,7 +268,7 @@ class Prompt:
         """Replace the menu and its hint with the chosen answer."""
         lines = len(options) + 1
         self._raw(f"\x1b[{lines}A" + "\x1b[2K\n" * lines + f"\x1b[{lines}A")
-        self._console.print(Text(f"  {POINTER} {options[index][1]}", style=ACCENT))
+        self._console.print(Text.assemble((f"  {ELBOW}  ", DIM), (options[index][1], ACCENT)))
 
     def _setup_readline(self) -> None:
         readline.set_completer(self.complete)

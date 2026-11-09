@@ -216,9 +216,14 @@ def _status_rows(config: dict, root: Path) -> list[tuple[str, str]]:
     rows.append(("tracker", str(config.get("tracker") or "none")))
     rows.append(("test_cmd", str(config.get("test_cmd", ""))))
     for kind in ("agents", "helpers"):
-        for name, entry in (config.get(kind) or {}).items():
-            rows.append((name, f"{entry.get('provider')}/{entry.get('model')}"))
+        rows += [(name, _model_text(entry)) for name, entry in (config.get(kind) or {}).items()]
     return rows
+
+
+def _model_text(entry: dict) -> str:
+    """``provider/model``, with ``· effort`` when one is set."""
+    effort = f" · {entry['effort']}" if entry.get("effort") else ""
+    return f"{entry.get('provider')}/{entry.get('model')}{effort}"
 
 
 def _show_rows(show: Callable[[str], None], rows: list[tuple[str, str]]) -> None:

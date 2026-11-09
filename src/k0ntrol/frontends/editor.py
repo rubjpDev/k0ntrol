@@ -677,7 +677,7 @@ class RawKeyReader:
             return
         fd = sys.stdin.fileno()
         saved = termios.tcgetattr(fd)
-        tty_mode.setcbreak(fd)
+        tty_mode.setcbreak(fd, termios.TCSANOW)  # TCSAFLUSH would drop typed-ahead keys
         sys.stdout.write(PASTE_ON)
         sys.stdout.flush()
         self._active = True
