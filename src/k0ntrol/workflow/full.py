@@ -40,6 +40,7 @@ from k0ntrol.workflow.change import (
     decider,
     existing_branch,
     remote_tip,
+    reset_scan_output,
     slugify,
     worktree_summary,
 )
@@ -290,6 +291,7 @@ def make_branch_setup(ctx: RunContext) -> Callable[[dict], dict]:
             or existing_branch(ctx.root, ref)
             or f"k0/{ref}-{slugify(state['item_title'])}"
         )
+        reset_scan_output(ctx.root)
         ctx.tracker.create_branch(branch, ctx.base_branch)
         ctx.scan(ctx.root)
         ctx.tracker.commit(f"#{ref}: update memory")

@@ -8,7 +8,7 @@ from rich.console import Console
 from k0ntrol.frontends.prompt import Prompt
 from k0ntrol.frontends.render import LiveRenderer
 from k0ntrol.frontends.session import run_session
-from k0ntrol.frontends.terminal import COMMANDS, Terminal, gate_options
+from k0ntrol.frontends.terminal import COMMANDS, Terminal, gate_options, line_style
 from k0ntrol.workflow import Outcome, Pending
 
 
@@ -78,3 +78,9 @@ def test_the_session_asks_gates_and_reports_through_the_ui(tmp_path):
     assert "Spec gate" in text
     assert "bedrock/m" in text  # /status
     assert "run done" not in text  # the renderer reports the outcome, not the session
+
+
+def test_failures_read_red_and_pauses_amber():
+    assert line_style("run r1 failed: git checkout failed") == "#F87171"
+    assert line_style("run paused · run the same command again to resume it") == "#FBBF24"
+    assert line_style("saving session memory…") == ""

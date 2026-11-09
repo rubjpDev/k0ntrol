@@ -14,7 +14,7 @@ from rich.text import Text
 
 from k0ntrol.frontends.prompt import Prompt, render_welcome, terminal_key_reader
 from k0ntrol.frontends.render import LiveRenderer, render_gate
-from k0ntrol.frontends.theme import ACCENT, BULLET, DIM
+from k0ntrol.frontends.theme import ACCENT, BULLET, DIM, ERROR, WARN
 
 COMMANDS = {
     "/ask": "ask a question about this repo",
@@ -79,7 +79,7 @@ class Terminal:
 
     def line(self, text: str) -> None:
         self._settle()
-        self._console.print(Text.from_ansi(text))
+        self._console.print(Text.from_ansi(text, style=line_style(text)))
 
     def event(self, event: dict) -> None:
         self._end_answer()
@@ -143,6 +143,16 @@ class Terminal:
             self._console.print()
         self._answering = False
         self._at_line_start = True
+
+
+def line_style(text: str) -> str:
+    """Failures read red, pauses amber; every other session line is plain."""
+    head = text.split(":", 1)[0]
+    if "failed" in head or text.startswith("refusing"):
+        return ERROR
+    if text.startswith(("run paused", "answer interrupted")):
+        return WARN
+    return ""
 
 
 def gate_options(gate: str, answers: tuple[str, ...]) -> list[tuple[str, str]]:

@@ -257,6 +257,30 @@ def test_untrusted_issue_body_is_refused(tmp_path):
         run_full(tmp_path, full_cfg(), tracker, spec_model(), input=f"#{item.ref}")
 
 
+def test_switching_branches_drops_local_scan_output_but_keeps_mem(tmp_path):
+    """The run-start rescan may rewrite the code graph on whatever branch
+    the run starts from; that derived file must not block the checkout of
+    the run branch. Human-edited memory is never touched."""
+    from k0ntrol.workflow.change import reset_scan_output
+
+    git_repo(tmp_path)
+    graph = tmp_path / ".k0-mem" / "Project_context" / "r" / "graph.json"
+    mem = tmp_path / ".k0-mem" / "General_mem" / "Mem.md"
+    graph.parent.mkdir(parents=True)
+    mem.parent.mkdir(parents=True)
+    graph.write_text("{}\n", encoding="utf-8")
+    mem.write_text("- fact\n", encoding="utf-8")
+    git(tmp_path, "add", "-A")
+    git(tmp_path, "commit", "-qm", "memory")
+    graph.write_text('{"nodes": []}\n', encoding="utf-8")
+    mem.write_text("- fact\n- new fact\n", encoding="utf-8")
+
+    reset_scan_output(tmp_path)
+
+    assert graph.read_text(encoding="utf-8") == "{}\n"
+    assert mem.read_text(encoding="utf-8") == "- fact\n- new fact\n"
+
+
 def test_dirty_worktree_is_refused_but_k0_mem_is_ignored(tmp_path):
     git_repo(tmp_path)
     (tmp_path / "README.md").write_text("edited\n")
