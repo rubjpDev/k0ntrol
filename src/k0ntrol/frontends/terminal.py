@@ -90,7 +90,10 @@ class Terminal:
             self._settle()
             self._console.print(Text(f"{BULLET} ", style=ACCENT), end="")
             self._answering = True
-        self._console.print(Text(delta), end="")
+            delta = delta.lstrip()
+        # soft_wrap: rich cannot know the cursor column between chunks, so
+        # the terminal wraps the line instead.
+        self._console.print(Text(delta), end="", soft_wrap=True)
         self._at_line_start = delta.endswith("\n")
 
     def gate(self, pending) -> str:

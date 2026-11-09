@@ -171,12 +171,12 @@ class Prompt:
         if not self._tty:
             return self._read_input(PLAIN_PROMPT)
         self._draw_frame()
-        submitted = False
         try:
             line = self._read_input(self._styled(POINTER + " ", BRAND))
-            submitted = True
-        finally:
-            self._leave_frame(submitted)
+        except BaseException:
+            self._raw("\x1b[3B")  # below the frame, so the next output is clean
+            raise
+        self._replace_frame(line)
         self._save_history()
         return line
 
@@ -219,8 +219,11 @@ class Prompt:
         self._console.print(Text("  " + INPUT_HINT, style=DIM))
         self._raw("\x1b[3A")
 
-    def _leave_frame(self, submitted: bool) -> None:
-        self._raw("\x1b[2B" if submitted else "\x1b[3B")
+    def _replace_frame(self, line: str) -> None:
+        """The submitted line stays in the scrollback as one dim ``❯`` line,
+        without the rules and the hint (Claude Code's history)."""
+        self._raw("\x1b[2A" + "\x1b[2K\n" * 4 + "\x1b[4A")
+        self._console.print(Text(f"{POINTER} {line}", style=DIM))
 
     def _choose_by_line(self, question: str, options: list[tuple[str, str]]) -> str:
         keys = "/".join(key for key, _ in options)
@@ -242,9 +245,10 @@ class Prompt:
         self._draw_options(options, index)
         while True:
             index, chosen = choice_step(index, read_key(), len(options))
-            self._redraw_options(options, index)
             if chosen:
+                self._collapse_options(options, index)
                 return options[index][0]
+            self._redraw_options(options, index)
 
     def _draw_options(self, options: list[tuple[str, str]], index: int) -> None:
         for position, (_, label) in enumerate(options):
@@ -256,6 +260,12 @@ class Prompt:
     def _redraw_options(self, options: list[tuple[str, str]], index: int) -> None:
         self._raw(f"\x1b[{len(options) + 1}A")
         self._draw_options(options, index)
+
+    def _collapse_options(self, options: list[tuple[str, str]], index: int) -> None:
+        """Replace the menu and its hint with the chosen answer."""
+        lines = len(options) + 1
+        self._raw(f"\x1b[{lines}A" + "\x1b[2K\n" * lines + f"\x1b[{lines}A")
+        self._console.print(Text(f"  {POINTER} {options[index][1]}", style=ACCENT))
 
     def _setup_readline(self) -> None:
         readline.set_completer(self.complete)

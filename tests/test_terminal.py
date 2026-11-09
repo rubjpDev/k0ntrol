@@ -52,7 +52,7 @@ def test_redo_asks_for_feedback_and_sends_it_with_the_answer():
 def test_a_streamed_answer_sits_behind_a_bullet_and_ends_its_line():
     ui, console = terminal([])
 
-    ui.stream("forty ")
+    ui.stream("  forty ")
     ui.stream("two")
     ui.line("done")
 

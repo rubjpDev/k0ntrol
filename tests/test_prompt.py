@@ -143,7 +143,9 @@ def test_read_tty_draws_frame_and_returns_cursor():
     out = buffer.getvalue()
     assert out.count("─" * 100) == 2
     assert "? for shortcuts" in out
-    assert out.index("\x1b[3A") < out.index("\x1b[2B")
+    # after Enter the frame collapses to the submitted line
+    assert out.index("\x1b[3A") < out.index("\x1b[2A")
+    assert out.endswith("❯ /full #3\n")
 
 
 @pytest.mark.parametrize("error", [EOFError(), KeyboardInterrupt()])
@@ -220,6 +222,8 @@ def test_choose_with_keys_arrows_then_enter():
     assert "❯ 2. Send back with feedback" in out
     assert "↑/↓ to move · enter to select · 1-9 to pick" in out
     assert "\x1b[3A" in out
+    # once chosen, the menu collapses to the answer, like Claude Code
+    assert out.rstrip().endswith("❯ Send back with feedback")
 
 
 def test_choose_with_keys_enter_takes_first_and_digit_picks():

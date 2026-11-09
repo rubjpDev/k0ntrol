@@ -9,7 +9,12 @@ from k0ntrol import __version__
 from k0ntrol.frontends.ask import answer_ask
 from k0ntrol.events import render_event
 from k0ntrol.frontends.banner import render_banner
-from k0ntrol.memory.reflect import Reflector, offer_mem_proposals
+from k0ntrol.memory.reflect import (
+    Reflector,
+    apply_mem_decision,
+    list_pending_mem_proposals,
+    offer_mem_proposals,
+)
 from k0ntrol.workflow import Outcome, Pending, RunRefused, Unfinished
 from k0ntrol.workflow import abandon as abandon_run
 from k0ntrol.workflow import resume as resume_run
@@ -98,7 +103,7 @@ class _Front:
 
     answer_gate: Callable[[Pending], str]
     confirm_resume: Callable[[Unfinished], str | None]
-    answer_line: Callable[[], str]
+    offer_mem: Callable[[Path], None]
     report_outcome: Callable[[Outcome], None]
 
 
@@ -110,7 +115,7 @@ def _plain_front(read_line: Callable[[], str], show: Callable[[str], None]) -> _
     return _Front(
         answer_gate=answer_gate,
         confirm_resume=lambda unfinished: _ask_resume(unfinished, read_line, show),
-        answer_line=read_line,
+        offer_mem=lambda root: offer_mem_proposals(root, read_line, show),
         report_outcome=lambda result: show(_outcome_text(result)),
     )
 
@@ -124,9 +129,16 @@ def _ui_front(ui, show: Callable[[str], None], transcript: Path) -> _Front:
     return _Front(
         answer_gate=ui.gate,
         confirm_resume=confirm_resume,
-        answer_line=lambda: ui.answer_line("y/n"),
+        offer_mem=lambda root: _offer_mem_with_ui(ui, root),
         report_outcome=lambda result: _append_transcript(transcript, _outcome_text(result)),
     )
+
+
+def _offer_mem_with_ui(ui, root: Path) -> None:
+    """Reflect's Mem.md proposals as yes/no pickers, one per proposal."""
+    for item in list_pending_mem_proposals(root):
+        approved = ui.confirm(f"Add to Mem.md: {item['body']}") == "y"
+        apply_mem_decision(root, int(item["id"]), approved)
 
 
 def _reflect_writer(ui, show: Callable[[str], None], transcript: Path) -> Callable[[str], None]:
@@ -241,7 +253,7 @@ def _session_should_quit(
     ask: Callable[[str], None],
     work: Callable[[str, str], None],
 ) -> bool:
-    line = _read_session_line(read_line, front.answer_line, show, root)
+    line = _read_session_line(read_line, front.offer_mem, root)
     if line is None:
         return True
     _echo_session_input(line, show, transcript, echo_input)
@@ -462,12 +474,11 @@ def _outcome_text(result: Outcome) -> str:
 
 def _read_session_line(
     read_line: Callable[[], str],
-    answer_line: Callable[[], str],
-    show: Callable[[str], None],
+    offer_mem: Callable[[Path], None],
     root: Path,
 ) -> str | None:
     try:
-        offer_mem_proposals(root, answer_line, show)
+        offer_mem(root)
         return read_line()
     except (KeyboardInterrupt, EOFError):
         return None
