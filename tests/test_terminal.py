@@ -195,3 +195,27 @@ def test_small_costs_keep_four_decimals_and_each_question_reprints_its_agent():
         ui.read()
         ui.event(chatty)
     assert console.export_text().count("CHATTY") == 2
+
+
+def test_the_mode_turns_plain_text_into_its_command():
+    from k0ntrol.frontends.terminal import as_command
+
+    assert as_command("chat", "what is x?") == "what is x?"
+    assert as_command("fast", "fix the slug") == "/fast fix the slug"
+    assert as_command("full", "add is_even") == "/full add is_even"
+    assert as_command("fast", "#12") == "#12"
+    assert as_command("full", "/status") == "/status"
+
+
+def test_with_an_editor_the_prompt_is_the_box(tmp_path):
+    from k0ntrol.frontends.editor import LineEditor
+
+    keys = iter(list("hola") + ["shift_tab", "enter"])
+    console = Console(file=io.StringIO(), record=True, width=80, color_system=None)
+    editor = LineEditor(console.file, read_key=lambda: next(keys), commands=COMMANDS,
+                        width=lambda: 80, color=False)
+    prompt = Prompt(console, commands=COMMANDS, tty=False, read_input=lambda _: "")
+    ui = Terminal(console, prompt, LiveRenderer(console, spinner=False), editor=editor)
+
+    assert ui.read() == "/fast hola"
+    assert "shift+tab mode" in ui.status_line()

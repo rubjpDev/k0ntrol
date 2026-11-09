@@ -17,6 +17,7 @@ from rich.text import Text
 
 from k0ntrol.frontends.prompt import Prompt, render_welcome, terminal_key_reader
 from k0ntrol.credentials import load_credentials
+from k0ntrol.frontends.editor import LineEditor, raw_key_reader
 from k0ntrol.frontends.render import LiveRenderer, format_elapsed, format_tokens, render_gate
 from k0ntrol.frontends.setup import run_project_setup, run_provider_setup
 from k0ntrol.pricing import estimate_cost
@@ -104,9 +105,11 @@ class Terminal:
         prompt: Prompt,
         renderer: LiveRenderer,
         stats: SessionStats | None = None,
+        editor: LineEditor | None = None,
     ) -> None:
         self._console = console
         self._prompt = prompt
+        self._editor = editor
         self._renderer = renderer
         self._stats = stats or SessionStats()
         self._provider: str | None = None
@@ -125,7 +128,7 @@ class Terminal:
             console, commands=COMMANDS, history=history, read_key=terminal_key_reader(),
             status=lambda: terminal.status_line() if terminal else "",
         )
-        terminal = cls(console, prompt, LiveRenderer(console), stats)
+        terminal = cls(console, prompt, LiveRenderer(console), stats, _editor(console, history))
         return terminal
 
     def welcome(self, *, version: str, provider: str | None, cwd: str) -> None:
@@ -142,14 +145,18 @@ class Terminal:
     def read(self) -> str:
         self._settle()
         self._console.set_window_title(" · ".join(["k0", *self._stats.summary()]))
-        line = self._prompt.read()
+        if self._editor is not None:
+            line = as_command(*self._editor.read(status=self.status_line))
+        else:
+            line = self._prompt.read()
         self._renderer.new_turn()
         return line
 
     def status_line(self) -> str:
         """The bar under the input: provider · time · tokens · cost · hint."""
         parts = [self._provider] if self._provider else []
-        return " · ".join([*parts, *self._stats.summary(), "? for shortcuts"])
+        hints = ["shift+tab mode", "? shortcuts"] if self._editor else ["? for shortcuts"]
+        return " · ".join([*parts, *self._stats.summary(), *hints])
 
     def line(self, text: str) -> None:
         self._settle()
@@ -250,6 +257,26 @@ class Terminal:
             self._console.print()
         self._answering = False
         self._at_line_start = True
+
+
+def _editor(console: Console, history: Path | None) -> LineEditor | None:
+    """The boxed editor where keys can be read raw; None falls back to readline."""
+    read_key = raw_key_reader()
+    if read_key is None:
+        return None
+    return LineEditor(
+        console.file, read_key=read_key, commands=COMMANDS,
+        history_path=history.with_name("prompt_history") if history else None,
+        color=console.color_system is not None,
+    )
+
+
+def as_command(mode: str, text: str) -> str:
+    """What Enter sends: plain text follows the mode; commands, ``#12`` and
+    ``?`` go through as typed."""
+    if not text or text.startswith(("/", "#", "?")) or mode == "chat":
+        return text
+    return f"/{mode} {text}"
 
 
 def short_path(path: str, width: int, home: str | None = None) -> str:
