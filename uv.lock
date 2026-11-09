@@ -967,6 +967,14 @@ dependencies = [
 ]
 
 [package.optional-dependencies]
+all = [
+    { name = "langchain-anthropic" },
+    { name = "langchain-aws" },
+    { name = "langchain-google-genai" },
+    { name = "langchain-ollama" },
+    { name = "langchain-openai" },
+    { name = "langchain-openrouter" },
+]
 anthropic = [
     { name = "langchain-anthropic" },
 ]
@@ -999,6 +1007,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "k0ntrol", extras = ["ollama", "openai", "anthropic", "openrouter", "aws", "google"], marker = "extra == 'all'" },
     { name = "langchain", specifier = ">=1.4.7,<1.5" },
     { name = "langchain-anthropic", marker = "extra == 'anthropic'", specifier = ">=1.7.6,<2" },
     { name = "langchain-aws", marker = "extra == 'aws'", specifier = ">=1.9.0,<2" },
@@ -1012,7 +1021,7 @@ requires-dist = [
     { name = "pyyaml", specifier = ">=6" },
     { name = "rich", specifier = ">=13" },
 ]
-provides-extras = ["ollama", "openai", "anthropic", "openrouter", "aws", "google", "langfuse"]
+provides-extras = ["ollama", "openai", "anthropic", "openrouter", "aws", "google", "langfuse", "all"]
 
 [package.metadata.requires-dev]
 dev = [
