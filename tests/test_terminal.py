@@ -133,3 +133,10 @@ def test_config_command_reruns_the_project_setup_and_reloads(tmp_path, monkeypat
     saved = (tmp_path / ".k0-mem" / "config.yaml").read_text()
     assert "tracker: github" in saved and "uv run pytest -q" in saved
     assert config["tracker"] == "github"  # reloaded in place for the next run
+
+
+def test_short_path_uses_tilde_and_cuts_from_the_left():
+    from k0ntrol.frontends.terminal import short_path
+
+    assert short_path("/Users/me/code/k0", 60, home="/Users/me") == "~/code/k0"
+    assert short_path("/srv/a/very/long/path/to/repo", 12, home="/Users/me") == "…ath/to/repo"

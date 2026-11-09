@@ -64,6 +64,7 @@ class Terminal:
         self._answering = False
         self._at_line_start = True
         self._answered_gate = False
+        self._welcomed = False
 
     @classmethod
     def open(cls, history: Path | None = None) -> "Terminal":
@@ -75,8 +76,13 @@ class Terminal:
         return cls(console, prompt, LiveRenderer(console))
 
     def welcome(self, *, version: str, provider: str | None, cwd: str) -> None:
+        """The welcome screen, once per session (first-run setup shows it early)."""
+        if self._welcomed:
+            return
+        self._welcomed = True
         color = self._console.color_system is not None
-        render_welcome(self._console, version=version, provider=provider, cwd=cwd, color=color)
+        short = short_path(cwd, self._console.width - 40)
+        render_welcome(self._console, version=version, provider=provider, cwd=short, color=color)
 
     def read(self) -> str:
         self._settle()
@@ -180,6 +186,16 @@ class Terminal:
             self._console.print()
         self._answering = False
         self._at_line_start = True
+
+
+def short_path(path: str, width: int, home: str | None = None) -> str:
+    """``path`` with the home directory as ``~``, cut from the left to fit."""
+    home = home if home is not None else str(Path.home())
+    if path == home or path.startswith(home + "/"):
+        path = "~" + path[len(home):]
+    if len(path) <= width:
+        return path
+    return "…" + path[-(max(width, 10) - 1):]
 
 
 def needs_project_setup(root: Path) -> bool:

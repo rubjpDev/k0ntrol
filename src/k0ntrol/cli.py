@@ -16,7 +16,7 @@ from k0ntrol.events import (
 )
 from k0ntrol.frontends.banner import color_enabled
 from k0ntrol.frontends.session import run_session
-from k0ntrol.frontends.terminal import Terminal
+from k0ntrol.frontends.terminal import Terminal, needs_project_setup, needs_provider_setup
 from k0ntrol.helpers import helper_invoker
 from k0ntrol.init_flow import run_init
 from k0ntrol.memory.refresh import refresh_memory
@@ -117,6 +117,8 @@ def _run_session(*, init=init_chat_model) -> int:
 
 def _first_run(ui: Terminal, root: Path) -> bool:
     """The setup screens on a new repo or machine; False when cancelled."""
+    if needs_project_setup(root) or needs_provider_setup(Path.home()):
+        ui.welcome(version=__version__, provider=None, cwd=str(root))
     try:
         ui.first_run(root, Path.home())
     except (KeyboardInterrupt, EOFError):
