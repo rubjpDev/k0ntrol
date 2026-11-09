@@ -84,3 +84,14 @@ def test_failures_read_red_and_pauses_amber():
     assert line_style("run r1 failed: git checkout failed") == "#F87171"
     assert line_style("run paused · run the same command again to resume it") == "#FBBF24"
     assert line_style("saving session memory…") == ""
+
+
+def test_the_resume_right_after_a_gate_answer_is_not_shown():
+    ui, console = terminal(["1"])
+    resumed = {"kind": "run_start", "run_kind": "full", "branch": "k0/1-x", "resumed": True}
+
+    ui.gate(pending())
+    ui.event(resumed)
+    ui.event(resumed)  # a real resume later on is shown
+
+    assert console.export_text().count("k0/1-x") == 1

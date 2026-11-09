@@ -59,6 +59,7 @@ class Terminal:
         self._renderer = renderer
         self._answering = False
         self._at_line_start = True
+        self._answered_gate = False
 
     @classmethod
     def open(cls, history: Path | None = None) -> "Terminal":
@@ -82,6 +83,8 @@ class Terminal:
         self._console.print(Text.from_ansi(text, style=line_style(text)))
 
     def event(self, event: dict) -> None:
+        if self._continues_after_gate(event):
+            return
         self._end_answer()
         self._renderer(event)
 
@@ -103,6 +106,7 @@ class Terminal:
             self._console, gate=pending.gate, question=pending.question, detail=pending.detail
         )
         key = self._prompt.choose(pending.question, gate_options(pending.gate, pending.answers))
+        self._answered_gate = True
         return self._with_feedback(key)
 
     def confirm(self, question: str) -> str:
@@ -125,6 +129,11 @@ class Terminal:
             line.append(name.ljust(width), style=DIM)
             line.append(f"  {value}")
             self._console.print(line)
+
+    def _continues_after_gate(self, event: dict) -> bool:
+        """The run resuming right after a gate answer is not news."""
+        answered, self._answered_gate = self._answered_gate, False
+        return answered and event.get("kind") == "run_start" and bool(event.get("resumed"))
 
     def _with_feedback(self, key: str) -> str:
         label = FEEDBACK_LABELS.get(key)
