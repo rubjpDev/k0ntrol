@@ -19,8 +19,8 @@ from k0ntrol.frontends.session import run_session
 from k0ntrol.frontends.terminal import Terminal, needs_project_setup, needs_provider_setup
 from k0ntrol.helpers import helper_invoker
 from k0ntrol.init_flow import run_init
-from k0ntrol.langfuse import build_trace
 from k0ntrol.memory.refresh import refresh_memory
+from k0ntrol.otel import build_run_trace, trace_callbacks
 from k0ntrol.providers import free_checks, has_errors, live_checks, report_lines
 from k0ntrol.workflow.change import current_branch
 
@@ -136,11 +136,11 @@ def _terminal_ui() -> Terminal | None:
     return Terminal.open(history=Path.home() / ".k0ntrol" / "history")
 
 
-def _run_scan(*, init=init_chat_model, tracing=build_trace) -> int:
+def _run_scan(*, init=init_chat_model, tracing=build_run_trace) -> int:
     """Rescan in place: changed files get notes from the bulk_read helper,
     then the FTS index is rebuilt — run-scoped events as it works.
 
-    The scan is its own Langfuse trace (id = its run id, kind ``scan``).
+    The scan is its own Langfuse/OTel trace (id = its run id, kind ``scan``).
     """
     root = Path.cwd()
     run_id = new_run_id()
@@ -157,9 +157,7 @@ def _run_scan(*, init=init_chat_model, tracing=build_trace) -> int:
 def _scan(root: Path, init, run_id: str, trace) -> int:
     try:
         config = load_config(root)
-        callbacks = [_scan_handler(root, run_id)]
-        if trace.handler is not None:
-            callbacks.append(trace.handler)
+        callbacks = [_scan_handler(root, run_id), *trace_callbacks(trace)]
         invoke = helper_invoker(
             config, "bulk_read", init=init, config={"callbacks": callbacks}
         )

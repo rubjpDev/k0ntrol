@@ -27,7 +27,7 @@ from k0ntrol.events import (
 from k0ntrol.frontends.mentions import MentionError, mention_paths
 from k0ntrol.helpers import helper_invoker
 from k0ntrol.memory.refresh import refresh_memory
-from k0ntrol.otel import build_run_trace, otel_callbacks
+from k0ntrol.otel import build_run_trace, trace_callbacks
 from k0ntrol.providers import free_checks, has_errors, report_lines
 from k0ntrol.workflow.change import current_branch
 
@@ -145,10 +145,7 @@ def _chat_events(root: Path, write: Callable[[str], None]):
 
 def _callbacks(handler: K0EventHandler, trace) -> list:
     """The events handler plus the optional Langfuse and OTel ones (#49)."""
-    callbacks = [handler]
-    if trace.handler is not None:
-        callbacks.append(trace.handler)
-    return callbacks + otel_callbacks(trace)
+    return [handler, *trace_callbacks(trace)]
 
 
 def _finish_ask(trace, outcome: str, root: Path, session: str | None) -> None:

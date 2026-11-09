@@ -418,3 +418,12 @@ def otel_callbacks(trace: Any) -> list:
     """The OTel callback a run's ``trace`` carries, as a list to append."""
     handler = getattr(trace, "otel_handler", None)
     return [] if handler is None else [handler]
+
+
+def trace_callbacks(trace: Any) -> list:
+    """Every tracing callback ``trace`` carries: Langfuse's, then OTel's.
+
+    Append it after the always-on events handler.
+    """
+    langfuse = [] if trace.handler is None else [trace.handler]
+    return langfuse + otel_callbacks(trace)

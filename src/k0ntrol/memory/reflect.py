@@ -25,7 +25,6 @@ from k0ntrol.events import (
     new_chat_id,
 )
 from k0ntrol.helpers import structured_helper_invoker
-from k0ntrol.langfuse import build_trace
 from k0ntrol.memory.session import (
     add_fact,
     add_mem_proposal,
@@ -33,6 +32,7 @@ from k0ntrol.memory.session import (
     list_decided_mem_proposals,
     list_pending_mem_proposals,
 )
+from k0ntrol.otel import build_run_trace, trace_callbacks
 
 Invoke = Callable[[str], Mapping]
 MEM_RELATIVE = Path(".k0-mem") / "General_mem" / "Mem.md"
@@ -174,7 +174,7 @@ class Reflector:
         write: Callable[[str], None] | None = None,
         reflect: Callable = run_reflect,
         make_invoke: Callable[[list], Invoke] | None = None,
-        tracing: Callable = build_trace,
+        tracing: Callable = build_run_trace,
     ) -> None:
         self._root = root
         self._transcript = transcript
@@ -283,10 +283,8 @@ class Reflector:
 
 
 def _callbacks(handler: K0EventHandler, trace) -> list:
-    """The events handler plus the optional Langfuse one."""
-    if trace.handler is None:
-        return [handler]
-    return [handler, trace.handler]
+    """The events handler plus the optional Langfuse and OTel ones."""
+    return [handler, *trace_callbacks(trace)]
 
 
 def _transcript_size(transcript: Path) -> int:

@@ -421,18 +421,19 @@ class _CountingHandler(BaseCallbackHandler):
 
 
 class _Trace:
-    def __init__(self, trace_id, handler):
+    def __init__(self, trace_id, handler, otel_handler=None):
         self.trace_id = trace_id
         self.handler = handler
+        self.otel_handler = otel_handler
         self.finished = []
 
     def finish(self, **kwargs):
         self.finished.append(kwargs)
 
 
-def _tracing(made, handler=None):
+def _tracing(made, handler=None, otel_handler=None):
     def factory(trace_id):
-        trace = _Trace(trace_id, handler)
+        trace = _Trace(trace_id, handler, otel_handler)
         made.append(trace)
         return trace
 
@@ -489,3 +490,22 @@ def test_scan_without_a_langfuse_handler_still_runs(tmp_path, monkeypatch):
     model = FakeChatModel(reply=_notes_message())
 
     assert _run_scan(init=lambda _m, **_kw: model, tracing=_tracing([])) == 0
+
+
+def test_scan_helper_calls_also_reach_the_otel_handler(tmp_path, monkeypatch):
+    git_tracked(tmp_path, {"a.py": "print(1)\n"})
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    otel = _CountingHandler()
+    model = FakeChatModel(reply=_notes_message())
+
+    assert _run_scan(init=lambda _m, **_kw: model, tracing=_tracing([], otel_handler=otel)) == 0
+    assert otel.llm_ends == 1
+
+
+def test_scan_traces_to_langfuse_and_otel_by_default():
+    import inspect
+
+    from k0ntrol.otel import build_run_trace
+
+    assert inspect.signature(_run_scan).parameters["tracing"].default is build_run_trace

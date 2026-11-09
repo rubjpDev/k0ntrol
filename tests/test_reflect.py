@@ -620,9 +620,10 @@ class _CountingHandler(BaseCallbackHandler):
 class _Trace:
     """What the ``tracing`` seam returns: records ``finish``/``flush`` calls."""
 
-    def __init__(self, trace_id, handler):
+    def __init__(self, trace_id, handler, otel_handler=None):
         self.trace_id = trace_id
         self.handler = handler
+        self.otel_handler = otel_handler
         self.finished = []
         self.flushes = 0
 
@@ -633,9 +634,9 @@ class _Trace:
         self.flushes += 1
 
 
-def _tracing(made, handler=None):
+def _tracing(made, handler=None, otel_handler=None):
     def factory(trace_id):
-        trace = _Trace(trace_id, handler)
+        trace = _Trace(trace_id, handler, otel_handler)
         made.append(trace)
         return trace
 
@@ -731,3 +732,29 @@ def test_a_failed_reflect_still_flushes_its_trace(tmp_path):
     reflector.finish()
     assert all(trace.flushes == 1 for trace in made)
     assert shown[0] == "reflect failed: kaput"
+
+
+def test_reflect_calls_also_reach_the_otel_handler(tmp_path):
+    otel = _CountingHandler()
+    cfg = cfg_with(helpers={"reflect": {"provider": "anthropic", "model": "m"}})
+    model = FakeChatModel(messages=[AIMessage(content="", tool_calls=[
+        {"name": "reflect", "args": {"facts": ["uses sqlite"], "mem": []}, "id": "c1"}
+    ])])
+    reflector = Reflector(
+        root=tmp_path,
+        transcript=_transcript(tmp_path, "turn\n"),
+        cfg=cfg,
+        init=lambda *a, **k: model,
+        tracing=_tracing([], otel_handler=otel),
+    )
+    reflector.after_run("run-42")
+    reflector.finish()
+    assert otel.llm_ends == 1
+
+
+def test_reflect_traces_to_langfuse_and_otel_by_default():
+    import inspect
+
+    from k0ntrol.otel import build_run_trace
+
+    assert inspect.signature(Reflector).parameters["tracing"].default is build_run_trace
