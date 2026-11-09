@@ -6,6 +6,16 @@ schema is the contract in spec #33 ("Events and Langfuse"): every line has
 not apply are omitted, never `null`. No prompts, completions, file contents
 or tool arguments other than `path` are ever written.
 
+Rotation: when an `EventWriter` is created and `events.jsonl` is over
+`EVENTS_MAX_BYTES`, the file is renamed to `events.1.jsonl`, the previous
+`events.1.jsonl` becomes `events.2.jsonl`, and so on up to `EVENTS_KEEP`
+(3); the oldest is deleted. So `events.1.jsonl` is the newest rotated file
+and `events.<EVENTS_KEEP>.jsonl` the oldest; all match `events.*.jsonl`.
+Rotation never happens on an append, and any error during it is ignored:
+the writer then keeps appending to the existing file. The first rotation in
+a repo also adds `events*.jsonl` to `.k0-mem/.gitignore` when that file
+exists and does not already cover it.
+
 `EventWriter` appends lines for harness events (`run_start`, `gate`,
 `run_end`). `K0EventHandler` — the one callback attached to every graph and
 helper model call — emits the `model` and `tool` events through the same
@@ -31,9 +41,12 @@ from uuid import uuid4
 
 from langgraph.callbacks import GraphCallbackHandler, GraphInterruptEvent
 
+from k0ntrol.memory.layout import EVENTS_IGNORE
 from k0ntrol.providers import REGISTRY
 
 ERR_MAX_CHARS = 500
+EVENTS_MAX_BYTES = 10 * 1024 * 1024
+EVENTS_KEEP = 3
 MASKED = "***"
 # Values shorter than this are not masked: a short env value would mangle
 # ordinary words inside error text. Real credentials are much longer.
@@ -55,6 +68,53 @@ META_EFFORT = "k0_effort"
 def events_path(root: Path) -> Path:
     """The event log for the project rooted at `root`."""
     return root / ".k0-mem" / "events.jsonl"
+
+
+_rotate_lock = threading.Lock()
+
+
+def _rotated(path: Path, generation: int) -> Path:
+    return path.with_name(f"{path.stem}.{generation}{path.suffix}")
+
+
+def _ignore_rotated_files(mem_dir: Path) -> None:
+    gitignore = mem_dir / ".gitignore"
+    text = gitignore.read_text(encoding="utf-8")
+    if EVENTS_IGNORE in text.splitlines() or "events.*.jsonl" in text.splitlines():
+        return
+    prefix = "" if text.endswith("\n") or not text else "\n"
+    with open(gitignore, "a", encoding="utf-8") as fh:
+        fh.write(f"{prefix}{EVENTS_IGNORE}\n")
+
+
+def _shift_rotated(path: Path, keep: int) -> None:
+    _rotated(path, keep).unlink(missing_ok=True)
+    for generation in range(keep - 1, 0, -1):
+        source = _rotated(path, generation)
+        if source.exists():
+            os.replace(source, _rotated(path, generation + 1))
+    os.replace(path, _rotated(path, 1))
+
+
+def rotate_events(
+    path: Path, *, max_bytes: int = EVENTS_MAX_BYTES, keep: int = EVENTS_KEEP
+) -> bool:
+    """Rotate `path` when it is over `max_bytes`; True when it rotated.
+
+    Never raises: a failure leaves the log as it is and writing carries on.
+    """
+    with _rotate_lock:
+        try:
+            if path.stat().st_size <= max_bytes:
+                return False
+            _shift_rotated(path, keep)
+        except OSError:
+            return False
+    try:
+        _ignore_rotated_files(path.parent)
+    except OSError:
+        pass
+    return True
 
 
 def new_run_id() -> str:
@@ -110,9 +170,11 @@ class EventWriter:
         chat: str | None = None,
         mask: Iterable[str] | None = None,
         progress: Callable[[dict], None] | None = None,
+        max_bytes: int = EVENTS_MAX_BYTES,
     ) -> None:
         if (run is None) == (chat is None):
             raise ValueError("EventWriter needs exactly one of run= or chat=")
+        rotate_events(path, max_bytes=max_bytes)
         self._path = path
         self._run = run
         self._chat = chat
