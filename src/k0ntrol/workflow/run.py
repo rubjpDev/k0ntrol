@@ -42,9 +42,9 @@ from k0ntrol.events import (  # noqa: E402
     events_path,
     new_run_id,
 )
-from k0ntrol.langfuse import build_trace  # noqa: E402
 from k0ntrol.memory.refresh import refresh_memory  # noqa: E402
 from k0ntrol.memory.scan import ScanError  # noqa: E402
+from k0ntrol.otel import build_run_trace, otel_callbacks  # noqa: E402
 from k0ntrol.providers import free_checks, has_errors, report_lines  # noqa: E402
 from k0ntrol.tracker import TRUSTED_ASSOCIATIONS, TrackerError  # noqa: E402
 from k0ntrol.tracker.github import GhTracker, subprocess_runner  # noqa: E402
@@ -106,6 +106,7 @@ class Pending:
     question: str
     answers: tuple[str, ...]
     detail: str = ""
+    diff: str = ""  # the change as a git diff, drawn file by file
 
 
 @dataclass(frozen=True)
@@ -135,7 +136,8 @@ def start(
     check: Callable = free_checks,
     scan: Callable = refresh_memory,
     tracker=None,
-    tracing: Callable = build_trace,
+    tracing: Callable = build_run_trace,
+    session: str | None = None,
 ) -> Result:
     """Start a run of ``kind`` for ``input``.
 
@@ -152,7 +154,8 @@ def start(
     conn, saver = _open_checkpoints(root)
     try:
         ctx = RunContext(
-            root=root, cfg=cfg, kind=kind, init=init, tracker=tracker, scan=scan
+            root=root, cfg=cfg, kind=kind, init=init, tracker=tracker, scan=scan,
+            session=session,
         )
         busy = _busy_run(saver, ctx, input_text, tracker, root)
         if busy is not None:
@@ -164,7 +167,7 @@ def start(
         run_id = new_run_id()
         _bind_events(ctx, root, run_id, write)
         ctx.trace = tracing(run_id)
-        session_id = item.qualified_ref if item else None
+        session_id = item.qualified_ref if item else _sitting_session(ctx)
         config = _runnable(run_id, ctx, session_id)
         try:
             ctx.writer.run_start(
@@ -172,6 +175,7 @@ def start(
                 work_item=item.qualified_ref if item else None,
                 branch=current_branch(root),
                 version=__version__,
+                session=session,
             )
             graph.invoke(
                 _initial_state(kind, input_text, cfg, item),
@@ -195,7 +199,8 @@ def resume(
     init: Callable = init_chat_model,
     scan: Callable = refresh_memory,
     tracker=None,
-    tracing: Callable = build_trace,
+    tracing: Callable = build_run_trace,
+    session: str | None = None,
 ) -> Result:
     """Continue run ``run_id`` with the human's ``decision``.
 
@@ -213,7 +218,8 @@ def resume(
             raise RunRefused(f"no run {run_id} in this checkout")
         tracker = _tracker_for(kind, cfg, root, tracker)
         ctx = RunContext(
-            root=root, cfg=cfg, kind=kind, init=init, tracker=tracker, scan=scan
+            root=root, cfg=cfg, kind=kind, init=init, tracker=tracker, scan=scan,
+            session=session,
         )
         graph = _BUILDERS[kind](ctx, saver)
         state = graph.get_state(_thread(run_id))
@@ -224,7 +230,11 @@ def resume(
         config = _runnable(run_id, ctx, session_id)
         try:
             ctx.writer.run_start(
-                kind, resumed=True, branch=current_branch(root), version=__version__
+                kind,
+                resumed=True,
+                branch=current_branch(root),
+                version=__version__,
+                session=session,
             )
             _advance(ctx, graph, state, decision, config)
             return _finish(ctx, graph, run_id, config)
@@ -383,7 +393,12 @@ def _tracker_for(kind: str, cfg: dict, root: Path, tracker):
     """``/full`` cannot run trackerless: build the configured adapter."""
     if kind != "full" or tracker is not None:
         return tracker
-    if cfg.get("tracker") != "github":
+    unshipped = next(
+        (cfg[key] for key in ("vcs", "tracker") if cfg.get(key, "github") != "github"), None
+    )
+    if unshipped:
+        raise RunRefused(f"/full only works with GitHub in 0.1.0, not {unshipped}")
+    if cfg.get("tracker") is None:
         raise RunRefused("/full needs a tracker; run k0 init --tracker github")
     return GhTracker(subprocess_runner(root))
 
@@ -521,6 +536,7 @@ def _runnable(run_id: str, ctx: RunContext, session_id=None) -> dict:
     if ctx.trace is not None and ctx.trace.handler is not None:
         config["callbacks"].append(ctx.trace.handler)
         config["metadata"] = _langfuse_metadata(ctx.kind, session_id)
+    config["callbacks"].extend(otel_callbacks(ctx.trace))
     return config
 
 
@@ -533,14 +549,21 @@ def _langfuse_metadata(kind: str, session_id) -> dict:
 
 
 def _session_id(ctx: RunContext, values: dict) -> str | None:
-    """The run's work item as a session id, resolved through the tracker."""
+    """The run's Langfuse session: its work item, resolved through the
+    tracker, else (``/fast`` only) the REPL sitting."""
     ref = values.get("item_ref")
     if not ref or ctx.tracker is None:
-        return None
+        return _sitting_session(ctx)
     try:
         return ctx.tracker.read_work_item(ref).qualified_ref
     except TrackerError:
-        return None
+        return _sitting_session(ctx)
+
+
+def _sitting_session(ctx: RunContext) -> str | None:
+    """``/fast`` has no work item: its session is the sitting. ``/full``'s
+    is always the work item, which outlives any one sitting."""
+    return ctx.session if ctx.kind == "fast" else None
 
 
 def _trace_metadata(ctx: RunContext, values: dict) -> dict:
@@ -667,6 +690,7 @@ def _pending(run_id: str, payload: dict) -> Pending:
         question=str(payload.get("question", "")),
         answers=tuple(str(a) for a in payload.get("answers", ())),
         detail=str(payload.get("detail", "")),
+        diff=str(payload.get("diff", "")),
     )
 
 

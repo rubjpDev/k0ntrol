@@ -140,7 +140,7 @@ LangGraph streaming (https://docs.langchain.com/oss/python/langgraph/streaming) 
 2. **The run id is the trace id.** Keep `uuid4().hex` and carry it in config metadata (`k0_run`, `k0_agent`). JSONL `run` = Langfuse trace id = future OTel trace id.
 3. **JSONL schema:** one line per model invocation (invariant kept), with `agent`, `provider`, `model`, `ms`, `tokens_in`, `tokens_out`, `tokens`, `ok`, `err`, and `cost_usd` only when the provider reports it. Optional extra event kinds for `interrupt` / `resume` gates.
 4. **Langfuse as an optional extra** `k0ntrol[langfuse]` pinned `langfuse>=5.0.4,<6`, which needs human approval per AGENTS.md. Document the server floor (>= v4.59.0) and `LANGFUSE_BASE_URL` for self-hosting. Call `get_client().flush()` at run end.
-5. **Defer plain OTel.** When it comes, k0 owns and registers the `TracerProvider` first and adds an OTLP processor. Pick semconv instrumentation over the Langfuse handler at that point. JSONL does not change.
+5. **Defer plain OTel.** (Done later: see ADR 0010, which keeps OTel on its own provider instead of the shared one below.) When it comes, k0 owns and registers the `TracerProvider` first and adds an OTLP processor. Pick semconv instrumentation over the Langfuse handler at that point. JSONL does not change.
 
 ## Open risks
 

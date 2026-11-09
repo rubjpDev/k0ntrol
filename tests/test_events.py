@@ -28,6 +28,7 @@ from k0ntrol.events import (
     new_chat_id,
     new_run_id,
     render_event,
+    rotate_events,
 )
 from k0ntrol.tools.errors import ToolError
 
@@ -66,6 +67,15 @@ def test_run_start_line_carries_required_fields(tmp_path):
     ts = datetime.fromisoformat(event["ts"].replace("Z", "+00:00"))
     assert ts.tzinfo is not None
     assert "." in event["ts"]  # millisecond precision
+
+
+def test_run_start_carries_the_sitting_id_only_when_known(tmp_path):
+    writer = make_writer(tmp_path)
+    writer.run_start("fast", session="sitting-1")
+    writer.run_start("fast")
+    first, second = read_events(tmp_path / ".k0-mem" / "events.jsonl")
+    assert first["session"] == "sitting-1"
+    assert "session" not in second
 
 
 def test_absent_fields_are_omitted_never_null(tmp_path):
@@ -617,3 +627,117 @@ def test_render_variants(tmp_path):
     assert "failed" in tool_err
     assert "x.py" in gate_redo
     assert "3 in" in usage and "5 out" in usage
+
+
+def test_progress_renderer_hands_structured_events_to_a_rich_output():
+    """An output with an ``event`` method gets the event itself, not a line."""
+
+    class RichOutput:
+        def __init__(self):
+            self.lines, self.events = [], []
+
+        def __call__(self, text):
+            self.lines.append(text)
+
+        def event(self, event):
+            self.events.append(event)
+
+    output = RichOutput()
+    ProgressRenderer(output)({"kind": "tool", "agent": "coder", "tool": "read_file", "ok": True})
+
+    assert output.events == [{"kind": "tool", "agent": "coder", "tool": "read_file", "ok": True}]
+    assert output.lines == []
+
+
+def test_a_call_start_reaches_the_display_but_not_the_log(tmp_path):
+    shown = []
+    path = tmp_path / "events.jsonl"
+    writer = EventWriter(path, run="r1", mask=[], progress=shown.append)
+
+    writer.working(agent="coder", tool="run_tests", path=None)
+
+    assert shown == [{"kind": "working", "agent": "coder", "tool": "run_tests"}]
+    assert not path.exists()
+
+
+# --- Rotation --------------------------------------------------------------
+
+
+def _log(tmp_path: Path, text: str = "x" * 20) -> Path:
+    path = tmp_path / ".k0-mem" / "events.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text)
+    return path
+
+
+def test_writer_rotates_an_oversized_log_when_created(tmp_path):
+    path = _log(tmp_path, "old\n")
+    writer = EventWriter(path, run=RUN, mask=[], max_bytes=2)
+    writer.emit("run_start")
+    assert (tmp_path / ".k0-mem" / "events.1.jsonl").read_text() == "old\n"
+    (event,) = read_events(path)
+    assert event["kind"] == "run_start"
+
+
+def test_writer_leaves_a_small_log_alone(tmp_path):
+    path = _log(tmp_path, "old\n")
+    EventWriter(path, run=RUN, mask=[], max_bytes=1000).emit("run_start")
+    assert not (tmp_path / ".k0-mem" / "events.1.jsonl").exists()
+    assert path.read_text().startswith("old\n")
+
+
+def test_rotation_does_not_happen_on_each_append(tmp_path):
+    path = _log(tmp_path, "")
+    writer = EventWriter(path, run=RUN, mask=[], max_bytes=10)
+    for _ in range(3):
+        writer.emit("run_start")
+    assert len(read_events(path)) == 3
+    assert not (tmp_path / ".k0-mem" / "events.1.jsonl").exists()
+
+
+def test_rotation_shifts_files_and_drops_the_oldest(tmp_path):
+    path = _log(tmp_path, "gen0")
+    mem = path.parent
+    (mem / "events.1.jsonl").write_text("gen1")
+    (mem / "events.2.jsonl").write_text("gen2")
+    (mem / "events.3.jsonl").write_text("gen3")
+    assert rotate_events(path, max_bytes=2, keep=3) is True
+    assert not path.exists()
+    assert (mem / "events.1.jsonl").read_text() == "gen0"
+    assert (mem / "events.2.jsonl").read_text() == "gen1"
+    assert (mem / "events.3.jsonl").read_text() == "gen2"
+    assert not (mem / "events.4.jsonl").exists()
+
+
+def test_rotation_ignores_a_missing_log(tmp_path):
+    assert rotate_events(tmp_path / "events.jsonl", max_bytes=1) is False
+
+
+def test_rotation_failure_never_breaks_the_writer(tmp_path, monkeypatch):
+    path = _log(tmp_path, "old\n")
+
+    def boom(*args, **kwargs):
+        raise PermissionError("nope")
+
+    monkeypatch.setattr("k0ntrol.events.os.replace", boom)
+    writer = EventWriter(path, run=RUN, mask=[], max_bytes=2)
+    writer.emit("run_start")
+    assert path.read_text().startswith("old\n")
+    assert len(path.read_text().splitlines()) == 2
+
+
+def test_rotation_adds_the_ignore_rule_to_an_old_gitignore(tmp_path):
+    path = _log(tmp_path)
+    gitignore = path.parent / ".gitignore"
+    gitignore.write_text("sessions/\nevents.jsonl\n")
+    rotate_events(path, max_bytes=2)
+    assert gitignore.read_text() == "sessions/\nevents.jsonl\nevents*.jsonl\n"
+    _log(tmp_path)
+    rotate_events(path, max_bytes=2)
+    assert gitignore.read_text().count("events*.jsonl") == 1
+
+
+def test_rotation_does_not_create_a_gitignore(tmp_path):
+    path = _log(tmp_path)
+    rotate_events(path, max_bytes=2)
+    assert not (path.parent / ".gitignore").exists()

@@ -32,6 +32,7 @@ from k0ntrol.memory.session import (
     list_decided_mem_proposals,
     list_pending_mem_proposals,
 )
+from k0ntrol.otel import build_run_trace, trace_callbacks
 
 Invoke = Callable[[str], Mapping]
 MEM_RELATIVE = Path(".k0-mem") / "General_mem" / "Mem.md"
@@ -172,7 +173,8 @@ class Reflector:
         init: Callable = init_chat_model,
         write: Callable[[str], None] | None = None,
         reflect: Callable = run_reflect,
-        make_invoke: Callable[[K0EventHandler], Invoke] | None = None,
+        make_invoke: Callable[[list], Invoke] | None = None,
+        tracing: Callable = build_run_trace,
     ) -> None:
         self._root = root
         self._transcript = transcript
@@ -185,6 +187,7 @@ class Reflector:
         self._cfg = cfg
         self._init = init
         self._make_invoke = make_invoke or self._reflect_invoker
+        self._tracing = tracing
         self._tail = threading.Event()
         self._tail.set()
 
@@ -223,6 +226,9 @@ class Reflector:
         self, end: int, run: str | None, chat: str | None,
         previous: threading.Event, completed: threading.Event,
     ) -> None:
+        # Same trace id as the run or chat reflected on: its calls land in
+        # that trace. Never ``finish``: that would overwrite the outcome tags.
+        trace = self._tracing(run or chat)
         try:
             handler = K0EventHandler(
                 EventWriter(
@@ -232,7 +238,7 @@ class Reflector:
                     progress=self._progress(),
                 )
             )
-            invoke = self._make_invoke(handler)
+            invoke = self._make_invoke(_callbacks(handler, trace))
             previous.wait()
             offset = self._completed
             if offset >= end:
@@ -249,6 +255,7 @@ class Reflector:
             if self._write is not None:
                 self._write(f"reflect failed: {_short(error)}")
         finally:
+            trace.flush()
             previous.wait()
             completed.set()
 
@@ -257,13 +264,13 @@ class Reflector:
             return None
         return ProgressRenderer(self._write)
 
-    def _reflect_invoker(self, handler: K0EventHandler) -> Invoke:
+    def _reflect_invoker(self, callbacks: list) -> Invoke:
         return structured_helper_invoker(
             self._cfg,
             "reflect",
             REFLECT_SCHEMA,
             init=self._init,
-            config={"callbacks": [handler]},
+            config={"callbacks": callbacks},
         )
 
     def _has_new_text(self) -> bool:
@@ -273,6 +280,11 @@ class Reflector:
         for thread in self._threads:
             thread.join()
         self._threads = []
+
+
+def _callbacks(handler: K0EventHandler, trace) -> list:
+    """The events handler plus the optional Langfuse and OTel ones."""
+    return [handler, *trace_callbacks(trace)]
 
 
 def _transcript_size(transcript: Path) -> int:

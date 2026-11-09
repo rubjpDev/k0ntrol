@@ -6,6 +6,7 @@ from langchain.chat_models import init_chat_model
 
 from k0ntrol import __version__
 from k0ntrol.config import ConfigError, load_config
+from k0ntrol.credentials import load_credentials
 from k0ntrol.events import (
     EventWriter,
     K0EventHandler,
@@ -15,10 +16,13 @@ from k0ntrol.events import (
 )
 from k0ntrol.frontends.banner import color_enabled
 from k0ntrol.frontends.session import run_session
+from k0ntrol.frontends.terminal import Terminal, needs_project_setup, needs_provider_setup
 from k0ntrol.helpers import helper_invoker
 from k0ntrol.init_flow import run_init
 from k0ntrol.memory.refresh import refresh_memory
+from k0ntrol.otel import build_run_trace, trace_callbacks
 from k0ntrol.providers import free_checks, has_errors, live_checks, report_lines
+from k0ntrol.workflow.change import current_branch
 
 
 def main(argv: list[str] | None = None, *, init=init_chat_model) -> int:
@@ -56,6 +60,8 @@ def main(argv: list[str] | None = None, *, init=init_chat_model) -> int:
     )
     subparsers.add_parser("scan", help="write the code graph")
     args = parser.parse_args(argv)
+    # Keys saved by the setup screen; variables already set always win.
+    load_credentials(Path.home())
 
     if args.command == "doctor":
         return _run_doctor(live=args.live)
@@ -90,6 +96,9 @@ def _run_doctor(live: bool) -> int:
 
 def _run_session(*, init=init_chat_model) -> int:
     root = Path.cwd()
+    ui = _terminal_ui()
+    if ui is not None and not _first_run(ui, root):
+        return 1
     try:
         config = load_config(root)
     except ConfigError as error:
@@ -104,18 +113,53 @@ def _run_session(*, init=init_chat_model) -> int:
         echo_input=False,
         init=init,
         stream=lambda text: print(text, end="", flush=True),
+        ui=ui,
     )
 
 
-def _run_scan(*, init=init_chat_model) -> int:
+def _first_run(ui: Terminal, root: Path) -> bool:
+    """The setup screens on a new repo or machine; False when cancelled."""
+    if needs_project_setup(root) or needs_provider_setup(Path.home()):
+        ui.welcome(version=__version__, provider=None, cwd=str(root))
+    try:
+        ui.first_run(root, Path.home())
+    except (KeyboardInterrupt, EOFError):
+        print("\nsetup cancelled; run k0 again to finish it")
+        return False
+    return True
+
+
+def _terminal_ui() -> Terminal | None:
+    """The Claude Code-style front in a real terminal; plain lines otherwise."""
+    if not (sys.stdin.isatty() and sys.stdout.isatty()):
+        return None
+    return Terminal.open(history=Path.home() / ".k0ntrol" / "history")
+
+
+def _run_scan(*, init=init_chat_model, tracing=build_run_trace) -> int:
     """Rescan in place: changed files get notes from the bulk_read helper,
-    then the FTS index is rebuilt — run-scoped events as it works."""
+    then the FTS index is rebuilt — run-scoped events as it works.
+
+    The scan is its own Langfuse/OTel trace (id = its run id, kind ``scan``).
+    """
     root = Path.cwd()
+    run_id = new_run_id()
+    trace = tracing(run_id)
+    code = _scan(root, init, run_id, trace)
+    trace.finish(
+        kind="scan",
+        outcome="done" if code == 0 else "failed",
+        metadata=_scan_metadata(root),
+    )
+    return code
+
+
+def _scan(root: Path, init, run_id: str, trace) -> int:
     try:
         config = load_config(root)
-        handler = _scan_handler(root)
+        callbacks = [_scan_handler(root, run_id), *trace_callbacks(trace)]
         invoke = helper_invoker(
-            config, "bulk_read", init=init, config={"callbacks": [handler]}
+            config, "bulk_read", init=init, config={"callbacks": callbacks}
         )
         refresh_memory(root, config=config, invoke=invoke)
     except ConfigError as error:
@@ -127,10 +171,17 @@ def _run_scan(*, init=init_chat_model) -> int:
     return 0
 
 
-def _scan_handler(root: Path) -> K0EventHandler:
+def _scan_metadata(root: Path) -> dict:
+    """The scan trace's metadata: branch and k0 version."""
+    metadata = {"k0_version": __version__}
+    branch = current_branch(root)
+    if branch:
+        metadata["branch"] = branch
+    return metadata
+
+
+def _scan_handler(root: Path, run_id: str) -> K0EventHandler:
     path = events_path(root)
     path.parent.mkdir(parents=True, exist_ok=True)
-    writer = EventWriter(
-        path, run=new_run_id(), progress=ProgressRenderer(print)
-    )
+    writer = EventWriter(path, run=run_id, progress=ProgressRenderer(print))
     return K0EventHandler(writer)

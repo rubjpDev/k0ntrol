@@ -42,7 +42,7 @@ def test_runtime_dependencies_are_the_approved_closed_list():
     ]
 
 
-def test_provider_and_langfuse_extras():
+def test_provider_langfuse_and_otel_extras():
     extras = _pyproject()["project"]["optional-dependencies"]
     assert set(extras) == {
         "ollama",
@@ -52,5 +52,15 @@ def test_provider_and_langfuse_extras():
         "aws",
         "google",
         "langfuse",
+        "otel",
+        "all",
     }
     assert extras["langfuse"] == ["langfuse>=5.0.4,<6"]
+    # only the OpenTelemetry pins langfuse 5.x already requires (ADR 0010)
+    assert extras["otel"] == [
+        "opentelemetry-api>=1.45.0,<2",
+        "opentelemetry-sdk>=1.45.0,<2",
+        "opentelemetry-exporter-otlp-proto-http>=1.45.0,<2",
+    ]
+    # `all` adds no dependency: it only bundles the provider extras
+    assert extras["all"] == ["k0ntrol[ollama,openai,anthropic,openrouter,aws,google]"]

@@ -28,6 +28,16 @@ def dirty_paths(root: Path, *, ignored_prefix: str = ".k0-mem/") -> list[str]:
     ]
 
 
+def reset_scan_output(root: Path) -> None:
+    """Drop local changes to the scanner's output (``Project_context/``).
+
+    The run-start rescan rewrites the code graph on whatever branch the run
+    starts from; left there, it blocks the checkout of the run branch. It is
+    derived data the next scan rewrites. ``Mem.md`` and ``Rules.md`` stay.
+    """
+    _git(root, "checkout", "--", ".k0-mem/Project_context")
+
+
 def changed_paths(root: Path) -> list[str]:
     """The paths ``dirty_paths`` reports: what the working tree changed."""
     return [_porcelain_path(line) for line in dirty_paths(root)]
@@ -80,6 +90,11 @@ def default_base_branch(root: Path) -> str:
     if result.returncode == 0 and name:
         return name.removeprefix("origin/")
     return "main"
+
+
+def origin_url(root: Path) -> str:
+    """The URL of the ``origin`` remote, empty when there is none."""
+    return _git(root, "remote", "get-url", "origin").stdout.strip()
 
 
 def decider(root: Path) -> str:

@@ -2,6 +2,7 @@ import json
 import threading
 from pathlib import Path
 
+from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.messages import AIMessage
 
 from fakes import FakeChatModel, cfg_with
@@ -226,7 +227,8 @@ def test_workers_reflect_in_dispatch_order_when_invoker_setup_is_reordered(tmp_p
     second_invoked = threading.Event()
     prompts = []
 
-    def make_invoke(handler):
+    def make_invoke(callbacks):
+        handler = callbacks[0]
         if not first_entered.is_set():
             first_entered.set()
             assert release_first.wait(5)
@@ -600,3 +602,159 @@ def test_a_run_with_no_new_text_reflects_nothing(tmp_path):
     reflector.after_run("run-2")  # nothing new since the first reflect
     reflector.finish()
     assert len(calls) == 1
+
+
+# --- Langfuse: reflect calls join the trace of the run or chat they reflect on ---
+
+
+class _CountingHandler(BaseCallbackHandler):
+    """Stands in for the langfuse handler: counts the model calls it sees."""
+
+    def __init__(self):
+        self.llm_ends = 0
+
+    def on_llm_end(self, response, **kwargs):
+        self.llm_ends += 1
+
+
+class _Trace:
+    """What the ``tracing`` seam returns: records ``finish``/``flush`` calls."""
+
+    def __init__(self, trace_id, handler, otel_handler=None):
+        self.trace_id = trace_id
+        self.handler = handler
+        self.otel_handler = otel_handler
+        self.finished = []
+        self.flushes = 0
+
+    def finish(self, **kwargs):
+        self.finished.append(kwargs)
+
+    def flush(self):
+        self.flushes += 1
+
+
+def _tracing(made, handler=None, otel_handler=None):
+    def factory(trace_id):
+        trace = _Trace(trace_id, handler, otel_handler)
+        made.append(trace)
+        return trace
+
+    return factory
+
+
+def test_a_run_reflect_calls_reach_the_run_trace(tmp_path):
+    handler = _CountingHandler()
+    made = []
+    cfg = cfg_with(helpers={"reflect": {"provider": "anthropic", "model": "m"}})
+    model = FakeChatModel(
+        messages=[
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "reflect",
+                        "args": {"facts": ["uses sqlite"], "mem": []},
+                        "id": "c1",
+                    }
+                ],
+            )
+        ]
+    )
+    reflector = Reflector(
+        root=tmp_path,
+        transcript=_transcript(tmp_path, "turn\n"),
+        cfg=cfg,
+        init=lambda *a, **k: model,
+        tracing=_tracing(made, handler),
+    )
+    reflector.after_run("run-42")
+    reflector.finish()
+    (trace,) = made
+    assert trace.trace_id == "run-42"
+    assert handler.llm_ends == 1
+    assert len(_events(tmp_path)) == 1  # the events log still gets it
+    assert trace.flushes == 1
+    assert trace.finished == []  # the run's own trace owns the outcome tags
+
+
+def test_a_chat_reflect_calls_reach_the_chat_trace(tmp_path, monkeypatch):
+    monkeypatch.setattr("k0ntrol.memory.reflect.new_chat_id", lambda: "chat-7")
+    made = []
+    reflector = Reflector(
+        root=tmp_path,
+        transcript=_transcript(tmp_path, "/ask q\na\n"),
+        cfg={},
+        reflect=_recording_reflect([]),
+        tracing=_tracing(made),
+    )
+    reflector.ask_turn()
+    reflector.finish()
+    assert [trace.trace_id for trace in made] == ["chat-7"]
+    assert made[0].flushes == 1
+
+
+def test_reflect_without_a_langfuse_handler_only_uses_the_events_handler(tmp_path):
+    seen = []
+
+    def make_invoke(callbacks):
+        seen.append(callbacks)
+        return lambda prompt: {"facts": [], "mem": []}
+
+    reflector = Reflector(
+        root=tmp_path,
+        transcript=_transcript(tmp_path, "turn\n"),
+        cfg={},
+        make_invoke=make_invoke,
+        tracing=_tracing([]),
+    )
+    reflector.after_run("run-1")
+    reflector.finish()
+    assert [len(callbacks) for callbacks in seen] == [1]
+
+
+def test_a_failed_reflect_still_flushes_its_trace(tmp_path):
+    made = []
+    shown = []
+
+    def boom(**_kw):
+        raise RuntimeError("kaput")
+
+    reflector = Reflector(
+        root=tmp_path,
+        transcript=_transcript(tmp_path, "x\n"),
+        cfg={},
+        reflect=boom,
+        write=shown.append,
+        tracing=_tracing(made),
+    )
+    reflector.after_run("run-1")
+    reflector.finish()
+    assert all(trace.flushes == 1 for trace in made)
+    assert shown[0] == "reflect failed: kaput"
+
+
+def test_reflect_calls_also_reach_the_otel_handler(tmp_path):
+    otel = _CountingHandler()
+    cfg = cfg_with(helpers={"reflect": {"provider": "anthropic", "model": "m"}})
+    model = FakeChatModel(messages=[AIMessage(content="", tool_calls=[
+        {"name": "reflect", "args": {"facts": ["uses sqlite"], "mem": []}, "id": "c1"}
+    ])])
+    reflector = Reflector(
+        root=tmp_path,
+        transcript=_transcript(tmp_path, "turn\n"),
+        cfg=cfg,
+        init=lambda *a, **k: model,
+        tracing=_tracing([], otel_handler=otel),
+    )
+    reflector.after_run("run-42")
+    reflector.finish()
+    assert otel.llm_ends == 1
+
+
+def test_reflect_traces_to_langfuse_and_otel_by_default():
+    import inspect
+
+    from k0ntrol.otel import build_run_trace
+
+    assert inspect.signature(Reflector).parameters["tracing"].default is build_run_trace

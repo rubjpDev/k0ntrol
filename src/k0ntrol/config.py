@@ -17,6 +17,13 @@ _AGENT_KEYS = {"provider", "model", "effort", "params", "model_calls"}
 _HELPER_KEYS = {"provider", "model", "effort", "params"}
 _EFFORT_LEVELS = {"low", "medium", "high"}
 
+# Which issue trackers make sense for each code host (vcs); a missing vcs is github.
+VCS_TRACKERS = {
+    "github": ("github", "linear", "jira"),
+    "gitlab": ("gitlab", "linear", "jira"),
+    "bitbucket": ("jira", "linear"),
+}
+
 # 0.0.x keys that are gone in 0.1.0, mapped to their replacement.
 _RETIRED_KEYS = {
     "backend": "set provider on each agents:/helpers: entry",
@@ -73,7 +80,9 @@ def _validate_top_level(cfg: dict) -> list[str]:
     errors.extend(_validate_integer("threshold_lines", cfg.get("threshold_lines"), 1))
     errors.extend(_validate_text("test_cmd", cfg.get("test_cmd")))
     errors.extend(_validate_gates(cfg.get("gates")))
+    errors.extend(_validate_optional_text("vcs", cfg.get("vcs")))
     errors.extend(_validate_optional_text("tracker", cfg.get("tracker")))
+    errors.extend(_validate_vcs_tracker(cfg.get("vcs"), cfg.get("tracker")))
     errors.extend(_validate_optional_text("base_branch", cfg.get("base_branch")))
     errors.extend(_validate_integer("max_attempts", cfg.get("max_attempts"), 1))
     errors.extend(_validate_integer("test_timeout", cfg.get("test_timeout"), 1))
@@ -81,6 +90,16 @@ def _validate_top_level(cfg: dict) -> list[str]:
     errors.extend(_validate_roster("helpers", cfg.get("helpers")))
     errors.extend(_validate_providers(cfg.get("providers")))
     return errors
+
+
+def _validate_vcs_tracker(vcs: object, tracker: object) -> list[str]:
+    if not isinstance(vcs, str) or not isinstance(tracker, str):
+        return []
+    if vcs not in VCS_TRACKERS:
+        return [f"vcs: must be one of {', '.join(VCS_TRACKERS)}"]
+    if tracker not in VCS_TRACKERS[vcs]:
+        return [f"tracker: '{tracker}' does not fit a repo hosted on {vcs}"]
+    return []
 
 
 def _validate_providers(value: object) -> list[str]:

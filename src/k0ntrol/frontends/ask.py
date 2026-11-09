@@ -26,8 +26,8 @@ from k0ntrol.events import (
 )
 from k0ntrol.frontends.mentions import MentionError, mention_paths
 from k0ntrol.helpers import helper_invoker
-from k0ntrol.langfuse import build_trace
 from k0ntrol.memory.refresh import refresh_memory
+from k0ntrol.otel import build_run_trace, trace_callbacks
 from k0ntrol.providers import free_checks, has_errors, report_lines
 from k0ntrol.workflow.change import current_branch
 
@@ -42,9 +42,17 @@ def answer_ask(
     init: Callable = init_chat_model,
     check: Callable = free_checks,
     refresh: Callable = refresh_memory,
-    tracing: Callable = build_trace,
+    tracing: Callable = build_run_trace,
+    history: str = "",
+    session: str | None = None,
 ) -> AgentResult | None:
     """Answer ``question`` with CHATTY.
+
+    ``history`` is the conversation so far, as text: each answer is still a
+    fresh agent run, it just reads what was said before.
+
+    ``session`` is the REPL sitting's id: the Langfuse session that groups
+    this chat's trace with the rest of the sitting.
 
     ``write`` takes progress lines and errors; ``on_text`` takes the
     streamed answer deltas (defaults to ``write``). Returns the agent
@@ -54,10 +62,11 @@ def answer_ask(
     prompt = _prepare(question, root, config, write, check)
     if prompt is None:
         return None
+    prompt = f"{history}\n\n{prompt}" if history else prompt
     writer, handler, chat_id = _chat_events(root, write)
     trace = tracing(chat_id)  # each /ask is its own trace (#49)
-    if not _refresh(root, config, init, handler, write, refresh, trace):
-        trace.finish(kind="ask", outcome="failed", metadata=_ask_metadata(root))
+    if not _refresh(root, config, init, handler, write, refresh, trace, session):
+        _finish_ask(trace, "failed", root, session)
         return None
     agent = build_agent(
         "chatty",
@@ -67,17 +76,19 @@ def answer_ask(
         init=init,
     )
     try:
-        result = _run_chatty(agent, prompt, handler, on_text or write, trace)
+        result = _run_chatty(
+            agent, prompt, handler, on_text or write, trace, session
+        )
     except Exception as error:
         write(f"CHATTY failed: {error}")
-        trace.finish(kind="ask", outcome="failed", metadata=_ask_metadata(root))
+        _finish_ask(trace, "failed", root, session)
         return None
     if result.limit_hit:
         write(
             f"CHATTY hit its {agent.model_calls} model-call limit; "
             "ask again or narrow the question."
         )
-    trace.finish(kind="ask", outcome="done", metadata=_ask_metadata(root))
+    _finish_ask(trace, "done", root, session)
     return result
 
 
@@ -133,11 +144,25 @@ def _chat_events(root: Path, write: Callable[[str], None]):
 
 
 def _callbacks(handler: K0EventHandler, trace) -> list:
-    """The events handler plus the optional Langfuse one (#49)."""
-    callbacks = [handler]
-    if trace.handler is not None:
-        callbacks.append(trace.handler)
-    return callbacks
+    """The events handler plus the optional Langfuse and OTel ones (#49)."""
+    return [handler, *trace_callbacks(trace)]
+
+
+def _finish_ask(trace, outcome: str, root: Path, session: str | None) -> None:
+    trace.finish(
+        kind="ask",
+        outcome=outcome,
+        session_id=session,
+        metadata=_ask_metadata(root),
+    )
+
+
+def _langfuse_metadata(session: str | None) -> dict:
+    """Root-run metadata the Langfuse handler reads: ask tag + sitting."""
+    metadata = {"langfuse_tags": ["ask"]}
+    if session:
+        metadata["langfuse_session_id"] = session
+    return metadata
 
 
 def _ask_metadata(root: Path) -> dict:
@@ -157,11 +182,18 @@ def _refresh(
     write: Callable[[str], None],
     refresh: Callable,
     trace,
+    session: str | None = None,
 ) -> bool:
     """Rescan + one index rebuild; the rescan's helper calls are
     chat-scoped ``model`` events. Returns False when refresh fails."""
     invoke = helper_invoker(
-        config, "bulk_read", init=init, config={"callbacks": _callbacks(handler, trace)}
+        config,
+        "bulk_read",
+        init=init,
+        config={
+            "callbacks": _callbacks(handler, trace),
+            "metadata": _langfuse_metadata(session),
+        },
     )
     try:
         refresh(root, config=config, invoke=invoke)
@@ -171,12 +203,12 @@ def _refresh(
     return True
 
 
-def _run_chatty(agent, prompt, handler, on_text, trace) -> AgentResult:
+def _run_chatty(agent, prompt, handler, on_text, trace, session=None) -> AgentResult:
     return agent.stream(
         [HumanMessage(prompt)],
         config={
             "callbacks": _callbacks(handler, trace),
-            "metadata": {"langfuse_tags": ["ask"]},
+            "metadata": _langfuse_metadata(session),
         },
         on_text=on_text,
     )

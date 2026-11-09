@@ -192,6 +192,43 @@ def test_ask_runs_the_ask_path(tmp_path):
     assert "an answer" in "\n".join(shown)
 
 
+def test_one_sitting_id_reaches_ask_start_and_resume(tmp_path):
+    """The session memory file's stem is the sitting id every call carries."""
+    from k0ntrol.workflow import Outcome, Pending
+
+    seen = []
+
+    def fake_ask(question, **kwargs):
+        seen.append(("ask", kwargs.get("session")))
+
+    def fake_start(kind, task, **kwargs):
+        seen.append(("start", kwargs.get("session")))
+        return Pending(run="r1", gate="diff", question="keep?", answers=("y", "n"))
+
+    def fake_resume(run_id, decision, **kwargs):
+        seen.append(("resume", kwargs.get("session")))
+        return Outcome(run=run_id, outcome="done")
+
+    lines = iter(["/ask what is x?", "plain chat", "/fast fix it", "y", "/quit"])
+    run_session(
+        lambda: next(lines),
+        lambda text: None,
+        root=tmp_path,
+        config=config(),
+        ask=fake_ask,
+        start=fake_start,
+        resume=fake_resume,
+    )
+
+    (transcript,) = (tmp_path / ".k0-mem" / "sessions").glob("*.txt")
+    assert seen == [
+        ("ask", transcript.stem),
+        ("ask", transcript.stem),
+        ("start", transcript.stem),
+        ("resume", transcript.stem),
+    ]
+
+
 def test_work_commands_do_not_touch_the_disk_beyond_the_transcript(tmp_path):
     from k0ntrol.workflow import Outcome
 
@@ -590,3 +627,22 @@ def test_full_n_with_a_dirty_tree_keeps_the_run_and_says_how_to_go_on(tmp_path):
     assert calls == ["start", "abandon"]  # no fresh start after the refusal
     assert "dirty working tree" in text and "?? tests/t.py" in text
     assert "run r1 is kept" in text and "answer y to resume it" in text
+
+
+def test_plain_gate_prints_the_diff_after_the_detail(tmp_path):
+    from k0ntrol.workflow import Outcome, Pending
+
+    pending = Pending(run="r1", gate="review", question="approve?", answers=("ok",),
+                      detail="the review", diff="diff --git a/x b/x\n+y\n")
+    lines = iter(["/fast task", "ok", "/quit"])
+    shown = []
+    run_session(
+        lambda: next(lines),
+        shown.append,
+        root=tmp_path,
+        config=config(),
+        start=lambda *a, **k: pending,
+        resume=lambda run_id, decision, **kw: Outcome(run=run_id, outcome="done"),
+    )
+    text = "\n".join(shown)
+    assert text.index("the review") < text.index("diff --git a/x b/x") < text.index("approve?")

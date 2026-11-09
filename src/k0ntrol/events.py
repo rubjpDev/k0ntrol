@@ -6,6 +6,21 @@ schema is the contract in spec #33 ("Events and Langfuse"): every line has
 not apply are omitted, never `null`. No prompts, completions, file contents
 or tool arguments other than `path` are ever written.
 
+Rotation: when an `EventWriter` is created and `events.jsonl` is over
+`EVENTS_MAX_BYTES`, the file is renamed to `events.1.jsonl`, the previous
+`events.1.jsonl` becomes `events.2.jsonl`, and so on up to `EVENTS_KEEP`
+(3); the oldest is deleted. So `events.1.jsonl` is the newest rotated file
+and `events.<EVENTS_KEEP>.jsonl` the oldest; all match `events.*.jsonl`.
+Rotation never happens on an append, and any error during it is ignored:
+the writer then keeps appending to the existing file. The first rotation in
+a repo also adds `events*.jsonl` to `.k0-mem/.gitignore` when that file
+exists and does not already cover it.
+
+`run_start` may also carry `session`: the id of the REPL sitting that started
+or resumed the run (the stem of its `.k0-mem/sessions/<id>.txt` file, also the
+Langfuse session of `/fast` runs and `/ask` chats), so the log can group runs
+by sitting. Omitted when no sitting is known.
+
 `EventWriter` appends lines for harness events (`run_start`, `gate`,
 `run_end`). `K0EventHandler` — the one callback attached to every graph and
 helper model call — emits the `model` and `tool` events through the same
@@ -31,9 +46,12 @@ from uuid import uuid4
 
 from langgraph.callbacks import GraphCallbackHandler, GraphInterruptEvent
 
+from k0ntrol.memory.layout import EVENTS_IGNORE
 from k0ntrol.providers import REGISTRY
 
 ERR_MAX_CHARS = 500
+EVENTS_MAX_BYTES = 10 * 1024 * 1024
+EVENTS_KEEP = 3
 MASKED = "***"
 # Values shorter than this are not masked: a short env value would mangle
 # ordinary words inside error text. Real credentials are much longer.
@@ -55,6 +73,53 @@ META_EFFORT = "k0_effort"
 def events_path(root: Path) -> Path:
     """The event log for the project rooted at `root`."""
     return root / ".k0-mem" / "events.jsonl"
+
+
+_rotate_lock = threading.Lock()
+
+
+def _rotated(path: Path, generation: int) -> Path:
+    return path.with_name(f"{path.stem}.{generation}{path.suffix}")
+
+
+def _ignore_rotated_files(mem_dir: Path) -> None:
+    gitignore = mem_dir / ".gitignore"
+    text = gitignore.read_text(encoding="utf-8")
+    if EVENTS_IGNORE in text.splitlines() or "events.*.jsonl" in text.splitlines():
+        return
+    prefix = "" if text.endswith("\n") or not text else "\n"
+    with open(gitignore, "a", encoding="utf-8") as fh:
+        fh.write(f"{prefix}{EVENTS_IGNORE}\n")
+
+
+def _shift_rotated(path: Path, keep: int) -> None:
+    _rotated(path, keep).unlink(missing_ok=True)
+    for generation in range(keep - 1, 0, -1):
+        source = _rotated(path, generation)
+        if source.exists():
+            os.replace(source, _rotated(path, generation + 1))
+    os.replace(path, _rotated(path, 1))
+
+
+def rotate_events(
+    path: Path, *, max_bytes: int = EVENTS_MAX_BYTES, keep: int = EVENTS_KEEP
+) -> bool:
+    """Rotate `path` when it is over `max_bytes`; True when it rotated.
+
+    Never raises: a failure leaves the log as it is and writing carries on.
+    """
+    with _rotate_lock:
+        try:
+            if path.stat().st_size <= max_bytes:
+                return False
+            _shift_rotated(path, keep)
+        except OSError:
+            return False
+    try:
+        _ignore_rotated_files(path.parent)
+    except OSError:
+        pass
+    return True
 
 
 def new_run_id() -> str:
@@ -110,9 +175,11 @@ class EventWriter:
         chat: str | None = None,
         mask: Iterable[str] | None = None,
         progress: Callable[[dict], None] | None = None,
+        max_bytes: int = EVENTS_MAX_BYTES,
     ) -> None:
         if (run is None) == (chat is None):
             raise ValueError("EventWriter needs exactly one of run= or chat=")
+        rotate_events(path, max_bytes=max_bytes)
         self._path = path
         self._run = run
         self._chat = chat
@@ -145,6 +212,15 @@ class EventWriter:
         self._notify(event)
         return event
 
+    def working(self, **fields: Any) -> None:
+        """Tell the progress display a model or tool call just started.
+
+        Display only: nothing is written to `events.jsonl`, so the log keeps
+        exactly one line per finished model call.
+        """
+        event = {"kind": "working", **{k: v for k, v in fields.items() if v is not None}}
+        self._notify(event)
+
     def _notify(self, event: dict) -> None:
         if self._progress is None:
             return
@@ -161,8 +237,10 @@ class EventWriter:
         branch: str | None = None,
         version: str | None = None,
         resumed: bool | None = None,
+        session: str | None = None,
     ) -> dict:
-        """Emit `run_start`. `work_item` and `resumed` only when they apply."""
+        """Emit `run_start`. `work_item`, `resumed` and `session` (the REPL
+        sitting's id) only when they apply."""
         return self.emit(
             "run_start",
             run_kind=run_kind,
@@ -170,6 +248,7 @@ class EventWriter:
             branch=branch,
             version=version,
             resumed=resumed,
+            session=session,
         )
 
     def gate(
@@ -236,7 +315,7 @@ class K0EventHandler(GraphCallbackHandler):
         metadata: dict | None = None,
         **kwargs: Any,
     ) -> None:
-        self._llm_starts[run_id] = _call_start(metadata)
+        self._llm_starts[run_id] = self._started(metadata)
 
     def on_llm_start(
         self,
@@ -250,7 +329,13 @@ class K0EventHandler(GraphCallbackHandler):
         **kwargs: Any,
     ) -> None:
         # k0 uses chat models, but a plain LLM call still gets its event.
-        self._llm_starts[run_id] = _call_start(metadata)
+        self._llm_starts[run_id] = self._started(metadata)
+
+    def _started(self, metadata: Mapping | None) -> dict:
+        start = _call_start(metadata)
+        who = {"helper": start["helper"]} if start["helper"] else {"agent": start["agent"]}
+        self._writer.working(**who)
+        return start
 
     def on_llm_end(
         self,
@@ -324,6 +409,8 @@ class K0EventHandler(GraphCallbackHandler):
             "tool": (serialized or {}).get("name"),
             "path": str(path) if path else None,
         }
+        start = self._tool_starts[run_id]
+        self._writer.working(agent=start["agent"], tool=start["tool"], path=start["path"])
 
     def on_tool_end(
         self,
@@ -434,12 +521,20 @@ def render_event(event: dict) -> str | None:
 
 
 class ProgressRenderer:
-    """Turns each event into at most one progress line via `write`."""
+    """Turns each event into at most one progress line via `write`.
+
+    A `write` with an `event` method is a rich output (the terminal UI):
+    it gets the event itself and renders it its own way.
+    """
 
     def __init__(self, write: Callable[[str], None]) -> None:
         self._write = write
 
     def __call__(self, event: dict) -> None:
+        rich_output = getattr(self._write, "event", None)
+        if rich_output is not None:
+            rich_output(event)
+            return
         line = render_event(event)
         if line is not None:
             self._write(line)
