@@ -1,11 +1,14 @@
 """Setup screens: the project once per repo, the provider once per machine.
 
 Both are Claude Code-style questions over :class:`Prompt`. The project screen
-writes ``.k0-mem/config.yaml``; the provider screen rewrites the one user
-config, ``~/.k0ntrol/config.yaml`` (also run again from ``/config``).
+asks where the code is hosted, which issue tracker fits that host, the base
+branch and the test command, and writes ``.k0-mem/config.yaml``. The provider
+screen rewrites the one user config, ``~/.k0ntrol/config.yaml``. Both run
+again from ``/config``.
 """
 
 import getpass
+import re
 from collections.abc import Callable
 from pathlib import Path
 
@@ -16,7 +19,7 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
-from k0ntrol.config import AGENTS, HELPERS, load_config
+from k0ntrol.config import AGENTS, HELPERS, VCS_TRACKERS, load_config
 from k0ntrol.credentials import save_credential
 from k0ntrol.frontends.prompt import Prompt
 from k0ntrol.frontends.theme import BORDER, BULLET, DIM, OK, WARN
@@ -29,7 +32,7 @@ from k0ntrol.init_flow import (
 )
 from k0ntrol.memory.layout import PROJECT_CONFIG_HEAD, init_project
 from k0ntrol.providers import REGISTRY, tool_calling_models
-from k0ntrol.workflow.change import default_base_branch
+from k0ntrol.workflow.change import default_base_branch, origin_url
 
 _OTHER = "other…"
 _USER_CONFIG_HEAD = (
@@ -39,12 +42,16 @@ _USER_CONFIG_HEAD = (
 
 # --- project setup ------------------------------------------------------------
 
-_TRACKERS = [
-    ("github", "GitHub"),
-    ("gitlab", "GitLab (coming soon)"),
-    ("linear", "Linear (coming soon)"),
-    ("jira", "Jira (coming soon)"),
-]
+_VCS_HOSTS = {"github": "GitHub", "gitlab": "GitLab", "bitbucket": "Bitbucket"}
+_TRACKER_NAMES = {
+    "github": "GitHub Issues",
+    "gitlab": "GitLab Issues",
+    "linear": "Linear",
+    "jira": "Jira",
+}
+# Saved as given; only GitHub code + GitHub Issues work with /full in 0.1.0.
+_UNSHIPPED = "  coming soon: /full needs GitHub in 0.1.0; chat and /fast still work here"
+_HOST_PATTERN = re.compile(r"^(?:\w+://)?(?:[^@/]+@)?([^/:]+)")
 _TEST_COMMANDS = (
     ("uv.lock", "uv run pytest -q"),
     ("pyproject.toml", "pytest -q"),
@@ -57,14 +64,19 @@ _TEST_COMMANDS = (
 
 
 def run_project_setup(root: Path, prompt: Prompt, console: Console) -> Path:
-    """Ask tracker, base branch and test command; write the project config."""
+    """Ask code host, tracker, base branch and test command; write the config."""
     _print_title(
         console,
         f"Set up k0 for {root.name}",
         "Saved in .k0-mem/config.yaml; you can change it later.",
     )
+    vcs = _ask_vcs(root, prompt)
+    tracker = _ask_tracker(vcs, prompt)
+    if vcs != "github" or tracker != "github":
+        console.print(Text(_UNSHIPPED, style=WARN))
     answers = {
-        "tracker": _ask_tracker(prompt, console),
+        "vcs": vcs,
+        "tracker": tracker,
         "base_branch": _ask_base_branch(root, prompt),
         "test_cmd": _ask_test_cmd(root, prompt),
     }
@@ -81,12 +93,38 @@ def suggest_test_command(root: Path) -> str | None:
     return next((cmd for name, cmd in _TEST_COMMANDS if (root / name).exists()), None)
 
 
-def _ask_tracker(prompt: Prompt, console: Console) -> str:
-    while True:
-        choice = prompt.choose("Which issue tracker does this repo use?", _TRACKERS)
-        if choice == "github":
-            return choice
-        console.print(Text("  only GitHub works in 0.1.0", style=WARN))
+def detect_vcs(root: Path) -> str | None:
+    """The code host named by the ``origin`` remote, if it is a known one."""
+    match = _HOST_PATTERN.match(origin_url(root))
+    host = match.group(1).lower() if match else ""
+    if host == "github.com":
+        return "github"
+    if host == "bitbucket.org":
+        return "bitbucket"
+    return "gitlab" if "gitlab" in host else None
+
+
+def _ask_vcs(root: Path, prompt: Prompt) -> str:
+    detected = detect_vcs(root)
+    hosts = sorted(_VCS_HOSTS, key=lambda host: host != detected)
+    options = [(host, _host_label(host, detected)) for host in hosts]
+    return prompt.choose("Where is this repo's code hosted?", options)
+
+
+def _host_label(host: str, detected: str | None) -> str:
+    tags = ["detected"] if host == detected else []
+    tags += [] if host == "github" else ["coming soon"]
+    return f"{_VCS_HOSTS[host]} ({', '.join(tags)})" if tags else _VCS_HOSTS[host]
+
+
+def _ask_tracker(vcs: str, prompt: Prompt) -> str:
+    options = [(name, _tracker_label(name)) for name in VCS_TRACKERS[vcs]]
+    return prompt.choose("Which issue tracker does this repo use?", options)
+
+
+def _tracker_label(name: str) -> str:
+    label = _TRACKER_NAMES[name]
+    return label if name == "github" else f"{label} (coming soon)"
 
 
 def _ask_base_branch(root: Path, prompt: Prompt) -> str:

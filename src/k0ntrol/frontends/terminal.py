@@ -224,7 +224,7 @@ class Terminal:
         choice = self._prompt.choose(
             "What do you want to change?",
             [("models", "Models and provider"),
-             ("project", "This project: tracker, base branch, test command")],
+             ("project", "This project: code host, tracker, base branch, test command")],
         )
         if choice == "project":
             run_project_setup(root, self._prompt, self._console)

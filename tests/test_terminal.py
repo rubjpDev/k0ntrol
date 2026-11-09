@@ -77,6 +77,7 @@ def test_the_session_asks_gates_and_reports_through_the_ui(tmp_path):
     text = console.export_text()
     assert "Spec gate" in text
     assert "bedrock/m" in text  # /status
+    assert "vcs       github" in text  # a missing vcs reads as github
     assert "run done" not in text  # the renderer reports the outcome, not the session
 
 
@@ -125,13 +126,14 @@ def test_config_command_reruns_the_project_setup_and_reloads(tmp_path, monkeypat
     subprocess.run(["git", "init", "-q", "-b", "main"], cwd=tmp_path, check=True)
     (tmp_path / "uv.lock").write_text("")
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
-    ui, console = terminal(["/config", "2", "1", "1", "1", "/quit"])
+    ui, console = terminal(["/config", "2", "1", "1", "1", "1", "/quit"])
     config = {"agents": {}}
 
     run_session(lambda: "unused", print, root=tmp_path, config=config, ui=ui)
 
     saved = (tmp_path / ".k0-mem" / "config.yaml").read_text()
     assert "tracker: github" in saved and "uv run pytest -q" in saved
+    assert "vcs: github" in saved
     assert config["tracker"] == "github"  # reloaded in place for the next run
 
 

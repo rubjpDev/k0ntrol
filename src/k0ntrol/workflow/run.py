@@ -383,7 +383,12 @@ def _tracker_for(kind: str, cfg: dict, root: Path, tracker):
     """``/full`` cannot run trackerless: build the configured adapter."""
     if kind != "full" or tracker is not None:
         return tracker
-    if cfg.get("tracker") != "github":
+    unshipped = next(
+        (cfg[key] for key in ("vcs", "tracker") if cfg.get(key, "github") != "github"), None
+    )
+    if unshipped:
+        raise RunRefused(f"/full only works with GitHub in 0.1.0, not {unshipped}")
+    if cfg.get("tracker") is None:
         raise RunRefused("/full needs a tracker; run k0 init --tracker github")
     return GhTracker(subprocess_runner(root))
 

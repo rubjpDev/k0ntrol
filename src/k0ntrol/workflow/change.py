@@ -92,6 +92,11 @@ def default_base_branch(root: Path) -> str:
     return "main"
 
 
+def origin_url(root: Path) -> str:
+    """The URL of the ``origin`` remote, empty when there is none."""
+    return _git(root, "remote", "get-url", "origin").stdout.strip()
+
+
 def decider(root: Path) -> str:
     """Who is answering the gates: the git user.name, else ``human``."""
     return _git(root, "config", "user.name").stdout.strip() or "human"

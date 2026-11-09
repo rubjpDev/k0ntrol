@@ -235,9 +235,27 @@ def test_tracker_and_base_branch_are_optional_strings(cfg):
     validate_config(cfg)
 
 
+def test_vcs_and_tracker_must_be_a_compatible_pair(cfg):
+    cfg["vcs"] = "bitbucket"
+    cfg["tracker"] = "jira"
+    validate_config(cfg)
+    cfg["tracker"] = "github"
+    with pytest.raises(ConfigError, match="'github' does not fit a repo hosted on bitbucket"):
+        validate_config(cfg)
+
+
+def test_an_unknown_vcs_is_rejected_and_a_missing_one_is_fine(cfg):
+    cfg["tracker"] = "github"
+    validate_config(cfg)
+    cfg["vcs"] = "svn"
+    with pytest.raises(ConfigError, match="vcs: must be one of"):
+        validate_config(cfg)
+
+
 @pytest.mark.parametrize(
     "key,value",
     [
+        ("vcs", ""),
         ("tracker", ""),
         ("tracker", 42),
         ("base_branch", " "),
@@ -315,3 +333,15 @@ def test_doctor_reports_invalid_config_and_exits_1(tmp_path, monkeypatch, capsys
     (tmp_path / ".k0-mem/config.yaml").write_text("threshold_lines: 0\n")
     assert main(["doctor"]) == 1
     assert "threshold_lines" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    ("cfg", "name"),
+    [({"vcs": "gitlab", "tracker": "gitlab"}, "gitlab"), ({"vcs": "github", "tracker": "jira"}, "jira")],
+)
+def test_full_refuses_a_host_or_tracker_other_than_github(tmp_path, cfg, name):
+    from k0ntrol.workflow import RunRefused
+    from k0ntrol.workflow.run import _tracker_for
+
+    with pytest.raises(RunRefused, match=f"only works with GitHub in 0.1.0, not {name}"):
+        _tracker_for("full", cfg, tmp_path, None)

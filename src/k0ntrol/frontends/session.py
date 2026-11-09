@@ -197,7 +197,8 @@ _HELP = "commands: /ask, /fast, /full, /status, /quit"
 
 
 def _status_rows(config: dict, root: Path) -> list[tuple[str, str]]:
-    rows = [("cwd", str(root)), ("tracker", str(config.get("tracker") or "none"))]
+    rows = [("cwd", str(root)), ("vcs", str(config.get("vcs") or "github"))]
+    rows.append(("tracker", str(config.get("tracker") or "none")))
     rows.append(("test_cmd", str(config.get("test_cmd", ""))))
     for kind in ("agents", "helpers"):
         for name, entry in (config.get(kind) or {}).items():

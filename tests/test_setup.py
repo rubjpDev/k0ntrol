@@ -1,5 +1,6 @@
 import io
 import stat
+import subprocess
 
 import pytest
 import yaml
@@ -11,6 +12,7 @@ from k0ntrol.frontends import setup as screens
 from k0ntrol.frontends.prompt import Prompt
 from k0ntrol.frontends.setup import (
     run_project_setup,
+    detect_vcs,
     run_provider_setup,
     suggest_test_command,
 )
@@ -92,12 +94,13 @@ def test_project_setup_writes_the_answers(tmp_path):
     (root / "uv.lock").write_text("")
     console = make_console()
 
-    path = run_project_setup(root, make_prompt(console, "1", "1", "1"), console)
+    path = run_project_setup(root, make_prompt(console, "1", "1", "1", "1"), console)
 
     assert path == root / ".k0-mem" / "config.yaml"
     text = path.read_text()
     assert text.startswith("# Project overrides.")
     assert yaml.safe_load(text) == {
+        "vcs": "github",
         "tracker": "github",
         "base_branch": "main",
         "test_cmd": "uv run pytest -q",
@@ -109,18 +112,117 @@ def test_project_setup_writes_the_answers(tmp_path):
     assert "Saved .k0-mem/config.yaml" in out
 
 
-def test_project_setup_refuses_a_coming_soon_tracker_and_asks_again(tmp_path):
+def saved(root):
+    return yaml.safe_load((root / ".k0-mem/config.yaml").read_text())
+
+
+def test_a_coming_soon_tracker_is_saved_with_a_warning(tmp_path):
     console = make_console()
 
-    run_project_setup(tmp_path, make_prompt(console, "gitlab", "jira", "github", "1", "1", "pytest"), console)
+    run_project_setup(tmp_path, make_prompt(console, "github", "jira", "1", "1", "pytest"), console)
 
-    assert screen(console).count("only GitHub works in 0.1.0") == 2
-    assert yaml.safe_load((tmp_path / ".k0-mem/config.yaml").read_text())["tracker"] == "github"
+    assert screen(console).count("/full needs GitHub in 0.1.0") == 1
+    assert saved(tmp_path)["tracker"] == "jira"
+
+
+def test_a_coming_soon_host_is_saved_and_offers_only_its_trackers(tmp_path):
+    console = make_console()
+    seen = []
+    prompt = make_prompt(console, "bitbucket", "jira", "1", "1", "pytest")
+    choose = prompt.choose
+    prompt.choose = lambda question, options: seen.append(options) or choose(question, options)
+
+    run_project_setup(tmp_path, prompt, console)
+
+    assert [key for key, _ in seen[1]] == ["jira", "linear"]
+    assert screen(console).count("/full needs GitHub in 0.1.0") == 1
+    assert (saved(tmp_path)["vcs"], saved(tmp_path)["tracker"]) == ("bitbucket", "jira")
+
+
+def git_repo(path, remote=None):
+    subprocess.run(["git", "init", "-q"], cwd=path, check=True)
+    if remote:
+        subprocess.run(["git", "remote", "add", "origin", remote], cwd=path, check=True)
+    return path
+
+
+@pytest.mark.parametrize(
+    "remote, host",
+    [
+        ("https://github.com/me/repo.git", "github"),
+        ("git@github.com:me/repo.git", "github"),
+        ("https://user@bitbucket.org/me/repo.git", "bitbucket"),
+        ("ssh://git@bitbucket.org:22/me/repo.git", "bitbucket"),
+        ("https://gitlab.com/me/repo.git", "gitlab"),
+        ("git@gitlab.mycorp.io:me/repo.git", "gitlab"),
+        ("https://git.example.com/me/repo.git", None),
+        (None, None),
+    ],
+)
+def test_detect_vcs_from_the_origin_remote(tmp_path, remote, host):
+    assert detect_vcs(git_repo(tmp_path, remote)) == host
+
+
+def test_the_detected_host_comes_first_and_is_labelled(tmp_path):
+    seen = []
+
+    class Spy:
+        def choose(self, question, options):
+            seen.append(options)
+            return "github"
+
+    git_repo(tmp_path, "git@bitbucket.org:me/repo.git")
+
+    screens._ask_vcs(tmp_path, Spy())
+
+    assert seen[0] == [
+        ("bitbucket", "Bitbucket (detected, coming soon)"),
+        ("github", "GitHub"),
+        ("gitlab", "GitLab (coming soon)"),
+    ]
+
+
+def test_without_a_remote_github_comes_first_and_nothing_is_detected(tmp_path):
+    options = []
+
+    class Spy:
+        def choose(self, question, choices):
+            options.extend(choices)
+            return "github"
+
+    screens._ask_vcs(git_repo(tmp_path), Spy())
+
+    assert options[0] == ("github", "GitHub")
+    assert all("(detected)" not in label for _, label in options)
+
+
+def test_a_detected_gitlab_is_saved_as_detected(tmp_path):
+    console = make_console()
+    git_repo(tmp_path, "https://gitlab.com/me/repo.git")
+
+    run_project_setup(tmp_path, make_prompt(console, "1", "gitlab", "1", "1", "pytest"), console)
+
+    assert saved(tmp_path)["vcs"] == "gitlab"
+    assert saved(tmp_path)["tracker"] == "gitlab"
+
+
+def test_trackers_are_filtered_by_the_code_host(tmp_path):
+    seen = []
+
+    class Spy:
+        def choose(self, question, options):
+            seen.append([key for key, _ in options])
+            return "github"
+
+    for host in ("github", "gitlab", "bitbucket"):
+        screens._ask_tracker(host, Spy())
+
+    assert seen == [["github", "linear", "jira"], ["gitlab", "linear", "jira"], ["jira", "linear"]]
 
 
 def test_project_setup_takes_another_branch_and_command(tmp_path):
     console = make_console()
-    prompt = make_prompt(console, "1", "2", "", "develop", "1", "", "make check")
+    prompt = make_prompt(console, "1", "1", "2", "", "develop", "1", "", "make check")
 
     path = run_project_setup(tmp_path, prompt, console)
 
@@ -133,7 +235,7 @@ def test_project_setup_takes_another_branch_and_command(tmp_path):
 def test_project_setup_without_a_test_suggestion_offers_only_another(tmp_path):
     console = make_console()
 
-    run_project_setup(tmp_path, make_prompt(console, "1", "1", "1", "pytest -x"), console)
+    run_project_setup(tmp_path, make_prompt(console, "1", "1", "1", "1", "pytest -x"), console)
 
     assert yaml.safe_load((tmp_path / ".k0-mem/config.yaml").read_text())["test_cmd"] == "pytest -x"
 
