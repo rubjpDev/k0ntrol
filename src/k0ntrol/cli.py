@@ -6,6 +6,7 @@ from langchain.chat_models import init_chat_model
 
 from k0ntrol import __version__
 from k0ntrol.config import ConfigError, load_config
+from k0ntrol.credentials import load_credentials
 from k0ntrol.events import (
     EventWriter,
     K0EventHandler,
@@ -57,6 +58,8 @@ def main(argv: list[str] | None = None, *, init=init_chat_model) -> int:
     )
     subparsers.add_parser("scan", help="write the code graph")
     args = parser.parse_args(argv)
+    # Keys saved by the setup screen; variables already set always win.
+    load_credentials(Path.home())
 
     if args.command == "doctor":
         return _run_doctor(live=args.live)
@@ -91,6 +94,9 @@ def _run_doctor(live: bool) -> int:
 
 def _run_session(*, init=init_chat_model) -> int:
     root = Path.cwd()
+    ui = _terminal_ui()
+    if ui is not None and not _first_run(ui, root):
+        return 1
     try:
         config = load_config(root)
     except ConfigError as error:
@@ -105,8 +111,18 @@ def _run_session(*, init=init_chat_model) -> int:
         echo_input=False,
         init=init,
         stream=lambda text: print(text, end="", flush=True),
-        ui=_terminal_ui(),
+        ui=ui,
     )
+
+
+def _first_run(ui: Terminal, root: Path) -> bool:
+    """The setup screens on a new repo or machine; False when cancelled."""
+    try:
+        ui.first_run(root, Path.home())
+    except (KeyboardInterrupt, EOFError):
+        print("\nsetup cancelled; run k0 again to finish it")
+        return False
+    return True
 
 
 def _terminal_ui() -> Terminal | None:

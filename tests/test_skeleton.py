@@ -52,5 +52,8 @@ def test_provider_and_langfuse_extras():
         "aws",
         "google",
         "langfuse",
+        "all",
     }
     assert extras["langfuse"] == ["langfuse>=5.0.4,<6"]
+    # `all` adds no dependency: it only bundles the provider extras
+    assert extras["all"] == ["k0ntrol[ollama,openai,anthropic,openrouter,aws,google]"]

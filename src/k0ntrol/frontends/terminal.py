@@ -9,11 +9,14 @@ through a handful of methods (``read``, ``line``, ``event``, ``stream``,
 
 from pathlib import Path
 
+import yaml
 from rich.console import Console
 from rich.text import Text
 
 from k0ntrol.frontends.prompt import Prompt, render_welcome, terminal_key_reader
+from k0ntrol.credentials import load_credentials
 from k0ntrol.frontends.render import LiveRenderer, render_gate
+from k0ntrol.frontends.setup import run_project_setup, run_provider_setup
 from k0ntrol.frontends.theme import ACCENT, BULLET, DIM, ERROR, WARN
 
 COMMANDS = {
@@ -21,6 +24,7 @@ COMMANDS = {
     "/full": "take #<issue> or a task to a ready pull request",
     "/fast": "a quick test-first change in the working tree",
     "/status": "provider, models and project settings",
+    "/config": "change the models or this project's setup",
     "/help": "commands and shortcuts",
     "/quit": "leave k0",
 }
@@ -130,6 +134,30 @@ class Terminal:
             line.append(f"  {value}")
             self._console.print(line)
 
+    def first_run(self, root: Path, home: Path) -> None:
+        """The setup screens k0 needs before its first run here."""
+        if needs_project_setup(root):
+            run_project_setup(root, self._prompt, self._console)
+        if needs_provider_setup(home):
+            self._setup_provider(root, home)
+
+    def configure(self, root: Path, home: Path) -> None:
+        """``/config``: the provider and models, or this project's setup."""
+        self._settle()
+        choice = self._prompt.choose(
+            "What do you want to change?",
+            [("models", "Models and provider"),
+             ("project", "This project: tracker, base branch, test command")],
+        )
+        if choice == "project":
+            run_project_setup(root, self._prompt, self._console)
+            return
+        self._setup_provider(root, home)
+
+    def _setup_provider(self, root: Path, home: Path) -> None:
+        run_provider_setup(home, self._prompt, self._console, root=root)
+        load_credentials(home)  # a key saved just now works without a restart
+
     def _continues_after_gate(self, event: dict) -> bool:
         """The run resuming right after a gate answer is not news."""
         answered, self._answered_gate = self._answered_gate, False
@@ -152,6 +180,24 @@ class Terminal:
             self._console.print()
         self._answering = False
         self._at_line_start = True
+
+
+def needs_project_setup(root: Path) -> bool:
+    """A git repo k0 has not been set up in yet."""
+    return (root / ".git").exists() and not (root / ".k0-mem" / "config.yaml").exists()
+
+
+def needs_provider_setup(home: Path) -> bool:
+    """No models chosen yet on this machine (an unreadable file is left to
+    the config loader, which says what is wrong with it)."""
+    path = home / ".k0ntrol" / "config.yaml"
+    if not path.exists():
+        return True
+    try:
+        data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    except yaml.YAMLError:
+        return False
+    return not (isinstance(data, dict) and data.get("agents"))
 
 
 def line_style(text: str) -> str:

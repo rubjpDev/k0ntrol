@@ -7,6 +7,7 @@ from langchain.chat_models import init_chat_model
 
 from k0ntrol import __version__
 from k0ntrol.frontends.ask import answer_ask
+from k0ntrol.config import ConfigError, load_config
 from k0ntrol.events import render_event
 from k0ntrol.frontends.banner import render_banner
 from k0ntrol.memory.reflect import (
@@ -167,7 +168,26 @@ def _commands(ui, show: Callable[[str], None], config: dict, root: Path) -> dict
     help_ = ui.help if ui is not None else lambda: show(_HELP)
     rows = lambda: _status_rows(config, root)  # noqa: E731
     status = (lambda: ui.status(rows())) if ui is not None else (lambda: _show_rows(show, rows()))
-    return {"/help": help_, "?": help_, "/status": status}
+    commands = {"/help": help_, "?": help_, "/status": status}
+    if ui is not None:
+        commands["/config"] = lambda: _reconfigure(ui, show, config, root)
+    return commands
+
+
+def _reconfigure(ui, show: Callable[[str], None], config: dict, root: Path) -> None:
+    """Run the setup screens, then reload the config in place: every
+    command holds this same dict, so the next run uses the new models."""
+    try:
+        ui.configure(root, Path.home())
+        fresh = load_config(root)
+    except (KeyboardInterrupt, EOFError):
+        show("setup cancelled; nothing changed")
+        return
+    except ConfigError as error:
+        show(f"config error: {error}")
+        return
+    config.clear()
+    config.update(fresh)
 
 
 _HELP = "commands: /ask, /fast, /full, /status, /quit"

@@ -95,3 +95,41 @@ def test_the_resume_right_after_a_gate_answer_is_not_shown():
     ui.event(resumed)  # a real resume later on is shown
 
     assert console.export_text().count("k0/1-x") == 1
+
+
+def test_first_run_is_a_git_repo_without_config_and_a_machine_without_models(tmp_path):
+    from k0ntrol.frontends.terminal import needs_project_setup, needs_provider_setup
+
+    repo, home = tmp_path / "repo", tmp_path / "home"
+    (repo / ".git").mkdir(parents=True)
+    assert needs_project_setup(repo)
+    (repo / ".k0-mem").mkdir()
+    (repo / ".k0-mem" / "config.yaml").write_text("tracker: github\n")
+    assert not needs_project_setup(repo)
+    assert not needs_project_setup(tmp_path / "not-a-repo")
+
+    assert needs_provider_setup(home)
+    user = home / ".k0ntrol" / "config.yaml"
+    user.parent.mkdir(parents=True)
+    user.write_text("max_attempts: 3\n")
+    assert needs_provider_setup(home)
+    user.write_text("agents:\n  spec: {provider: ollama, model: m}\n")
+    assert not needs_provider_setup(home)
+    user.write_text("agents: [\n")
+    assert not needs_provider_setup(home)  # the loader reports bad YAML
+
+
+def test_config_command_reruns_the_project_setup_and_reloads(tmp_path, monkeypatch):
+    import subprocess
+
+    subprocess.run(["git", "init", "-q", "-b", "main"], cwd=tmp_path, check=True)
+    (tmp_path / "uv.lock").write_text("")
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    ui, console = terminal(["/config", "2", "1", "1", "1", "/quit"])
+    config = {"agents": {}}
+
+    run_session(lambda: "unused", print, root=tmp_path, config=config, ui=ui)
+
+    saved = (tmp_path / ".k0-mem" / "config.yaml").read_text()
+    assert "tracker: github" in saved and "uv run pytest -q" in saved
+    assert config["tracker"] == "github"  # reloaded in place for the next run
