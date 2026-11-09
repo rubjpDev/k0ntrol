@@ -19,8 +19,10 @@ from k0ntrol.frontends.session import run_session
 from k0ntrol.frontends.terminal import Terminal, needs_project_setup, needs_provider_setup
 from k0ntrol.helpers import helper_invoker
 from k0ntrol.init_flow import run_init
+from k0ntrol.langfuse import build_trace
 from k0ntrol.memory.refresh import refresh_memory
 from k0ntrol.providers import free_checks, has_errors, live_checks, report_lines
+from k0ntrol.workflow.change import current_branch
 
 
 def main(argv: list[str] | None = None, *, init=init_chat_model) -> int:
@@ -134,15 +136,32 @@ def _terminal_ui() -> Terminal | None:
     return Terminal.open(history=Path.home() / ".k0ntrol" / "history")
 
 
-def _run_scan(*, init=init_chat_model) -> int:
+def _run_scan(*, init=init_chat_model, tracing=build_trace) -> int:
     """Rescan in place: changed files get notes from the bulk_read helper,
-    then the FTS index is rebuilt — run-scoped events as it works."""
+    then the FTS index is rebuilt — run-scoped events as it works.
+
+    The scan is its own Langfuse trace (id = its run id, kind ``scan``).
+    """
     root = Path.cwd()
+    run_id = new_run_id()
+    trace = tracing(run_id)
+    code = _scan(root, init, run_id, trace)
+    trace.finish(
+        kind="scan",
+        outcome="done" if code == 0 else "failed",
+        metadata=_scan_metadata(root),
+    )
+    return code
+
+
+def _scan(root: Path, init, run_id: str, trace) -> int:
     try:
         config = load_config(root)
-        handler = _scan_handler(root)
+        callbacks = [_scan_handler(root, run_id)]
+        if trace.handler is not None:
+            callbacks.append(trace.handler)
         invoke = helper_invoker(
-            config, "bulk_read", init=init, config={"callbacks": [handler]}
+            config, "bulk_read", init=init, config={"callbacks": callbacks}
         )
         refresh_memory(root, config=config, invoke=invoke)
     except ConfigError as error:
@@ -154,10 +173,17 @@ def _run_scan(*, init=init_chat_model) -> int:
     return 0
 
 
-def _scan_handler(root: Path) -> K0EventHandler:
+def _scan_metadata(root: Path) -> dict:
+    """The scan trace's metadata: branch and k0 version."""
+    metadata = {"k0_version": __version__}
+    branch = current_branch(root)
+    if branch:
+        metadata["branch"] = branch
+    return metadata
+
+
+def _scan_handler(root: Path, run_id: str) -> K0EventHandler:
     path = events_path(root)
     path.parent.mkdir(parents=True, exist_ok=True)
-    writer = EventWriter(
-        path, run=new_run_id(), progress=ProgressRenderer(print)
-    )
+    writer = EventWriter(path, run=run_id, progress=ProgressRenderer(print))
     return K0EventHandler(writer)

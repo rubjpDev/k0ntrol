@@ -3,10 +3,12 @@ import subprocess
 from pathlib import Path
 
 import pytest
+from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.messages import AIMessage
 
 from fakes import FakeChatModel
-from k0ntrol.cli import main
+from k0ntrol import __version__
+from k0ntrol.cli import _run_scan, main
 from k0ntrol.memory.scan import ScanError, run_scan
 
 
@@ -403,3 +405,87 @@ def test_deleted_file_drops_its_notes(tmp_path):
     run_scan(tmp_path, invoke=_recording_invoke([]))
 
     assert not (memory / "files" / "gone.py.md").exists()
+
+
+# --- Langfuse: a scan is its own trace, kind ``scan`` ---------------------------
+
+
+class _CountingHandler(BaseCallbackHandler):
+    """Stands in for the langfuse handler: counts the model calls it sees."""
+
+    def __init__(self):
+        self.llm_ends = 0
+
+    def on_llm_end(self, response, **kwargs):
+        self.llm_ends += 1
+
+
+class _Trace:
+    def __init__(self, trace_id, handler):
+        self.trace_id = trace_id
+        self.handler = handler
+        self.finished = []
+
+    def finish(self, **kwargs):
+        self.finished.append(kwargs)
+
+
+def _tracing(made, handler=None):
+    def factory(trace_id):
+        trace = _Trace(trace_id, handler)
+        made.append(trace)
+        return trace
+
+    return factory
+
+
+def test_scan_cli_sends_its_helper_calls_to_a_scan_trace(tmp_path, monkeypatch):
+    git_tracked(tmp_path, {"a.py": "print(1)\n"})
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    handler = _CountingHandler()
+    made = []
+    model = FakeChatModel(reply=_notes_message())
+
+    code = _run_scan(init=lambda _m, **_kw: model, tracing=_tracing(made, handler))
+
+    assert code == 0
+    (trace,) = made
+    (event,) = [
+        json.loads(line)
+        for line in (tmp_path / ".k0-mem" / "events.jsonl").read_text().splitlines()
+    ]
+    assert trace.trace_id == event["run"]
+    assert handler.llm_ends == 1
+    (finish,) = trace.finished
+    assert finish["kind"] == "scan"
+    assert finish["outcome"] == "done"
+    assert finish["metadata"]["k0_version"] == __version__
+
+
+def test_a_failed_scan_finishes_its_trace_as_failed(tmp_path, monkeypatch, capsys):
+    git_tracked(tmp_path, {"a.py": "print(1)\n"})
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+
+    def boom(*_a, **_kw):
+        raise RuntimeError("kaput")
+
+    monkeypatch.setattr("k0ntrol.cli.refresh_memory", boom)
+    made = []
+
+    code = _run_scan(tracing=_tracing(made))
+
+    assert code == 1
+    assert "scan error: kaput" in capsys.readouterr().err
+    assert made[0].finished[0]["kind"] == "scan"
+    assert made[0].finished[0]["outcome"] == "failed"
+
+
+def test_scan_without_a_langfuse_handler_still_runs(tmp_path, monkeypatch):
+    git_tracked(tmp_path, {"a.py": "print(1)\n"})
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    model = FakeChatModel(reply=_notes_message())
+
+    assert _run_scan(init=lambda _m, **_kw: model, tracing=_tracing([])) == 0
