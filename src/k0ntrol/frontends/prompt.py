@@ -50,9 +50,18 @@ _ARROW_TIMEOUT = 0.05
 
 
 def render_welcome(
-    console: Console, *, version: str, provider: str | None, cwd: str, color: bool
+    console: Console,
+    *,
+    version: str,
+    provider: str | None,
+    cwd: str,
+    color: bool,
+    badges: list | None = None,
+    width: int | None = None,
 ) -> None:
-    banner = render_banner(version=version, provider=provider, cwd=cwd, color=color)
+    banner = render_banner(
+        version=version, provider=provider, cwd=cwd, color=color, badges=badges, width=width
+    )
     console.print(Text.from_ansi(banner), end="")
     for line in WELCOME_LINES:
         console.print(Text(line, style=DIM))

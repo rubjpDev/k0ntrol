@@ -18,6 +18,8 @@ from rich.text import Text
 from k0ntrol.frontends.prompt import Prompt, render_welcome, terminal_key_reader
 from k0ntrol.credentials import load_credentials
 from k0ntrol.frontends.editor import LineEditor, raw_key_reader
+from k0ntrol.frontends.badges import service_badges
+from k0ntrol.frontends.banner import banner_layout
 from k0ntrol.frontends.render import LiveRenderer, format_elapsed, format_tokens, render_gate
 from k0ntrol.frontends.setup import run_project_setup, run_provider_setup
 from k0ntrol.pricing import estimate_cost
@@ -139,16 +141,28 @@ class Terminal:
         terminal = cls(console, prompt, LiveRenderer(console), stats, _editor(console, history))
         return terminal
 
-    def welcome(self, *, version: str, provider: str | None, cwd: str) -> None:
-        """The welcome screen, once per session (first-run setup shows it early)."""
+    def welcome(
+        self,
+        *,
+        version: str,
+        provider: str | None,
+        cwd: str,
+        vcs: str | None = None,
+        tracker: str | None = None,
+    ) -> None:
+        """The welcome screen, once per session (first-run setup shows it early),
+        with 8-bit badges for the tracker, code host and model provider."""
         if self._welcomed:
             return
         self._welcomed = True
         self._provider = provider
         self._console.clear()  # k0 starts on a clean screen (no-op off a terminal)
         color = self._console.color_system is not None
-        short = short_path(cwd, self._console.width - 40)
-        render_welcome(self._console, version=version, provider=provider, cwd=short, color=color)
+        width = self._console.width
+        wanted = service_badges(tracker=tracker, vcs=vcs, provider=provider) if color else []
+        badges, room = banner_layout(width, wanted)
+        render_welcome(self._console, version=version, provider=provider, cwd=short_path(cwd, room),
+                       color=color, badges=badges, width=width if badges else None)
 
     def read(self) -> str:
         self._settle()

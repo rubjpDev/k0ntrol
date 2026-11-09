@@ -161,7 +161,8 @@ def _reflect_writer(ui, show: Callable[[str], None], transcript: Path) -> Callab
 def _welcome(ui, show: Callable[[str], None], *, config: dict, root: Path, color: bool) -> None:
     provider = _chatty_provider(config)
     if ui is not None:
-        ui.welcome(version=__version__, provider=provider, cwd=str(root))
+        ui.welcome(version=__version__, provider=provider, cwd=str(root),
+                   vcs=config.get("vcs"), tracker=config.get("tracker"))
         return
     show(render_banner(version=__version__, provider=provider, cwd=str(root), color=color))
 

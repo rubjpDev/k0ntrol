@@ -253,3 +253,33 @@ def test_status_rows_show_the_effort_of_each_model():
                                          "chatty": {"provider": "anthropic", "model": "h"}}}, Path("/r")))
     assert rows["spec"] == "anthropic/m · high"
     assert rows["chatty"] == "anthropic/h"
+
+
+def test_welcome_draws_the_project_service_badges_at_the_terminal_width():
+    console = Console(file=io.StringIO(), record=True, width=120, color_system="truecolor", force_terminal=True)
+    prompt = Prompt(console, commands=COMMANDS, tty=False, read_input=lambda _: "")
+    ui = Terminal(console, prompt, LiveRenderer(console, spinner=False))
+
+    ui.welcome(version="0.1.0", provider="anthropic", cwd="/w", vcs="github", tracker="linear")
+
+    text = console.export_text()
+    assert "Linear" in text and "GitHub" in text and "Anthropic" in text
+    assert "issues" in text and "code" in text and "models" in text
+
+
+def test_the_session_hands_the_project_services_to_the_welcome(tmp_path):
+    seen = {}
+
+    class UI:
+        def __getattr__(self, name):
+            return lambda *a, **k: None
+
+        def welcome(self, **kwargs):
+            seen.update(kwargs)
+
+        def read(self):
+            return "/quit"
+
+    run_session(lambda: "/quit", lambda line: None, root=tmp_path, ui=UI(),
+                config={"vcs": "github", "tracker": "github", "agents": {}})
+    assert seen["vcs"] == "github" and seen["tracker"] == "github"
