@@ -69,6 +69,15 @@ def test_run_start_line_carries_required_fields(tmp_path):
     assert "." in event["ts"]  # millisecond precision
 
 
+def test_run_start_carries_the_sitting_id_only_when_known(tmp_path):
+    writer = make_writer(tmp_path)
+    writer.run_start("fast", session="sitting-1")
+    writer.run_start("fast")
+    first, second = read_events(tmp_path / ".k0-mem" / "events.jsonl")
+    assert first["session"] == "sitting-1"
+    assert "session" not in second
+
+
 def test_absent_fields_are_omitted_never_null(tmp_path):
     writer = make_writer(tmp_path)
     writer.run_start("fast", branch="main", version="0.1.0.dev0")

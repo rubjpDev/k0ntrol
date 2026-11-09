@@ -36,6 +36,7 @@ class RunContext:
     writer: EventWriter | None = None
     handler: K0EventHandler | None = None
     trace: RunTrace | None = None
+    session: str | None = None  # the REPL sitting's id, when there is one
     _agents: dict[str, K0Agent] = field(default_factory=dict)
 
     def bind(self, writer: EventWriter) -> None:

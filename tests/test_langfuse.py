@@ -475,6 +475,136 @@ def test_ask_is_its_own_trace(tmp_path):
     assert trace.flushes >= 1 or finish  # finish already flushes
 
 
+def test_ask_session_is_the_sitting(tmp_path):
+    (tmp_path / ".k0-mem").mkdir(exist_ok=True)
+    subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True)
+    handler = _RecordingHandler()
+    made = []
+    cfg = cfg_with(
+        {"chatty": {"provider": "anthropic", "model": "m", "model_calls": 15}},
+        helpers={"bulk_read": {"provider": "anthropic", "model": "m"}},
+    )
+    model = FakeChatModel(messages=[AIMessage(content="the answer")])
+
+    answer_ask(
+        "what is x?",
+        root=tmp_path,
+        config=cfg,
+        write=lambda line: None,
+        on_text=lambda delta: None,
+        init=lambda *a, **k: model,
+        check=lambda *a, **k: [Check("config", "ok", "valid")],
+        refresh=lambda *a, **k: "scanned",
+        tracing=_tracing(made, handler),
+        session="sitting-1",
+    )
+
+    assert made[0].finished[0]["session_id"] == "sitting-1"
+    assert handler.root_metadata[0]["langfuse_session_id"] == "sitting-1"
+
+
+def _start_fast(tmp_path, made, handler, **extra):
+    tester = FakeChatModel(
+        messages=[_write("tests/test_calc.py", TEST_SRC), AIMessage(content="tests")]
+    )
+    coder = FakeChatModel(
+        messages=[_write("calc.py", CALC_SRC), AIMessage(content="code")]
+    )
+    return start(
+        "fast",
+        "add a calc module that answers 42",
+        root=tmp_path,
+        cfg=_fast_cfg(),
+        init=_models(tester, coder),
+        check=lambda *a, **k: [],
+        scan=lambda r: "scanned",
+        tracing=_tracing(made, handler),
+        **extra,
+    )
+
+
+def test_fast_session_is_the_sitting_across_start_and_resume(tmp_path):
+    _git_repo(tmp_path)
+    handler = _RecordingHandler()
+    made = []
+
+    result = _start_fast(tmp_path, made, handler, session="sitting-1")
+
+    assert handler.root_metadata[0]["langfuse_session_id"] == "sitting-1"
+    resume(
+        result.run,
+        "y",
+        root=tmp_path,
+        cfg=_fast_cfg(),
+        init=_models(),
+        tracing=_tracing(made, handler),
+        session="sitting-2",
+    )
+    assert made[1].finished[0]["session_id"] == "sitting-2"
+
+
+def test_run_start_events_carry_the_sitting(tmp_path):
+    _git_repo(tmp_path)
+    result = _start_fast(tmp_path, [], None, session="sitting-1")
+    resume(
+        result.run,
+        "y",
+        root=tmp_path,
+        cfg=_fast_cfg(),
+        init=_models(),
+        session="sitting-2",
+    )
+
+    events = [
+        json.loads(line)
+        for line in (tmp_path / ".k0-mem" / "events.jsonl").read_text().splitlines()
+    ]
+    starts = [event for event in events if event["kind"] == "run_start"]
+    assert [event["session"] for event in starts] == ["sitting-1", "sitting-2"]
+
+
+def test_a_run_without_a_sitting_has_no_session_field(tmp_path):
+    _git_repo(tmp_path)
+    _start_fast(tmp_path, [], None)
+
+    lines = (tmp_path / ".k0-mem" / "events.jsonl").read_text().splitlines()
+    start_event = json.loads(lines[0])
+    assert start_event["kind"] == "run_start"
+    assert "session" not in start_event
+
+
+def test_full_keeps_the_work_item_as_its_session(tmp_path):
+    _git_repo(tmp_path)
+    tracker = FakeTracker()
+    item = tracker.create_work_item("Calc answers 42", "add a calc module")
+    handler = _RecordingHandler()
+    spec = FakeChatModel(
+        messages=[
+            AIMessage(
+                content="",
+                tool_calls=[{"name": "AgentBrief", "args": dict(BRIEF), "id": "b1"}],
+            )
+        ]
+    )
+
+    start(
+        "full",
+        f"#{item.ref}",
+        root=tmp_path,
+        cfg=_full_cfg(),
+        init=_models(spec),
+        tracker=tracker,
+        check=lambda *a, **k: [],
+        scan=lambda r: "scanned",
+        tracing=_tracing([], handler),
+        session="sitting-1",
+    )
+
+    assert handler.root_metadata[0]["langfuse_session_id"] == f"acme/widgets#{item.ref}"
+    events = (tmp_path / ".k0-mem" / "events.jsonl").read_text()
+    assert json.loads(events.splitlines()[0])["session"] == "sitting-1"
+
+
 def test_runs_without_the_extra_behave_normally(tmp_path):
     """No ``tracing`` seam: the default factory finds no langfuse and the
     run is unchanged (the suite itself runs without the extra)."""

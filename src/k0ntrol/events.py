@@ -16,6 +16,11 @@ the writer then keeps appending to the existing file. The first rotation in
 a repo also adds `events*.jsonl` to `.k0-mem/.gitignore` when that file
 exists and does not already cover it.
 
+`run_start` may also carry `session`: the id of the REPL sitting that started
+or resumed the run (the stem of its `.k0-mem/sessions/<id>.txt` file, also the
+Langfuse session of `/fast` runs and `/ask` chats), so the log can group runs
+by sitting. Omitted when no sitting is known.
+
 `EventWriter` appends lines for harness events (`run_start`, `gate`,
 `run_end`). `K0EventHandler` — the one callback attached to every graph and
 helper model call — emits the `model` and `tool` events through the same
@@ -232,8 +237,10 @@ class EventWriter:
         branch: str | None = None,
         version: str | None = None,
         resumed: bool | None = None,
+        session: str | None = None,
     ) -> dict:
-        """Emit `run_start`. `work_item` and `resumed` only when they apply."""
+        """Emit `run_start`. `work_item`, `resumed` and `session` (the REPL
+        sitting's id) only when they apply."""
         return self.emit(
             "run_start",
             run_kind=run_kind,
@@ -241,6 +248,7 @@ class EventWriter:
             branch=branch,
             version=version,
             resumed=resumed,
+            session=session,
         )
 
     def gate(

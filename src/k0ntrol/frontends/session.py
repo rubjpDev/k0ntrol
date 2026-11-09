@@ -54,6 +54,7 @@ def run_session(
     else:
         write, stream = _terminal(write, stream)
     transcript = _new_transcript(root)
+    sitting = transcript.stem  # one id per sitting: Langfuse session, run_start
     chat: list[tuple[str, str]] = []  # this session's questions and answers
     show = _transcript_writer(write, transcript, events=getattr(ui, "event", None))
     front = _ui_front(ui, show, transcript) if ui else _plain_front(read_line, show)
@@ -82,6 +83,7 @@ def run_session(
                 show=show,
                 transcript=transcript,
                 reflector=reflector,
+                session=sitting,
             ),
             work=lambda kind, task: _run_work(
                 kind,
@@ -94,6 +96,7 @@ def run_session(
                 resume=resume,
                 abandon=abandon,
                 reflector=reflector,
+                session=sitting,
             ),
         )
     finally:
@@ -313,6 +316,7 @@ def _run_ask(
     show: Callable[[str], None],
     transcript: Path,
     reflector,
+    session: str | None = None,
 ) -> None:
     """Stream CHATTY's answer live; the transcript keeps one entry."""
     deltas: list[str] = []
@@ -324,6 +328,7 @@ def _run_ask(
             write=show,
             on_text=lambda delta: (stream(delta), deltas.append(delta)),
             history=_chat_history(chat),
+            session=session,
         )
     except KeyboardInterrupt:
         show("answer interrupted")
@@ -347,11 +352,12 @@ def _run_work(
     resume: Callable,
     abandon: Callable,
     reflector,
+    session: str | None = None,
 ) -> None:
     """Drive one run: start, then Pending → answer → resume until it ends."""
     result = _start_or_resume(
         kind, task, front=front, show=show, root=root, config=config,
-        start=start, resume=resume, abandon=abandon,
+        start=start, resume=resume, abandon=abandon, session=session,
     )
     if result is None:
         return
@@ -360,7 +366,8 @@ def _run_work(
         if answer is None:
             return
         result = _try_resume(
-            result, answer, show=show, root=root, config=config, resume=resume
+            result, answer, show=show, root=root, config=config, resume=resume,
+            session=session,
         )
         if result is None:
             return
@@ -379,22 +386,28 @@ def _start_or_resume(
     start: Callable,
     resume: Callable,
     abandon: Callable,
+    session: str | None = None,
 ):
     """Start the run; an unfinished one is resumed or abandoned first."""
-    result = _try_start(kind, task, show=show, root=root, config=config, start=start)
+    result = _try_start(
+        kind, task, show=show, root=root, config=config, start=start, session=session
+    )
     if not isinstance(result, Unfinished):
         return result
     answer = front.confirm_resume(result)
     if answer == "y":
         resumed = _try_resume(
-            result, None, show=show, root=root, config=config, resume=resume
+            result, None, show=show, root=root, config=config, resume=resume,
+            session=session,
         )
         return None if resumed is result else resumed
     if answer != "n":
         return None
     if not _try_abandon(result, kind, task, show=show, root=root, abandon=abandon):
         return None
-    return _try_start(kind, task, show=show, root=root, config=config, start=start)
+    return _try_start(
+        kind, task, show=show, root=root, config=config, start=start, session=session
+    )
 
 
 def _try_abandon(
@@ -435,9 +448,11 @@ def _ask_resume(
 _PAUSED = "run paused · run the same command again to resume it"
 
 
-def _try_start(kind, task, *, show, root, config, start):
+def _try_start(kind, task, *, show, root, config, start, session=None):
     try:
-        return start(kind, task, root=root, cfg=config, write=show)
+        return start(
+            kind, task, root=root, cfg=config, write=show, session=session
+        )
     except RunRefused as error:
         _show_refusal(error, show)
         return None
@@ -459,9 +474,12 @@ def _try_resume(
     root,
     config,
     resume,
+    session=None,
 ):
     try:
-        return resume(result.run, answer, root=root, cfg=config, write=show)
+        return resume(
+            result.run, answer, root=root, cfg=config, write=show, session=session
+        )
     except RunRefused as error:
         _show_refusal(error, show)
         return result  # bad answer: re-ask the same gate

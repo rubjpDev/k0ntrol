@@ -137,6 +137,7 @@ def start(
     scan: Callable = refresh_memory,
     tracker=None,
     tracing: Callable = build_trace,
+    session: str | None = None,
 ) -> Result:
     """Start a run of ``kind`` for ``input``.
 
@@ -153,7 +154,8 @@ def start(
     conn, saver = _open_checkpoints(root)
     try:
         ctx = RunContext(
-            root=root, cfg=cfg, kind=kind, init=init, tracker=tracker, scan=scan
+            root=root, cfg=cfg, kind=kind, init=init, tracker=tracker, scan=scan,
+            session=session,
         )
         busy = _busy_run(saver, ctx, input_text, tracker, root)
         if busy is not None:
@@ -165,7 +167,7 @@ def start(
         run_id = new_run_id()
         _bind_events(ctx, root, run_id, write)
         ctx.trace = tracing(run_id)
-        session_id = item.qualified_ref if item else None
+        session_id = item.qualified_ref if item else _sitting_session(ctx)
         config = _runnable(run_id, ctx, session_id)
         try:
             ctx.writer.run_start(
@@ -173,6 +175,7 @@ def start(
                 work_item=item.qualified_ref if item else None,
                 branch=current_branch(root),
                 version=__version__,
+                session=session,
             )
             graph.invoke(
                 _initial_state(kind, input_text, cfg, item),
@@ -197,6 +200,7 @@ def resume(
     scan: Callable = refresh_memory,
     tracker=None,
     tracing: Callable = build_trace,
+    session: str | None = None,
 ) -> Result:
     """Continue run ``run_id`` with the human's ``decision``.
 
@@ -214,7 +218,8 @@ def resume(
             raise RunRefused(f"no run {run_id} in this checkout")
         tracker = _tracker_for(kind, cfg, root, tracker)
         ctx = RunContext(
-            root=root, cfg=cfg, kind=kind, init=init, tracker=tracker, scan=scan
+            root=root, cfg=cfg, kind=kind, init=init, tracker=tracker, scan=scan,
+            session=session,
         )
         graph = _BUILDERS[kind](ctx, saver)
         state = graph.get_state(_thread(run_id))
@@ -225,7 +230,11 @@ def resume(
         config = _runnable(run_id, ctx, session_id)
         try:
             ctx.writer.run_start(
-                kind, resumed=True, branch=current_branch(root), version=__version__
+                kind,
+                resumed=True,
+                branch=current_branch(root),
+                version=__version__,
+                session=session,
             )
             _advance(ctx, graph, state, decision, config)
             return _finish(ctx, graph, run_id, config)
@@ -539,14 +548,21 @@ def _langfuse_metadata(kind: str, session_id) -> dict:
 
 
 def _session_id(ctx: RunContext, values: dict) -> str | None:
-    """The run's work item as a session id, resolved through the tracker."""
+    """The run's Langfuse session: its work item, resolved through the
+    tracker, else (``/fast`` only) the REPL sitting."""
     ref = values.get("item_ref")
     if not ref or ctx.tracker is None:
-        return None
+        return _sitting_session(ctx)
     try:
         return ctx.tracker.read_work_item(ref).qualified_ref
     except TrackerError:
-        return None
+        return _sitting_session(ctx)
+
+
+def _sitting_session(ctx: RunContext) -> str | None:
+    """``/fast`` has no work item: its session is the sitting. ``/full``'s
+    is always the work item, which outlives any one sitting."""
+    return ctx.session if ctx.kind == "fast" else None
 
 
 def _trace_metadata(ctx: RunContext, values: dict) -> dict:

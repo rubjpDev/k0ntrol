@@ -192,6 +192,43 @@ def test_ask_runs_the_ask_path(tmp_path):
     assert "an answer" in "\n".join(shown)
 
 
+def test_one_sitting_id_reaches_ask_start_and_resume(tmp_path):
+    """The session memory file's stem is the sitting id every call carries."""
+    from k0ntrol.workflow import Outcome, Pending
+
+    seen = []
+
+    def fake_ask(question, **kwargs):
+        seen.append(("ask", kwargs.get("session")))
+
+    def fake_start(kind, task, **kwargs):
+        seen.append(("start", kwargs.get("session")))
+        return Pending(run="r1", gate="diff", question="keep?", answers=("y", "n"))
+
+    def fake_resume(run_id, decision, **kwargs):
+        seen.append(("resume", kwargs.get("session")))
+        return Outcome(run=run_id, outcome="done")
+
+    lines = iter(["/ask what is x?", "plain chat", "/fast fix it", "y", "/quit"])
+    run_session(
+        lambda: next(lines),
+        lambda text: None,
+        root=tmp_path,
+        config=config(),
+        ask=fake_ask,
+        start=fake_start,
+        resume=fake_resume,
+    )
+
+    (transcript,) = (tmp_path / ".k0-mem" / "sessions").glob("*.txt")
+    assert seen == [
+        ("ask", transcript.stem),
+        ("ask", transcript.stem),
+        ("start", transcript.stem),
+        ("resume", transcript.stem),
+    ]
+
+
 def test_work_commands_do_not_touch_the_disk_beyond_the_transcript(tmp_path):
     from k0ntrol.workflow import Outcome
 
