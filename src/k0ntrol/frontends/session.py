@@ -11,6 +11,7 @@ from k0ntrol.frontends.ask import answer_ask
 from k0ntrol.config import ConfigError, load_config
 from k0ntrol.events import render_event
 from k0ntrol.frontends.banner import render_banner
+from k0ntrol.frontends.klog import Klog
 from k0ntrol.memory.reflect import (
     Reflector,
     apply_mem_decision,
@@ -39,6 +40,7 @@ def run_session(
     reflector=None,
     stream: Callable[[str], None] | None = None,
     ui=None,
+    klog: Callable[[Path], str] | None = None,
 ) -> int:
     """The REPL. ``write`` prints whole lines; ``stream``, when given,
     prints ``/ask`` answer deltas without line breaks.
@@ -72,7 +74,7 @@ def run_session(
             echo_input=echo_input,
             root=root,
             front=front,
-            commands=_commands(ui, show, config, root),
+            commands=_commands(ui, show, config, root, klog or Klog().open),
             ask=lambda question: _run_ask(
                 question,
                 chat=chat,
@@ -169,15 +171,25 @@ def _closing(ui) -> None:
         ui.line("saving session memory…")
 
 
-def _commands(ui, show: Callable[[str], None], config: dict, root: Path) -> dict:
+def _commands(
+    ui, show: Callable[[str], None], config: dict, root: Path, klog: Callable[[Path], str]
+) -> dict:
     """The slash commands besides /ask, /fast, /full and /quit."""
     help_ = ui.help if ui is not None else lambda: show(_HELP)
     rows = lambda: _status_rows(config, root)  # noqa: E731
     status = (lambda: ui.status(rows())) if ui is not None else (lambda: _show_rows(show, rows()))
     commands = {"/help": help_, "?": help_, "/status": status}
+    commands["/klog"] = lambda: _show_klog(show, klog, root)
     if ui is not None:
         commands["/config"] = lambda: _reconfigure(ui, show, config, root)
     return commands
+
+
+def _show_klog(show: Callable[[str], None], klog: Callable[[Path], str], root: Path) -> None:
+    try:
+        show(f"event log: {klog(root)}")
+    except OSError as error:
+        show(f"klog failed: {error}")
 
 
 def _reconfigure(ui, show: Callable[[str], None], config: dict, root: Path) -> None:
@@ -196,7 +208,7 @@ def _reconfigure(ui, show: Callable[[str], None], config: dict, root: Path) -> N
     config.update(fresh)
 
 
-_HELP = "commands: /ask, /fast, /full, /status, /quit"
+_HELP = "commands: /ask, /fast, /full, /status, /klog, /quit"
 
 
 def _status_rows(config: dict, root: Path) -> list[tuple[str, str]]:

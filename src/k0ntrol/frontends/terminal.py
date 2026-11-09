@@ -28,6 +28,7 @@ COMMANDS = {
     "/full": "take #<issue> or a task to a ready pull request",
     "/fast": "a quick test-first change in the working tree",
     "/status": "provider, models and project settings",
+    "/klog": "open the event log in your browser",
     "/config": "change the models or this project's setup",
     "/help": "commands and shortcuts",
     "/quit": "leave k0",

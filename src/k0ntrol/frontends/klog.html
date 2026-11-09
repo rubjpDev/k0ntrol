@@ -1,0 +1,419 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>k0 klog</title>
+<style>
+/* Palette: the terminal theme (frontends/theme.py). Light mode uses darker
+   shades of the same hues so text keeps its contrast on white. */
+:root {
+  --bg: #ffffff; --panel: #f5f6f8; --text: #111827; --dim: #6b7280; --border: #d1d5db;
+  --accent: #6d28d9; --brand: #0f766e; --ok: #15803d; --error: #b91c1c; --warn: #b45309;
+  --font: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0f1117; --panel: #171a22; --text: #e5e7eb; --dim: #9ca3af; --border: #374151;
+    --accent: #a78bfa; --brand: #5eead4; --ok: #4ade80; --error: #f87171; --warn: #fbbf24;
+  }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.45 var(--font); }
+main { max-width: 1200px; margin: 0 auto; padding: 16px; }
+header { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 16px; }
+h1 { margin: 0; font-size: 20px; color: var(--brand); font-family: var(--mono); }
+.dim { color: var(--dim); }
+.stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 8px; margin: 16px 0; }
+.stat { background: var(--panel); border: 1px solid var(--border); border-radius: 6px; padding: 8px 12px; }
+.stat b { display: block; font-size: 20px; font-variant-numeric: tabular-nums; }
+.stat span { color: var(--dim); font-size: 12px; }
+nav { display: flex; gap: 4px; border-bottom: 1px solid var(--border); margin-bottom: 12px; }
+nav button { background: none; border: 0; border-bottom: 2px solid transparent; color: var(--dim);
+  font: inherit; padding: 8px 14px; cursor: pointer; }
+nav button[aria-selected="true"] { color: var(--accent); border-bottom-color: var(--accent); }
+button:focus-visible, tr:focus-visible, input:focus-visible, select:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.scroll { overflow-x: auto; }
+table { border-collapse: collapse; width: 100%; font-variant-numeric: tabular-nums; }
+th, td { text-align: left; padding: 5px 10px; border-bottom: 1px solid var(--border); white-space: nowrap; }
+th { color: var(--dim); font-weight: 500; font-size: 12px; }
+td.num, th.num { text-align: right; }
+tr.row { cursor: pointer; }
+tr.row:hover { background: var(--panel); }
+td.wrap { white-space: normal; word-break: break-word; min-width: 240px; }
+.mono { font-family: var(--mono); font-size: 12px; }
+.fail { color: var(--error); }
+.denied { color: var(--warn); }
+.good { color: var(--ok); }
+tr.fail td:first-child { box-shadow: inset 3px 0 var(--error); }
+tr.denied td:first-child { box-shadow: inset 3px 0 var(--warn); }
+.badge { font-family: var(--mono); font-size: 11px; padding: 1px 6px; border: 1px solid var(--border); border-radius: 4px; }
+.timeline { background: var(--panel); }
+.timeline table { margin: 0; }
+.timeline td { border-bottom-color: transparent; padding: 2px 10px; }
+pre { margin: 0; white-space: pre-wrap; word-break: break-all; font: 12px/1.4 var(--mono); }
+.filters { display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: center; margin-bottom: 12px; }
+.filters label { display: flex; gap: 6px; align-items: center; color: var(--dim); }
+select, input[type="search"] { background: var(--panel); color: var(--text); border: 1px solid var(--border);
+  border-radius: 4px; padding: 4px 6px; font: inherit; }
+.more { margin: 12px 0; background: var(--panel); color: var(--text); border: 1px solid var(--border);
+  border-radius: 4px; padding: 6px 12px; font: inherit; cursor: pointer; }
+.empty { color: var(--dim); padding: 24px 0; }
+.grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 460px), 1fr)); gap: 12px; }
+.card { background: var(--panel); border: 1px solid var(--border); border-radius: 6px; padding: 12px; min-width: 0; }
+.card h2 { margin: 0 0 4px; font-size: 14px; }
+.legend { display: flex; flex-wrap: wrap; gap: 4px 12px; color: var(--dim); font-size: 12px; margin-bottom: 6px; }
+.sw { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 4px; }
+.note { color: var(--dim); font-size: 12px; margin: 6px 0 0; }
+svg { width: 100%; height: auto; display: block; }
+svg text { fill: var(--text); font: 11px var(--font); }
+svg .lbl, svg .tick { fill: var(--dim); }
+svg .val { font-family: var(--mono); }
+.c-accent { fill: var(--accent); background: var(--accent); }
+.c-brand { fill: var(--brand); background: var(--brand); }
+.c-ok { fill: var(--ok); background: var(--ok); }
+.c-error { fill: var(--error); background: var(--error); }
+.c-warn { fill: var(--warn); background: var(--warn); }
+.c-dim { fill: var(--dim); background: var(--dim); }
+.c-faint { fill: var(--border); background: var(--border); }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>k0 klog</h1>
+    <span class="dim" id="generated"></span>
+  </header>
+  <section class="stats" id="stats" aria-label="Totals"></section>
+  <nav role="tablist" aria-label="Views">
+    <button role="tab" data-tab="runs">Runs</button>
+    <button role="tab" data-tab="log">Log</button>
+    <button role="tab" data-tab="analytics">Analytics</button>
+  </nav>
+  <section id="runs" role="tabpanel"></section>
+  <section id="log" role="tabpanel" hidden>
+    <div class="filters">
+      <label>Kind <select id="f-kind"></select></label>
+      <label>Agent / helper <select id="f-who"></select></label>
+      <label>Run <input type="search" id="f-run" placeholder="run or chat id" size="22"></label>
+      <label><input type="checkbox" id="f-fail"> Failures only</label>
+      <span class="dim" id="f-count"></span>
+    </div>
+    <div class="scroll" id="log-table"></div>
+  </section>
+  <section id="analytics" role="tabpanel" hidden></section>
+</main>
+<script type="application/json" id="k0-data">__K0_DATA__</script>
+<script>
+"use strict";
+const DATA = JSON.parse(document.getElementById("k0-data").textContent);
+const TOTALS = DATA.analytics.totals;
+const PAGE = { runs: 100, log: 500 };
+const limits = { runs: PAGE.runs, log: PAGE.log };
+const open = new Set();
+
+const $ = (selector) => document.querySelector(selector);
+const esc = (value) => String(value ?? "").replace(/[&<>"']/g,
+  (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
+const clip = (text, max) => (String(text).length > max ? String(text).slice(0, max - 1) + "…" : String(text));
+
+function fmtCost(value, estimated) {
+  if (value == null) return "–";
+  const text = value < 0.01 && value > 0 ? value.toFixed(4) : value.toFixed(2);
+  return (estimated ? "~" : "") + "$" + text;
+}
+function fmtCount(value) {
+  if (value >= 1e6) return (value / 1e6).toFixed(1) + "M";
+  if (value >= 1e4) return Math.round(value / 1e3) + "k";
+  if (value >= 1e3) return (value / 1e3).toFixed(1) + "k";
+  return String(value);
+}
+function fmtMs(ms) {
+  if (ms == null) return "–";
+  if (ms < 1000) return Math.round(ms) + "ms";
+  if (ms < 60000) return (ms / 1000).toFixed(1) + "s";
+  return Math.floor(ms / 60000) + "m " + String(Math.round((ms % 60000) / 1000)).padStart(2, "0") + "s";
+}
+function fmtTime(ts, withMs) {
+  const date = new Date(ts);
+  if (!ts || isNaN(date)) return ts || "–";
+  const day = date.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+  const time = date.toLocaleTimeString([], { hour12: false });
+  return day + " " + time + (withMs ? "." + String(date.getMilliseconds()).padStart(3, "0") : "");
+}
+
+// -- totals ------------------------------------------------------------------
+
+function renderTotals() {
+  const t = TOTALS;
+  const cost = fmtCost(t.cost, t.cost_estimated);
+  const costNote = [t.cost_estimated ? "estimated from list prices" : "", t.unpriced_calls ? t.unpriced_calls + " calls unpriced" : ""]
+    .filter(Boolean).join(" · ") || "logged by the provider";
+  const stats = [
+    [t.runs, "runs" + (t.chats ? " · " + t.chats + " chats" : "")],
+    [t.model_calls, "model calls"],
+    [fmtCount(t.tokens_in) + " / " + fmtCount(t.tokens_out), "tokens in / out"],
+    [cost, "cost · " + costNote],
+    [t.failures, "failures and denials"],
+  ];
+  $("#stats").innerHTML = stats.map(([value, label]) => `<div class="stat"><b>${esc(value)}</b><span>${esc(label)}</span></div>`).join("");
+  $("#generated").textContent = "updated " + fmtTime(DATA.generated) + " · run /klog again to refresh";
+}
+
+// -- one event, in words -----------------------------------------------------
+
+function who(e) { return e.agent || e.helper || ""; }
+
+function detail(e) {
+  const parts = [];
+  if (e.kind === "model") {
+    parts.push(who(e) + (e.helper && !e.agent ? " (helper)" : ""), e.model || "");
+    if (e.attempt > 1) parts.push("attempt " + e.attempt);
+    if (e.tokens_in != null || e.tokens_out != null) parts.push((e.tokens_in ?? 0) + " → " + (e.tokens_out ?? 0) + " tok");
+    if (e.cost != null) parts.push(fmtCost(e.cost, e.estimated));
+  } else if (e.kind === "tool") {
+    parts.push(e.tool || "", e.path || "");
+    if (e.denied) parts.push("denied: " + e.denied);
+  } else if (e.kind === "gate") {
+    parts.push(e.gate + " → " + e.result);
+    if (e.redo && e.redo.length) parts.push("redo " + e.redo.join(", "));
+  } else if (e.kind === "run_start") {
+    parts.push(e.run_kind || "", e.work_item || "", e.branch || "");
+    if (e.resumed) parts.push("resumed");
+    if (e.session) parts.push("session " + e.session);
+  } else if (e.kind === "run_end") {
+    parts.push(e.outcome || "");
+    if (e.reason) parts.push(e.reason);
+    if (e.node) parts.push("at " + e.node);
+  } else {
+    parts.push(JSON.stringify(e));
+  }
+  if (e.err) parts.push(e.err);
+  return parts.filter(Boolean).join(" · ");
+}
+
+const flagClass = (e) => e.flag || "";
+const eventsById = (() => {
+  const map = new Map();
+  for (const e of DATA.events) {
+    const id = e.run || e.chat;
+    if (id) (map.get(id) || map.set(id, []).get(id)).push(e);
+  }
+  return map;
+})();
+
+// -- Runs ----------------------------------------------------------------------
+
+function timeline(run) {
+  const events = eventsById.get(run.id) || [];
+  const origin = Date.parse(events[0] && events[0].ts);
+  const rows = events.map((e) => {
+    const offset = Date.parse(e.ts) - origin;
+    return `<tr class="${flagClass(e)}"><td class="mono dim">${isNaN(offset) ? "" : "+" + fmtMs(offset)}</td>
+      <td><span class="badge">${esc(e.kind)}</span></td>
+      <td class="wrap ${flagClass(e)}">${esc(detail(e))}</td>
+      <td class="num mono dim">${e.ms != null ? fmtMs(e.ms) : ""}</td></tr>`;
+  });
+  return `<tr class="timeline"><td colspan="12"><div class="scroll"><table>${rows.join("")}</table></div></td></tr>`;
+}
+
+function runRow(run, withSession) {
+  const outcome = run.outcome || "–";
+  const outcomeClass = run.outcome === "done" ? "good" : run.outcome && run.outcome !== "running" ? "fail" : "dim";
+  const isOpen = open.has(run.id);
+  const head = `<tr class="row ${run.failures ? "fail" : ""}" tabindex="0" data-run="${esc(run.id)}" aria-expanded="${isOpen}">
+    <td>${esc(fmtTime(run.start))}</td>
+    <td><span class="badge">${esc(run.kind)}</span></td>
+    <td>${esc(run.work_item || "–")}</td>
+    <td class="mono">${esc(run.branch || "–")}</td>
+    ${withSession ? `<td class="mono">${esc(run.session || "–")}</td>` : ""}
+    <td class="num">${fmtMs(run.duration_ms)}</td>
+    <td class="${outcomeClass}">${esc(outcome)}</td>
+    <td class="num">${run.model_calls}</td>
+    <td class="num">${fmtCount(run.tokens_in)} / ${fmtCount(run.tokens_out)}</td>
+    <td class="num">${fmtCost(run.cost, run.cost_estimated)}</td>
+    <td class="num ${run.failures ? "fail" : "dim"}">${run.failures}</td></tr>`;
+  return head + (isOpen ? timeline(run) : "");
+}
+
+function renderRuns() {
+  const runs = DATA.runs;
+  if (!runs.length) { $("#runs").innerHTML = '<p class="empty">No runs or chats in the log yet.</p>'; return; }
+  const withSession = runs.some((r) => r.session);
+  const shown = runs.slice(0, limits.runs);
+  const headers = ["Started", "Kind", "Work item", "Branch", withSession ? "Session" : null, "Duration", "Outcome", "Calls", "Tokens in / out", "Cost", "Failures"];
+  const numeric = new Set(["Duration", "Calls", "Tokens in / out", "Cost", "Failures"]);
+  const head = headers.filter(Boolean).map((h) => `<th class="${numeric.has(h) ? "num" : ""}">${h}</th>`).join("");
+  const more = runs.length > shown.length ? `<button class="more" data-more="runs">Show ${Math.min(PAGE.runs, runs.length - shown.length)} more of ${runs.length - shown.length}</button>` : "";
+  $("#runs").innerHTML = `<div class="scroll"><table><thead><tr>${head}</tr></thead><tbody>${shown.map((r) => runRow(r, withSession)).join("")}</tbody></table></div>${more}`;
+}
+
+function toggleRun(id) {
+  if (open.has(id)) open.delete(id); else open.add(id);
+  renderRuns();
+  const row = document.querySelector(`tr.row[data-run="${CSS.escape(id)}"]`);
+  if (row) row.focus();
+}
+
+// -- Log -------------------------------------------------------------------------
+
+function fillSelect(select, label, values) {
+  select.innerHTML = `<option value="">${label}</option>` + values.map((v) => `<option>${esc(v)}</option>`).join("");
+}
+
+function initFilters() {
+  const unique = (list) => [...new Set(list.filter(Boolean))].sort();
+  fillSelect($("#f-kind"), "all", unique(DATA.events.map((e) => e.kind)));
+  fillSelect($("#f-who"), "all", unique(DATA.events.map(who)));
+  for (const id of ["#f-kind", "#f-who", "#f-run", "#f-fail"]) {
+    $(id).addEventListener("input", () => { limits.log = PAGE.log; renderLog(); });
+  }
+}
+
+function filteredEvents() {
+  const kind = $("#f-kind").value, name = $("#f-who").value;
+  const run = $("#f-run").value.trim().toLowerCase(), failing = $("#f-fail").checked;
+  return DATA.events.filter((e) =>
+    (!kind || e.kind === kind) && (!name || who(e) === name) && (!failing || e.flag) &&
+    (!run || String(e.run || e.chat || "").toLowerCase().includes(run)));
+}
+
+function logRow(e, index) {
+  const id = e.run || e.chat || "";
+  return `<tr class="row ${flagClass(e)}" tabindex="0" data-raw="${index}">
+    <td class="mono">${esc(fmtTime(e.ts, true))}</td>
+    <td><span class="badge">${esc(e.kind)}</span></td>
+    <td class="mono dim" title="${esc(id)}">${esc(id.slice(0, 8))}</td>
+    <td>${esc(who(e))}</td>
+    <td class="wrap ${flagClass(e)}">${esc(detail(e))}</td>
+    <td class="num mono dim">${e.ms != null ? fmtMs(e.ms) : ""}</td></tr>`;
+}
+
+const rawOpen = new Set();
+const eventIndex = new Map(DATA.events.map((e, i) => [e, i]));
+
+function renderLog() {
+  const matches = filteredEvents().reverse();
+  $("#f-count").textContent = matches.length + " of " + DATA.events.length + " events, newest first";
+  if (!matches.length) { $("#log-table").innerHTML = '<p class="empty">No events match.</p>'; return; }
+  const shown = matches.slice(0, limits.log);
+  const rows = shown.map((e) => logRow(e, eventIndex.get(e)) +
+    (rawOpen.has(eventIndex.get(e)) ? `<tr class="timeline"><td colspan="6"><pre>${esc(JSON.stringify(e, null, 2))}</pre></td></tr>` : ""));
+  const more = matches.length > shown.length ? `<button class="more" data-more="log">Show ${Math.min(PAGE.log, matches.length - shown.length)} more of ${matches.length - shown.length}</button>` : "";
+  $("#log-table").innerHTML = `<table><thead><tr><th>Time</th><th>Kind</th><th>Run</th><th>Agent / helper</th><th>Event</th><th class="num">Took</th></tr></thead><tbody>${rows.join("")}</tbody></table>${more}`;
+}
+
+function toggleRaw(index) {
+  if (rawOpen.has(index)) rawOpen.delete(index); else rawOpen.add(index);
+  renderLog();
+}
+
+// -- Analytics: small SVG charts ---------------------------------------------------
+
+const legend = (segments) => `<div class="legend">${segments.map((s) => `<span><i class="sw ${s.cls}"></i>${esc(s.name)}</span>`).join("")}</div>`;
+
+// Horizontal bars. rows: [{label, values: [..one per segment], text}].
+// `overlay` draws each segment from zero (largest first) instead of stacking.
+function barChart(rows, segments, label, overlay, hideLegend) {
+  const W = 520, labelW = 160, rightW = 90, rowH = 20, gap = 6;
+  const plotW = W - labelW - rightW;
+  const total = (r) => (overlay ? Math.max(...r.values) : r.values.reduce((a, b) => a + b, 0));
+  const max = Math.max(...rows.map(total), 1e-12);
+  let body = "";
+  rows.forEach((r, i) => {
+    const y = gap + i * (rowH + gap);
+    let x = labelW;
+    body += `<text class="lbl" x="${labelW - 8}" y="${y + rowH / 2 + 4}" text-anchor="end">${esc(clip(r.label, 26))}<title>${esc(r.label)}</title></text>`;
+    r.values.forEach((v, j) => {
+      const w = (v / max) * plotW;
+      body += `<rect class="${segments[j].cls}" x="${overlay ? labelW : x}" y="${y}" width="${Math.max(w, v > 0 ? 1 : 0)}" height="${rowH}" rx="2"><title>${esc(segments[j].name + ": " + v)}</title></rect>`;
+      if (!overlay) x += w;
+    });
+    const end = overlay ? labelW + (total(r) / max) * plotW : x;
+    body += `<text class="val" x="${end + 6}" y="${y + rowH / 2 + 4}">${esc(r.text)}</text>`;
+  });
+  const height = gap + rows.length * (rowH + gap);
+  return `${hideLegend ? "" : legend(segments)}<svg viewBox="0 0 ${W} ${height}" role="img" aria-label="${esc(label)}">${body}</svg>`;
+}
+
+// Vertical columns. rows: [{label, value, text}].
+function columnChart(rows, label) {
+  const W = 520, H = 170, left = 8, top = 18, bottom = 22;
+  const max = Math.max(...rows.map((r) => r.value), 1e-12);
+  const slot = (W - 2 * left) / rows.length, barW = Math.min(slot * 0.7, 36);
+  const step = Math.ceil(rows.length / 8), showValues = rows.length <= 12;
+  let body = "";
+  rows.forEach((r, i) => {
+    const h = (r.value / max) * (H - top - bottom), x = left + i * slot + (slot - barW) / 2, y = H - bottom - h;
+    body += `<rect class="c-accent" x="${x}" y="${y}" width="${barW}" height="${Math.max(h, r.value > 0 ? 1 : 0)}" rx="2"><title>${esc(r.label + ": " + r.text)}</title></rect>`;
+    if (showValues) body += `<text class="val" x="${x + barW / 2}" y="${y - 4}" text-anchor="middle">${esc(r.text)}</text>`;
+    if (i % step === 0) body += `<text class="tick" x="${x + barW / 2}" y="${H - 6}" text-anchor="middle">${esc(r.label.slice(5))}</text>`;
+  });
+  return `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="${esc(label)}">${body}</svg>`;
+}
+
+const card = (title, content, note) => `<div class="card"><h2>${esc(title)}</h2>${content || '<p class="empty">No data yet.</p>'}${note ? `<p class="note">${esc(note)}</p>` : ""}</div>`;
+
+function analyticsCards() {
+  const a = DATA.analytics;
+  const priceNote = TOTALS.cost_estimated ? "Includes costs estimated from list prices." : "";
+  const dayRows = a.by_day.slice(-30).map((d) => ({ label: d.day, value: d.cost, text: fmtCost(d.cost) }));
+  const outcomes = ["done", "stuck", "rejected", "running"].filter((k) => a.outcomes[k]);
+    return [
+    card("Cost per agent", a.by_agent.length && barChart(a.by_agent.map((r) => ({ label: r.name + (r.helper ? " (helper)" : ""), values: [r.cost], text: fmtCost(r.cost) })), [{ name: "cost", cls: "c-accent" }], "Cost per agent"), priceNote),
+    card("Tokens per agent", a.by_agent.length && barChart(a.by_agent.map((r) => ({ label: r.name + (r.helper ? " (helper)" : ""), values: [r.tokens_in, r.tokens_out], text: fmtCount(r.tokens_in) + " / " + fmtCount(r.tokens_out) })), [{ name: "in", cls: "c-brand" }, { name: "out", cls: "c-accent" }], "Tokens per agent")),
+    card("Cost per day (UTC)", dayRows.length && columnChart(dayRows, "Cost per day"), priceNote),
+    card("Model latency", a.latency.length && barChart(a.latency.map((r) => ({ label: r.model, values: [r.p95, r.p50], text: fmtMs(r.p50) + " / " + fmtMs(r.p95) })), [{ name: "p95", cls: "c-faint" }, { name: "p50", cls: "c-accent" }], "Model latency", true), "p50 / p95 of successful calls."),
+    card("Tool calls", a.tools.length && barChart(a.tools.map((r) => ({ label: r.tool, values: [r.calls - r.failed - r.denied, r.failed, r.denied], text: String(r.calls) })), [{ name: "ok", cls: "c-ok" }, { name: "failed", cls: "c-error" }, { name: "denied", cls: "c-warn" }], "Tool calls")),
+    card("Gate outcomes", a.gates.length && barChart(a.gates.map((r) => ({ label: r.gate, values: [r.approved, r.sent_back], text: r.approved + " / " + r.sent_back })), [{ name: "approved", cls: "c-ok" }, { name: "sent back", cls: "c-error" }], "Gate outcomes"), "Approve or pass vs reject, retry, stop or fail."),
+    card("Run outcomes", outcomes.length && barChart(outcomes.map((k) => ({ label: k, values: [a.outcomes[k]], text: String(a.outcomes[k]) })), [{ name: "runs", cls: "c-accent" }], "Run outcomes", false, true)),
+  ].join("");
+}
+
+let analyticsDrawn = false;
+function renderAnalytics() {
+  if (analyticsDrawn) return;
+  analyticsDrawn = true;
+  $("#analytics").innerHTML = `<div class="grid">${analyticsCards()}</div>`;
+}
+
+// -- tabs and events ---------------------------------------------------------------
+
+const TABS = ["runs", "log", "analytics"];
+function showTab(tab) {
+  if (!TABS.includes(tab)) tab = "runs";
+  for (const name of TABS) {
+    $("#" + name).hidden = name !== tab;
+    document.querySelector(`nav [data-tab="${name}"]`).setAttribute("aria-selected", String(name === tab));
+  }
+  if (tab === "analytics") renderAnalytics();
+  try { history.replaceState(null, "", "#" + tab); } catch (_) { /* file or sandbox */ }
+}
+
+document.addEventListener("click", (event) => {
+  const tab = event.target.closest("[data-tab]");
+  const run = event.target.closest("[data-run]");
+  const raw = event.target.closest("[data-raw]");
+  const more = event.target.closest("[data-more]");
+  if (tab) showTab(tab.dataset.tab);
+  else if (run) toggleRun(run.dataset.run);
+  else if (raw) toggleRaw(Number(raw.dataset.raw));
+  else if (more) { limits[more.dataset.more] += PAGE[more.dataset.more]; (more.dataset.more === "runs" ? renderRuns : renderLog)(); }
+});
+document.addEventListener("keydown", (event) => {
+  if ((event.key === "Enter" || event.key === " ") && event.target.matches("tr.row")) {
+    event.preventDefault();
+    event.target.click();
+  }
+});
+
+renderTotals();
+renderRuns();
+initFilters();
+renderLog();
+showTab(location.hash.slice(1));
+</script>
+</body>
+</html>
