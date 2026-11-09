@@ -434,12 +434,20 @@ def render_event(event: dict) -> str | None:
 
 
 class ProgressRenderer:
-    """Turns each event into at most one progress line via `write`."""
+    """Turns each event into at most one progress line via `write`.
+
+    A `write` with an `event` method is a rich output (the terminal UI):
+    it gets the event itself and renders it its own way.
+    """
 
     def __init__(self, write: Callable[[str], None]) -> None:
         self._write = write
 
     def __call__(self, event: dict) -> None:
+        rich_output = getattr(self._write, "event", None)
+        if rich_output is not None:
+            rich_output(event)
+            return
         line = render_event(event)
         if line is not None:
             self._write(line)

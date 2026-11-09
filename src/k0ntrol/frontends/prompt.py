@@ -78,6 +78,16 @@ def digit_choice(key: str, count: int) -> int | None:
     return None
 
 
+def choice_step(index: int, key: str, count: int) -> tuple[int, bool]:
+    """One key in the picker: the new selection and whether it is final."""
+    picked = digit_choice(key, count)
+    if picked is not None:
+        return picked, True
+    if key == "enter":
+        return index, True
+    return next_index(index, key, count), False
+
+
 def parse_choice(answer: str, options: list[tuple[str, str]]) -> str | None:
     answer = answer.strip().lower()
     lowered = [key.lower() for key, _ in options]
@@ -231,14 +241,10 @@ class Prompt:
         index = 0
         self._draw_options(options, index)
         while True:
-            key = read_key()
-            picked = digit_choice(key, len(options))
-            if picked is not None or key == "enter":
-                index = index if picked is None else picked
-                self._redraw_options(options, index)
-                return options[index][0]
-            index = next_index(index, key, len(options))
+            index, chosen = choice_step(index, read_key(), len(options))
             self._redraw_options(options, index)
+            if chosen:
+                return options[index][0]
 
     def _draw_options(self, options: list[tuple[str, str]], index: int) -> None:
         for position, (_, label) in enumerate(options):

@@ -617,3 +617,23 @@ def test_render_variants(tmp_path):
     assert "failed" in tool_err
     assert "x.py" in gate_redo
     assert "3 in" in usage and "5 out" in usage
+
+
+def test_progress_renderer_hands_structured_events_to_a_rich_output():
+    """An output with an ``event`` method gets the event itself, not a line."""
+
+    class RichOutput:
+        def __init__(self):
+            self.lines, self.events = [], []
+
+        def __call__(self, text):
+            self.lines.append(text)
+
+        def event(self, event):
+            self.events.append(event)
+
+    output = RichOutput()
+    ProgressRenderer(output)({"kind": "tool", "agent": "coder", "tool": "read_file", "ok": True})
+
+    assert output.events == [{"kind": "tool", "agent": "coder", "tool": "read_file", "ok": True}]
+    assert output.lines == []

@@ -15,6 +15,7 @@ from k0ntrol.events import (
 )
 from k0ntrol.frontends.banner import color_enabled
 from k0ntrol.frontends.session import run_session
+from k0ntrol.frontends.terminal import Terminal
 from k0ntrol.helpers import helper_invoker
 from k0ntrol.init_flow import run_init
 from k0ntrol.memory.refresh import refresh_memory
@@ -104,7 +105,15 @@ def _run_session(*, init=init_chat_model) -> int:
         echo_input=False,
         init=init,
         stream=lambda text: print(text, end="", flush=True),
+        ui=_terminal_ui(),
     )
+
+
+def _terminal_ui() -> Terminal | None:
+    """The Claude Code-style front in a real terminal; plain lines otherwise."""
+    if not (sys.stdin.isatty() and sys.stdout.isatty()):
+        return None
+    return Terminal.open(history=Path.home() / ".k0ntrol" / "history")
 
 
 def _run_scan(*, init=init_chat_model) -> int:

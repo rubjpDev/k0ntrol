@@ -1,4 +1,5 @@
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 from uuid import uuid4
 
@@ -6,6 +7,7 @@ from langchain.chat_models import init_chat_model
 
 from k0ntrol import __version__
 from k0ntrol.frontends.ask import answer_ask
+from k0ntrol.events import render_event
 from k0ntrol.frontends.banner import render_banner
 from k0ntrol.memory.reflect import Reflector, offer_mem_proposals
 from k0ntrol.workflow import Outcome, Pending, RunRefused, Unfinished
@@ -29,27 +31,30 @@ def run_session(
     init: Callable = init_chat_model,
     reflector=None,
     stream: Callable[[str], None] | None = None,
+    ui=None,
 ) -> int:
     """The REPL. ``write`` prints whole lines; ``stream``, when given,
-    prints ``/ask`` answer deltas without line breaks."""
-    if stream is None:
+    prints ``/ask`` answer deltas without line breaks.
+
+    ``ui`` is the terminal front (``frontends.terminal.Terminal``): when
+    given it reads the prompt, renders progress and asks the gates, and
+    ``read_line``/``write``/``stream`` are not used.
+    """
+    if ui is not None:
+        read_line, write, stream = ui.read, ui.line, ui.stream
+    elif stream is None:
         stream = write
     else:
         write, stream = _terminal(write, stream)
     transcript = _new_transcript(root)
-    show = _transcript_writer(write, transcript)
+    show = _transcript_writer(write, transcript, events=getattr(ui, "event", None))
+    front = _ui_front(ui, show, transcript) if ui else _plain_front(read_line, show)
     if reflector is None:
         reflector = Reflector(
-            root=root, transcript=transcript, cfg=config, init=init, write=show
+            root=root, transcript=transcript, cfg=config, init=init,
+            write=_reflect_writer(ui, show, transcript),
         )
-    show(
-        render_banner(
-            version=__version__,
-            provider=_chatty_provider(config),
-            cwd=str(root),
-            color=color,
-        )
-    )
+    _welcome(ui, show, config=config, root=root, color=color)
     try:
         return _session_loop(
             read_line,
@@ -57,6 +62,8 @@ def run_session(
             transcript,
             echo_input=echo_input,
             root=root,
+            front=front,
+            commands=_commands(ui, show, config, root),
             ask=lambda question: _run_ask(
                 question,
                 ask=ask,
@@ -70,7 +77,7 @@ def run_session(
             work=lambda kind, task: _run_work(
                 kind,
                 task,
-                read_line=read_line,
+                front=front,
                 show=show,
                 root=root,
                 config=config,
@@ -81,7 +88,91 @@ def run_session(
             ),
         )
     finally:
+        _closing(ui)
         reflector.finish()
+
+
+@dataclass(frozen=True)
+class _Front:
+    """How the session asks the human: gates, resume, y/n, outcomes."""
+
+    answer_gate: Callable[[Pending], str]
+    confirm_resume: Callable[[Unfinished], str | None]
+    answer_line: Callable[[], str]
+    report_outcome: Callable[[Outcome], None]
+
+
+def _plain_front(read_line: Callable[[], str], show: Callable[[str], None]) -> _Front:
+    def answer_gate(pending: Pending) -> str:
+        _show_pending(pending, show)
+        return read_line().strip()
+
+    return _Front(
+        answer_gate=answer_gate,
+        confirm_resume=lambda unfinished: _ask_resume(unfinished, read_line, show),
+        answer_line=read_line,
+        report_outcome=lambda result: show(_outcome_text(result)),
+    )
+
+
+def _ui_front(ui, show: Callable[[str], None], transcript: Path) -> _Front:
+    def confirm_resume(unfinished: Unfinished) -> str:
+        question = f"resume run {unfinished.run} at {unfinished.node}?"
+        _append_transcript(transcript, question)
+        return ui.confirm(question)
+
+    return _Front(
+        answer_gate=ui.gate,
+        confirm_resume=confirm_resume,
+        answer_line=lambda: ui.answer_line("y/n"),
+        report_outcome=lambda result: _append_transcript(transcript, _outcome_text(result)),
+    )
+
+
+def _reflect_writer(ui, show: Callable[[str], None], transcript: Path) -> Callable[[str], None]:
+    """Reflect runs in the background while the prompt waits: with a UI
+    its lines go to the transcript only, never across the input line."""
+    if ui is None:
+        return show
+    return lambda text: _append_transcript(transcript, text)
+
+
+def _welcome(ui, show: Callable[[str], None], *, config: dict, root: Path, color: bool) -> None:
+    provider = _chatty_provider(config)
+    if ui is not None:
+        ui.welcome(version=__version__, provider=provider, cwd=str(root))
+        return
+    show(render_banner(version=__version__, provider=provider, cwd=str(root), color=color))
+
+
+def _closing(ui) -> None:
+    if ui is not None:
+        ui.line("saving session memory…")
+
+
+def _commands(ui, show: Callable[[str], None], config: dict, root: Path) -> dict:
+    """The slash commands besides /ask, /fast, /full and /quit."""
+    help_ = ui.help if ui is not None else lambda: show(_HELP)
+    rows = lambda: _status_rows(config, root)  # noqa: E731
+    status = (lambda: ui.status(rows())) if ui is not None else (lambda: _show_rows(show, rows()))
+    return {"/help": help_, "?": help_, "/status": status}
+
+
+_HELP = "commands: /ask, /fast, /full, /status, /quit"
+
+
+def _status_rows(config: dict, root: Path) -> list[tuple[str, str]]:
+    rows = [("cwd", str(root)), ("tracker", str(config.get("tracker") or "none"))]
+    rows.append(("test_cmd", str(config.get("test_cmd", ""))))
+    for kind in ("agents", "helpers"):
+        for name, entry in (config.get(kind) or {}).items():
+            rows.append((name, f"{entry.get('provider')}/{entry.get('model')}"))
+    return rows
+
+
+def _show_rows(show: Callable[[str], None], rows: list[tuple[str, str]]) -> None:
+    for name, value in rows:
+        show(f"{name}: {value}")
 
 
 def _terminal(
@@ -118,6 +209,8 @@ def _session_loop(
     *,
     echo_input: bool,
     root: Path,
+    front: _Front,
+    commands: dict,
     ask: Callable[[str], None],
     work: Callable[[str, str], None],
 ) -> int:
@@ -128,6 +221,8 @@ def _session_loop(
             transcript,
             echo_input=echo_input,
             root=root,
+            front=front,
+            commands=commands,
             ask=ask,
             work=work,
         ):
@@ -141,16 +236,18 @@ def _session_should_quit(
     *,
     echo_input: bool,
     root: Path,
+    front: _Front,
+    commands: dict,
     ask: Callable[[str], None],
     work: Callable[[str, str], None],
 ) -> bool:
-    line = _read_session_line(read_line, show, root)
+    line = _read_session_line(read_line, front.answer_line, show, root)
     if line is None:
         return True
     _echo_session_input(line, show, transcript, echo_input)
     if not line:
         return False
-    return _handle_command(line, show, ask=ask, work=work)
+    return _handle_command(line, show, ask=ask, work=work, commands=commands)
 
 
 def _run_ask(
@@ -166,13 +263,17 @@ def _run_ask(
 ) -> None:
     """Stream CHATTY's answer live; the transcript keeps one entry."""
     deltas: list[str] = []
-    result = ask(
-        question,
-        root=root,
-        config=config,
-        write=show,
-        on_text=lambda delta: (stream(delta), deltas.append(delta)),
-    )
+    try:
+        result = ask(
+            question,
+            root=root,
+            config=config,
+            write=show,
+            on_text=lambda delta: (stream(delta), deltas.append(delta)),
+        )
+    except KeyboardInterrupt:
+        show("answer interrupted")
+        result = None
     if result is not None:
         reflector.ask_turn()
     if deltas:
@@ -183,7 +284,7 @@ def _run_work(
     kind: str,
     task: str,
     *,
-    read_line: Callable[[], str],
+    front: _Front,
     show: Callable[[str], None],
     root: Path,
     config: dict,
@@ -194,14 +295,13 @@ def _run_work(
 ) -> None:
     """Drive one run: start, then Pending → answer → resume until it ends."""
     result = _start_or_resume(
-        kind, task, read_line=read_line, show=show, root=root, config=config,
+        kind, task, front=front, show=show, root=root, config=config,
         start=start, resume=resume, abandon=abandon,
     )
     if result is None:
         return
     while isinstance(result, Pending):
-        _show_pending(result, show)
-        answer = _gate_answer(read_line, show, result)
+        answer = _gate_answer(front, show, result)
         if answer is None:
             return
         result = _try_resume(
@@ -209,7 +309,7 @@ def _run_work(
         )
         if result is None:
             return
-    show(_outcome_text(result))
+    front.report_outcome(result)
     reflector.after_run(result.run)
 
 
@@ -217,7 +317,7 @@ def _start_or_resume(
     kind: str,
     task: str,
     *,
-    read_line: Callable[[], str],
+    front: _Front,
     show: Callable[[str], None],
     root: Path,
     config: dict,
@@ -229,7 +329,7 @@ def _start_or_resume(
     result = _try_start(kind, task, show=show, root=root, config=config, start=start)
     if not isinstance(result, Unfinished):
         return result
-    answer = _ask_resume(result, read_line, show)
+    answer = front.confirm_resume(result)
     if answer == "y":
         resumed = _try_resume(
             result, None, show=show, root=root, config=config, resume=resume
@@ -272,9 +372,12 @@ def _ask_resume(
     """``resume run <id> at <node>? [y/n]`` until a y or n; None on EOF."""
     while True:
         show(f"resume run {unfinished.run} at {unfinished.node}? [y/n]")
-        answer = _gate_answer(read_line, show, unfinished)
+        answer = _paused_on_interrupt(read_line, show, unfinished)
         if answer is None or answer.lower() in ("y", "n"):
             return answer and answer.lower()
+
+
+_PAUSED = "run paused · run the same command again to resume it"
 
 
 def _try_start(kind, task, *, show, root, config, start):
@@ -282,6 +385,10 @@ def _try_start(kind, task, *, show, root, config, start):
         return start(kind, task, root=root, cfg=config, write=show)
     except RunRefused as error:
         _show_refusal(error, show)
+        return None
+    except KeyboardInterrupt:
+        # Ctrl-C mid-run: the checkpoint holds the last finished node.
+        show(_PAUSED)
         return None
     except Exception as error:
         # A mid-run failure leaves a resumable checkpoint, never stuck.
@@ -303,6 +410,9 @@ def _try_resume(
     except RunRefused as error:
         _show_refusal(error, show)
         return result  # bad answer: re-ask the same gate
+    except KeyboardInterrupt:
+        show(_PAUSED)
+        return None
     except Exception as error:
         show(f"run {result.run} failed: {error}")
         return None
@@ -316,12 +426,19 @@ def _show_pending(pending: Pending, show: Callable[[str], None]) -> None:
 
 
 def _gate_answer(
-    read_line: Callable[[], str],
+    front: _Front, show: Callable[[str], None], pending: Pending
+) -> str | None:
+    return _paused_on_interrupt(lambda: front.answer_gate(pending), show, pending)
+
+
+def _paused_on_interrupt(
+    read: Callable[[], str],
     show: Callable[[str], None],
     pending: Pending | Unfinished,
 ) -> str | None:
+    """The human's answer, or None (and a pause note) on Ctrl-C / Ctrl-D."""
     try:
-        return read_line().strip()
+        return read().strip()
     except (KeyboardInterrupt, EOFError):
         where = pending.gate if isinstance(pending, Pending) else pending.node
         show(f"run {pending.run} is paused at {where}; resume it later")
@@ -345,11 +462,12 @@ def _outcome_text(result: Outcome) -> str:
 
 def _read_session_line(
     read_line: Callable[[], str],
+    answer_line: Callable[[], str],
     show: Callable[[str], None],
     root: Path,
 ) -> str | None:
     try:
-        offer_mem_proposals(root, read_line, show)
+        offer_mem_proposals(root, answer_line, show)
         return read_line()
     except (KeyboardInterrupt, EOFError):
         return None
@@ -379,12 +497,37 @@ def _new_transcript(root: Path) -> Path:
 def _transcript_writer(
     write: Callable[[str], None],
     transcript: Path,
+    *,
+    events: Callable[[dict], None] | None = None,
 ) -> Callable[[str], None]:
+    if events is not None:
+        return _RichShow(write, transcript, events)
+
     def show(text: str) -> None:
         write(text)
         _append_transcript(transcript, text)
 
     return show
+
+
+class _RichShow:
+    """``show`` for the terminal UI: lines as usual, and progress events
+    rendered by the UI while the transcript keeps the plain line."""
+
+    def __init__(self, write, transcript: Path, events: Callable[[dict], None]) -> None:
+        self._write = write
+        self._transcript = transcript
+        self._events = events
+
+    def __call__(self, text: str) -> None:
+        self._write(text)
+        _append_transcript(self._transcript, text)
+
+    def event(self, event: dict) -> None:
+        self._events(event)
+        line = render_event(event)
+        if line is not None:
+            _append_transcript(self._transcript, line)
 
 
 def _append_transcript(transcript: Path, text: str) -> None:
@@ -400,21 +543,20 @@ def _handle_command(
     *,
     ask: Callable[[str], None],
     work: Callable[[str, str], None],
+    commands: dict,
 ) -> bool:
     command, _, argument = line.partition(" ")
     if command == "/quit":
         return True
-    if command == "/help":
-        write("commands: /ask, /fast, /full, /quit")
+    handlers = {
+        "/ask": ask,
+        "/fast": lambda task: work("fast", task),
+        "/full": lambda task: work("full", task),
+    }
+    handlers.update({name: lambda _arg, f=f: f() for name, f in commands.items()})
+    handler = handlers.get(command)
+    if handler is None:
+        write(f"unknown command: {command} · /help lists them")
         return False
-    if command == "/ask":
-        ask(argument)
-        return False
-    if command == "/fast":
-        work("fast", argument)
-        return False
-    if command == "/full":
-        work("full", argument)
-        return False
-    write(f"unknown command: {command}")
+    handler(argument)
     return False
