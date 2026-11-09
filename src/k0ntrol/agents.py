@@ -3,10 +3,11 @@
 Every agent — CHATTY for ``/ask`` today, the workflow agents as their nodes
 land — is built here from ``create_agent``: the agent's allowlist, k0's
 closed middleware set (a run-scoped model-call limit with
-``exit_behavior="end"``, a retry of transient model errors, invalid tool
-names cleaned from what the provider receives, and tool errors surfaced to
-the model), an explicit recursion limit derived from the model-call limit,
-and a fresh-context wrapper (``K0Agent``).
+``exit_behavior="end"``, a retry of transient model errors, old tool
+results cleared once the run's context grows, invalid tool names cleaned
+from what the provider receives, and tool errors surfaced to the model), an
+explicit recursion limit derived from the model-call limit, and a
+fresh-context wrapper (``K0Agent``).
 
 The allowlist is enforced in code, twice: ``agent_tools`` builds exactly
 the tools on ``ALLOWLISTS[name]``, and ``build_agent`` refuses any tool set
@@ -27,6 +28,7 @@ from uuid import uuid4
 from langchain.agents import create_agent
 from langchain.agents.middleware import (
     AgentMiddleware,
+    ContextEditingMiddleware,
     ModelCallLimitMiddleware,
     ModelRequest,
     ModelResponse,
@@ -97,6 +99,13 @@ _MODEL_RETRIES = 2
 # Connection-level failures the provider SDKs raise without a status code:
 # httpx's (ollama) and the OpenAI/Anthropic clients' (timeouts included).
 _TRANSIENT_ERROR_TYPES = frozenset({"TransportError", "APIConnectionError"})
+
+# Inside one agent run every model call resends all earlier tool output.
+# Past this many tokens, results the model has already read reach it as a
+# placeholder (the run's own messages keep them). Half of Ollama's 64k
+# window, so a local model never silently drops its prompt.
+_CLEAR_TOOL_RESULTS_AT = 32_000
+_CLEARED = "[cleared to save context; call the tool again if you need this]"
 
 # The tool names a provider accepts in the history (Bedrock's rule, the
 # strictest one k0 talks to).
@@ -217,6 +226,9 @@ def build_agent(
                 retry_on=is_transient,
                 on_failure="error",
             ),
+            ContextEditingMiddleware(
+                edits=[ClearSeenToolResults(exclude_tools=("read_work_item",))]
+            ),
             ToolNameMiddleware(),
             ToolErrorMiddleware(),
         ],
@@ -243,6 +255,38 @@ def is_transient(error: Exception) -> bool:
     return any(
         cls.__name__ in _TRANSIENT_ERROR_TYPES for cls in type(error).__mro__
     )
+
+
+@dataclass
+class ClearSeenToolResults:
+    """A context edit: clear tool results the model has already read.
+
+    Only results from before the model's latest message qualify: it saw
+    them and answered. The results it is about to read, a whole parallel
+    batch included, always reach it whole; clearing those made the model
+    invent what the files said. The oldest go first, and only until the
+    context is back under the trigger.
+    """
+
+    trigger: int = _CLEAR_TOOL_RESULTS_AT
+    placeholder: str = _CLEARED
+    exclude_tools: tuple[str, ...] = ()
+
+    def apply(self, messages: list[BaseMessage], *, count_tokens: Callable) -> None:
+        for index in _seen_tool_results(messages, self.exclude_tools):
+            if count_tokens(messages) <= self.trigger:
+                return
+            messages[index] = messages[index].model_copy(update={"content": self.placeholder})
+
+
+def _seen_tool_results(messages: list[BaseMessage], excluded: tuple[str, ...]) -> list[int]:
+    """Indexes of tool results before the latest AI message, oldest first."""
+    latest = max((i for i, m in enumerate(messages) if isinstance(m, AIMessage)), default=0)
+    return [
+        index
+        for index, message in enumerate(messages[:latest])
+        if isinstance(message, ToolMessage) and message.name not in excluded
+    ]
 
 
 class ToolNameMiddleware(AgentMiddleware):

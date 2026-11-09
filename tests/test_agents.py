@@ -399,6 +399,61 @@ def test_an_invalid_tool_name_is_cleaned_before_the_next_model_call(tmp_path):
     assert "functions.read_file is not a valid tool" in errors[0].content
 
 
+# --- old tool results are cleared once the context grows -----------------------
+
+
+def test_the_oldest_seen_tool_results_are_cleared_until_the_context_fits(tmp_path):
+    """Five sequential reads of ~15k tokens: the oldest seen ones become a
+    placeholder until the context fits 32k; the agent's own state keeps them."""
+
+    @tool
+    def read_file(path: str) -> str:
+        """A read that returns a big file."""
+        return f"{path}: " + "x" * 60_000  # ~15k tokens each
+
+    reads = [
+        AIMessage(content="", tool_calls=[{"name": "read_file", "args": {"path": f"f{i}"}, "id": f"t{i}"}])
+        for i in range(5)
+    ]
+    model = _scripted(*reads, AIMessage(content="done"))
+    cfg = cfg_with({"chatty": {"provider": "anthropic", "model": "m", "model_calls": 10}})
+    agent = build_agent(
+        "chatty", cfg, [read_file], root=tmp_path, init=_init(model), allowlist=["read_file"]
+    )
+
+    result = agent.invoke([HumanMessage("go")])
+
+    seen = [m.content for m in model.invocations[-1] if isinstance(m, ToolMessage)]
+    assert [text.startswith("[cleared") for text in seen] == [True, True, True, False, False]
+    kept = [m.content for m in result.messages if isinstance(m, ToolMessage)]
+    assert kept[0].startswith("f0: ")  # the run's own record is untouched
+
+
+def test_a_batch_the_model_has_not_seen_yet_is_never_cleared(tmp_path):
+    """55 files read in one parallel step all reach the model whole: only
+    results from earlier turns, already seen, can be cleared."""
+
+    @tool
+    def read_file(path: str) -> str:
+        """A read that returns a big file."""
+        return f"{path}: " + "x" * 60_000
+
+    batch = AIMessage(
+        content="",
+        tool_calls=[{"name": "read_file", "args": {"path": f"f{i}"}, "id": f"t{i}"} for i in range(5)],
+    )
+    model = _scripted(batch, AIMessage(content="done"))
+    cfg = cfg_with({"chatty": {"provider": "anthropic", "model": "m", "model_calls": 10}})
+    agent = build_agent(
+        "chatty", cfg, [read_file], root=tmp_path, init=_init(model), allowlist=["read_file"]
+    )
+
+    agent.invoke([HumanMessage("go")])
+
+    seen = [m.content for m in model.invocations[-1] if isinstance(m, ToolMessage)]
+    assert all(not text.startswith("[cleared") for text in seen)
+
+
 # --- transient model errors are retried (#85) ----------------------------------
 
 
