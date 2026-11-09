@@ -184,7 +184,11 @@ class Terminal:
         """Show the gate and pick an answer; feedback rides on redo/retry."""
         self._settle()
         render_gate(
-            self._console, gate=pending.gate, question=pending.question, detail=pending.detail
+            self._console,
+            gate=pending.gate,
+            question=pending.question,
+            detail=pending.detail,
+            diff=pending.diff,
         )
         key = self._prompt.choose(pending.question, gate_options(pending.gate, pending.answers))
         self._answered_gate = True

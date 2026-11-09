@@ -1553,3 +1553,25 @@ def test_rerun_refuses_a_closed_issue(tmp_path):
 
     with pytest.raises(RunRefused, match="work item #1 is closed"):
         rerun(tmp_path, tracker)
+
+
+def test_review_gate_carries_the_code_diff_without_memory_files(tmp_path):
+    tracker, _, _, test_result = full_to_test_gate(tmp_path)
+    code = "diff --git a/calc.py b/calc.py\n--- /dev/null\n+++ b/calc.py\n@@ -0,0 +1 @@\n+x = 1\n"
+    memory = "diff --git a/.k0-mem/index.json b/.k0-mem/index.json\n+{}\n"
+    tracker.read_change_diff = lambda ref: code + memory
+    result = resume(
+        test_result.run,
+        "ok",
+        root=tmp_path,
+        cfg=full_cfg(),
+        tracker=tracker,
+        init=models_init(
+            fake_tester(write_call("calc.py", CALC_SRC), AIMessage(content="implemented")),
+            reviewer_model(),
+        ),
+        scan=writing_scan,
+    )
+
+    assert isinstance(result, Pending) and result.gate == "review"
+    assert result.diff == code

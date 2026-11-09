@@ -523,6 +523,7 @@ def make_review_gate(ctx: RunContext) -> Callable[[dict], dict]:
                 "answers": ["ok", "redo", "spec"],
                 "detail": f"PR {state.get('change_ref')}\n\n"
                 + render_review(state.get("review")),
+                "diff": code_diff(ctx.tracker.read_change_diff(state["change_ref"])),
             }
         )
         word, _, feedback = str(decision).strip().partition(" ")

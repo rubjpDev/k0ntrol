@@ -474,8 +474,9 @@ def _try_resume(
 
 
 def _show_pending(pending: Pending, show: Callable[[str], None]) -> None:
-    if pending.detail:
-        show(pending.detail)
+    for part in (pending.detail, pending.diff):
+        if part:
+            show(part)
     answers = "/".join(pending.answers)
     show(f"{pending.question} [{answers}]")
 

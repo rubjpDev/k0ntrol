@@ -221,3 +221,16 @@ def test_with_an_editor_the_prompt_is_the_box(tmp_path):
 
     assert ui.read() == "/fast hola"
     assert "shift+tab mode" in ui.status_line()
+
+
+def test_a_gate_with_a_diff_draws_it_below_the_panel():
+    ui, console = terminal(["1"])
+    diff = "diff --git a/calc.py b/calc.py\n--- a/calc.py\n+++ b/calc.py\n@@ -1 +1 @@\n-x = 41\n+x = 42\n"
+    gate = Pending(run="r1", gate="review", question="approve?", answers=("ok",),
+                   detail="PR 7\n\n## Review\n\nfine", diff=diff)
+
+    ui.gate(gate)
+
+    text = console.export_text()
+    assert text.index("Review gate") < text.index("calc.py +1 -1")
+    assert "x = 41" in text and "x = 42" in text

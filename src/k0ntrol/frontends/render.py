@@ -19,6 +19,7 @@ from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.text import Text
 
+from k0ntrol.frontends.diffview import render_diff
 from k0ntrol.frontends.theme import (
     ACCENT,
     BORDER,
@@ -433,8 +434,11 @@ def _gate_body(detail: str) -> RenderableType:
     return Group(body, Text(f"… {hidden} more lines", style=DIM))
 
 
-def render_gate(console: Console, *, gate: str, question: str, detail: str) -> None:
-    """Print a human gate as a rounded panel holding `detail`.
+def render_gate(
+    console: Console, *, gate: str, question: str, detail: str, diff: str = ""
+) -> None:
+    """Print a human gate as a rounded panel holding `detail`, then `diff`
+    file by file (see `diffview`).
 
     `question` is not printed: the option selector shows it.
     """
@@ -448,3 +452,5 @@ def render_gate(console: Console, *, gate: str, question: str, detail: str) -> N
             padding=(0, 1),
         )
     )
+    if diff.strip():
+        console.print(render_diff(diff))

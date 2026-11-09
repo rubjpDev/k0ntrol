@@ -106,6 +106,7 @@ class Pending:
     question: str
     answers: tuple[str, ...]
     detail: str = ""
+    diff: str = ""  # the change as a git diff, drawn file by file
 
 
 @dataclass(frozen=True)
@@ -672,6 +673,7 @@ def _pending(run_id: str, payload: dict) -> Pending:
         question=str(payload.get("question", "")),
         answers=tuple(str(a) for a in payload.get("answers", ())),
         detail=str(payload.get("detail", "")),
+        diff=str(payload.get("diff", "")),
     )
 
 

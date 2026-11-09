@@ -590,3 +590,22 @@ def test_full_n_with_a_dirty_tree_keeps_the_run_and_says_how_to_go_on(tmp_path):
     assert calls == ["start", "abandon"]  # no fresh start after the refusal
     assert "dirty working tree" in text and "?? tests/t.py" in text
     assert "run r1 is kept" in text and "answer y to resume it" in text
+
+
+def test_plain_gate_prints_the_diff_after_the_detail(tmp_path):
+    from k0ntrol.workflow import Outcome, Pending
+
+    pending = Pending(run="r1", gate="review", question="approve?", answers=("ok",),
+                      detail="the review", diff="diff --git a/x b/x\n+y\n")
+    lines = iter(["/fast task", "ok", "/quit"])
+    shown = []
+    run_session(
+        lambda: next(lines),
+        shown.append,
+        root=tmp_path,
+        config=config(),
+        start=lambda *a, **k: pending,
+        resume=lambda run_id, decision, **kw: Outcome(run=run_id, outcome="done"),
+    )
+    text = "\n".join(shown)
+    assert text.index("the review") < text.index("diff --git a/x b/x") < text.index("approve?")
