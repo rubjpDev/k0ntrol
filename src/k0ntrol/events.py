@@ -145,6 +145,15 @@ class EventWriter:
         self._notify(event)
         return event
 
+    def working(self, **fields: Any) -> None:
+        """Tell the progress display a model or tool call just started.
+
+        Display only: nothing is written to `events.jsonl`, so the log keeps
+        exactly one line per finished model call.
+        """
+        event = {"kind": "working", **{k: v for k, v in fields.items() if v is not None}}
+        self._notify(event)
+
     def _notify(self, event: dict) -> None:
         if self._progress is None:
             return
@@ -236,7 +245,7 @@ class K0EventHandler(GraphCallbackHandler):
         metadata: dict | None = None,
         **kwargs: Any,
     ) -> None:
-        self._llm_starts[run_id] = _call_start(metadata)
+        self._llm_starts[run_id] = self._started(metadata)
 
     def on_llm_start(
         self,
@@ -250,7 +259,13 @@ class K0EventHandler(GraphCallbackHandler):
         **kwargs: Any,
     ) -> None:
         # k0 uses chat models, but a plain LLM call still gets its event.
-        self._llm_starts[run_id] = _call_start(metadata)
+        self._llm_starts[run_id] = self._started(metadata)
+
+    def _started(self, metadata: Mapping | None) -> dict:
+        start = _call_start(metadata)
+        who = {"helper": start["helper"]} if start["helper"] else {"agent": start["agent"]}
+        self._writer.working(**who)
+        return start
 
     def on_llm_end(
         self,
@@ -324,6 +339,8 @@ class K0EventHandler(GraphCallbackHandler):
             "tool": (serialized or {}).get("name"),
             "path": str(path) if path else None,
         }
+        start = self._tool_starts[run_id]
+        self._writer.working(agent=start["agent"], tool=start["tool"], path=start["path"])
 
     def on_tool_end(
         self,

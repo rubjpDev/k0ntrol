@@ -637,3 +637,14 @@ def test_progress_renderer_hands_structured_events_to_a_rich_output():
 
     assert output.events == [{"kind": "tool", "agent": "coder", "tool": "read_file", "ok": True}]
     assert output.lines == []
+
+
+def test_a_call_start_reaches_the_display_but_not_the_log(tmp_path):
+    shown = []
+    path = tmp_path / "events.jsonl"
+    writer = EventWriter(path, run="r1", mask=[], progress=shown.append)
+
+    writer.working(agent="coder", tool="run_tests", path=None)
+
+    assert shown == [{"kind": "working", "agent": "coder", "tool": "run_tests"}]
+    assert not path.exists()

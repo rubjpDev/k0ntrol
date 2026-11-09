@@ -335,7 +335,7 @@ def test_spinner_text_shows_agent_elapsed_calls_and_tokens() -> None:
     clock.now = 145.0
     renderer(model("coder", tokens_in=4_500, tokens_out=1_000))
     text = renderer._spinner_text().plain
-    assert text[2:] == "CODER working… (45s · 2 calls · ↑ 34.5k ↓ 1.2k)"
+    assert text[2:] == "CODER · thinking… (45s · 2 calls · ↑ 34.5k ↓ 1.2k)"
     assert text[0] in SPINNER_FRAMES
 
 
@@ -344,7 +344,7 @@ def test_spinner_text_singular_call_and_helper_name() -> None:
     renderer = LiveRenderer(make_console(), spinner=False, clock=clock)
     renderer({"kind": "model", "helper": "reflect", "ok": True, "tokens_in": 950})
     assert renderer._spinner_text().plain[2:] == (
-        "reflect working… (0s · 1 call · ↑ 950 ↓ 0)"
+        "reflect · thinking… (0s · 1 call · ↑ 950 ↓ 0)"
     )
 
 
@@ -366,7 +366,7 @@ def test_spinner_stats_reset_when_agent_changes() -> None:
     clock.now = 60.0
     renderer(model("reviewer", tokens_in=7))
     assert renderer._spinner_text().plain[2:] == (
-        "REVIEWER working… (0s · 1 call · ↑ 7 ↓ 0)"
+        "REVIEWER · thinking… (0s · 1 call · ↑ 7 ↓ 0)"
     )
 
 
@@ -514,3 +514,28 @@ def test_long_markdown_is_capped_too() -> None:
 
 def test_empty_detail_renders_an_empty_panel() -> None:
     assert gate_output("spec", "").splitlines()[0].startswith("╭─ Spec gate")
+
+
+def test_a_starting_call_shows_the_agent_and_its_activity_at_once():
+    """The spinner starts when a call starts, not when it ends."""
+    console = Console(record=True, width=100, color_system=None)
+    now = [0.0]
+    renderer = LiveRenderer(console, spinner=False, clock=lambda: now[0])
+
+    renderer({"kind": "working", "agent": "coder"})
+    assert "CODER" in console.export_text(clear=False)
+    assert renderer._spinner_text().plain.startswith(SPINNER_FRAMES[0] + " CODER · thinking…")
+    renderer({"kind": "working", "agent": "coder", "tool": "run_tests"})
+    assert "CODER · RunTests…" in renderer._spinner_text().plain
+
+
+def test_a_quiet_call_turns_the_spinner_into_a_stall_warning():
+    console = Console(record=True, width=100, color_system=None)
+    now = [0.0]
+    renderer = LiveRenderer(console, spinner=False, clock=lambda: now[0])
+    renderer({"kind": "working", "agent": "spec"})
+    now[0] = 125
+
+    text = renderer._spinner_text().plain
+
+    assert "SPEC · no response for 2m 5s" in text and "ctrl-c pauses the run" in text

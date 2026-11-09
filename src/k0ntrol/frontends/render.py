@@ -209,6 +209,8 @@ class _Stretch:
     calls: int = 0
     tokens_in: int = 0
     tokens_out: int = 0
+    activity: str = "thinking"  # what the spinner says the agent is doing
+    last_seen: float = 0.0  # clock time of the latest sign of life
 
     @property
     def label(self) -> str:
@@ -232,6 +234,7 @@ class LiveRenderer:
         self._stretch: _Stretch | None = None
         self._handlers: dict[str, Callable[[dict], None]] = {
             "run_start": self._on_run_start,
+            "working": self._on_working,
             "model": self._on_model,
             "tool": self._on_tool,
             "gate": self._on_gate,
@@ -263,9 +266,17 @@ class LiveRenderer:
         self._stretch = None
         self._console.print(run_start_line(event))
 
+    def _on_working(self, event: dict) -> None:
+        """A model or tool call just started: show who and what, now."""
+        stretch = self._enter(event)
+        if stretch is not None:
+            stretch.activity = tool_label(event.get("tool"), event.get("path")) if event.get("tool") else "thinking"
+            stretch.last_seen = self._clock()
+
     def _on_model(self, event: dict) -> None:
         stretch = self._enter(event)
         if stretch is not None:
+            stretch.last_seen = self._clock()
             stretch.calls += 1
             stretch.tokens_in += _as_int(event.get("tokens_in"))
             stretch.tokens_out += _as_int(event.get("tokens_out"))
@@ -273,7 +284,10 @@ class LiveRenderer:
             self._console.print(model_failure_line(event))
 
     def _on_tool(self, event: dict) -> None:
-        self._enter(event)
+        stretch = self._enter(event)
+        if stretch is not None:
+            stretch.last_seen = self._clock()
+            stretch.activity = "thinking"
         self._console.print(tool_line(event))
 
     def _on_gate(self, event: dict) -> None:
@@ -336,12 +350,27 @@ class LiveRenderer:
             return Text("")
         now = self._clock()
         frame = SPINNER_FRAMES[int(now * _SPINNER_FPS) % len(SPINNER_FRAMES)]
+        quiet = now - (stretch.last_seen or stretch.started)
+        if quiet >= STALL_SECONDS:
+            return _stalled_text(frame, stretch, quiet)
         stats = _spinner_stats(stretch, now - stretch.started)
         return Text.assemble(
             (f"{frame} ", ACCENT),
-            (f"{stretch.label} working…", ACCENT),
+            (f"{stretch.label} · {stretch.activity}…", ACCENT),
             (f" ({stats})", DIM),
         )
+
+
+# No sign of life for this long and the spinner says so, in amber.
+STALL_SECONDS = 90
+
+
+def _stalled_text(frame: str, stretch: _Stretch, quiet: float) -> Text:
+    return Text.assemble(
+        (f"{frame} ", WARN),
+        (f"{stretch.label} · no response for {format_elapsed(quiet)}", WARN),
+        (" · ctrl-c pauses the run", DIM),
+    )
 
 
 def _spinner_stats(stretch: _Stretch, elapsed: float) -> str:
