@@ -213,9 +213,8 @@ def run_provider_setup(
         "Choose the models k0 uses",
         "Saved in ~/.k0ntrol/config.yaml; run /config to change it later.",
     )
-    provider = prompt.choose("Which provider runs your models?", _PROVIDERS)
-    installed = _installed_models(provider, root, console, list_models or _default_lister)
-    tiers = {tier: _ask_tier(prompt, provider, tier, installed) for tier in _TIER_ROSTER}
+    provider, installed = _ask_provider(prompt, console, root, list_models or _default_lister)
+    tiers = _ask_tiers(prompt, provider, installed)
     settings = _ask_provider_settings(prompt, provider)
     _ask_credential(home, prompt, console, provider, read_secret)
     config = _build_config(provider, tiers, settings)
@@ -223,6 +222,24 @@ def run_provider_setup(
     load_config(root, home_dir=home)
     _print_summary(console, config)
     return path
+
+
+_NO_LOCAL_MODELS = [
+    ("back", "Choose another provider"),
+    ("type", "Type model names anyway"),
+]
+
+
+def _ask_provider(
+    prompt: Prompt, console: Console, root: Path, lister: Callable[[str, str], list[str]]
+) -> tuple[str, list[str] | None]:
+    """The provider, plus its installed models when it runs locally. A local
+    server with nothing usable offers the way back to the provider list."""
+    while True:
+        provider = prompt.choose("Which provider runs your models?", _PROVIDERS)
+        installed = _installed_models(provider, root, console, lister)
+        if installed != [] or prompt.choose("What now?", _NO_LOCAL_MODELS) == "type":
+            return provider, installed
 
 
 def _default_lister(provider: str, base_url: str) -> list[str]:
@@ -235,16 +252,45 @@ def _installed_models(
     """Installed tool-capable models of a local provider; None for the others."""
     if provider not in _LOCAL_NAMES:
         return None
+    name, base_url = _LOCAL_NAMES[provider], _provider_base_url(root, provider)
     try:
-        models = list(lister(provider, _provider_base_url(root, provider)))
-        reason = "no installed model can call tools"
-    except Exception as error:
-        models, reason = [], f"cannot reach the server ({_short(error)})"
+        models = list(lister(provider, base_url))
+        problem = f"{name} has no installed model that can call tools."
+    except Exception:
+        models, problem = [], f"{name} is not reachable at {base_url}."
     if not models:
-        name = _LOCAL_NAMES[provider]
-        console.print(Text(f"  {name}: {reason}. Start {name} and pull a model "
-                           "that can call tools, or type a model name.", style=WARN))
+        console.print(Text(f"  {problem}", style=WARN))
+        console.print(Text(f"  Start {name} and pull a model that can call tools.", style=DIM))
     return models
+
+
+_HOW = "How should k0 pick the models?"
+_CUSTOM = ("custom", "Choose a model and effort for each tier")
+
+
+def _ask_tiers(prompt: Prompt, provider: str, installed: list[str] | None) -> dict:
+    """The recommended models in one answer when there are real ones to
+    recommend; otherwise, or on request, a model and effort per tier."""
+    picks = _recommended(provider, installed)
+    if picks and prompt.choose(_HOW, [("quick", _quick_label(picks)), _CUSTOM]) == "quick":
+        return {tier: {"model": key, "effort": _TIER_EFFORT.get(tier)} for tier, (key, _) in picks.items()}
+    return {tier: _ask_tier(prompt, provider, tier, installed) for tier in _TIER_ROSTER}
+
+
+def _recommended(provider: str, installed: list[str] | None) -> dict[str, tuple[str, str]]:
+    """Each tier's first model option, when the options are real models:
+    installed locally, Bedrock's tested ones or Claude's. Never placeholders."""
+    real = bool(installed) or provider == "bedrock" or provider in _CLAUDE_TIER_MODELS
+    if not real:
+        return {}
+    return {tier: _model_options(provider, tier, installed)[0] for tier in _TIER_ROSTER}
+
+
+def _quick_label(picks: dict[str, tuple[str, str]]) -> str:
+    labels = [label for _, label in picks.values()]
+    if len(set(labels)) == 1:
+        return f"Use {labels[0]} for every agent"
+    return "Recommended: " + " · ".join(labels)
 
 
 def _ask_tier(prompt: Prompt, provider: str, tier: str, installed: list[str] | None) -> dict:
@@ -312,7 +358,7 @@ def _ask_credential(
     if not names or prompt.choose("API key", _KEY_CHOICES) != "save":
         return
     name = _BEDROCK_KEY if provider == "bedrock" else names[0]
-    value = read_secret(f"{name}: ").strip()
+    value = read_secret(f"{name} (hidden as you type, enter to skip): ").strip()
     if not value:
         console.print(Text("  No key entered; nothing saved.", style=WARN))
         return

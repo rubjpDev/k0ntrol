@@ -259,8 +259,8 @@ def test_ollama_offers_installed_models_and_writes_the_config(tmp_path):
     root.mkdir()
     console = make_console()
     models = lister("qwen3:8b", "llama3.1")
-    # provider; strong: model 2, effort default; middle: model 1, effort low; light: model 1, none
-    prompt = make_prompt(console, "ollama", "2", "1", "1", "3", "1", "1")
+    # provider, custom; strong: model 2, effort default; middle: model 1, effort low; light: model 1, none
+    prompt = make_prompt(console, "ollama", "custom", "2", "1", "1", "3", "1", "1")
 
     path = run_provider_setup(home, prompt, console, root=root, list_models=models)
 
@@ -289,7 +289,7 @@ def test_ollama_uses_the_base_url_from_the_project_config(tmp_path):
     console = make_console()
     models = lister("m")
 
-    run_provider_setup(home, make_prompt(console, "ollama", *["1"] * 6), console,
+    run_provider_setup(home, make_prompt(console, "ollama", "custom", *["1"] * 6), console,
                        root=root, list_models=models)
 
     assert models.calls == [("ollama", "http://box:1")]
@@ -302,12 +302,12 @@ def test_ollama_unreachable_warns_and_asks_for_model_names(tmp_path):
     def down(provider, base_url):
         raise ConnectionError("refused")
 
-    answers = ["ollama", "qwen3:8b", "1", "qwen3:8b", "1", "", "qwen3:4b", "1"]
+    answers = ["ollama", "type", "qwen3:8b", "1", "qwen3:8b", "1", "", "qwen3:4b", "1"]
     path = run_provider_setup(home, make_prompt(console, *answers), console,
                               root=tmp_path, list_models=down)
 
     out = screen(console)
-    assert "Ollama: cannot reach the server (refused)" in out
+    assert "Ollama is not reachable at http://localhost:11434" in out
     assert "pull a model that can call tools" in out
     assert out.count("Start Ollama") == 1
     assert yaml.safe_load(path.read_text())["helpers"]["reflect"]["model"] == "qwen3:4b"
@@ -316,13 +316,13 @@ def test_ollama_unreachable_warns_and_asks_for_model_names(tmp_path):
 def test_lmstudio_without_tool_models_warns_once(tmp_path):
     home = tmp_path / "home"
     console = make_console()
-    answers = ["lmstudio", "m", "1", "m", "1", "m", "1", "2"]
+    answers = ["lmstudio", "type", "m", "1", "m", "1", "m", "1", "2"]
 
     run_provider_setup(home, make_prompt(console, *answers), console,
                        root=tmp_path, list_models=lister(), read_secret=no_secret)
 
     out = screen(console)
-    assert out.count("LM Studio: no installed model can call tools") == 1
+    assert out.count("LM Studio has no installed model that can call tools") == 1
     assert user_config(home)["agents"]["coder"]["provider"] == "lmstudio"
 
 
@@ -332,7 +332,7 @@ def test_default_lister_wraps_tool_calling_models(tmp_path, monkeypatch):
                         lambda provider, url: seen.append((provider, url)) or ["m1"])
     console = make_console()
 
-    run_provider_setup(tmp_path / "home", make_prompt(console, "ollama", *["1"] * 6),
+    run_provider_setup(tmp_path / "home", make_prompt(console, "ollama", "custom", *["1"] * 6),
                        console, root=tmp_path)
 
     assert seen == [("ollama", "http://localhost:11434")]
@@ -343,7 +343,7 @@ def test_bedrock_presets_region_and_saved_key(tmp_path):
     console = make_console()
     secret = fake_secret("  bearer-123 ")
     # strong: Qwen3 Next (1); middle: Qwen3 Coder Next (1); light: Nova Lite (4), no effort (1)
-    answers = ["bedrock", "1", "1", "1", "1", "4", "1", "3", "save"]  # region 3: eu-west-1
+    answers = ["bedrock", "custom", "1", "1", "1", "1", "4", "1", "3", "save"]  # region 3: eu-west-1
 
     path = run_provider_setup(home, make_prompt(console, *answers), console,
                               root=tmp_path, read_secret=secret)
@@ -355,7 +355,7 @@ def test_bedrock_presets_region_and_saved_key(tmp_path):
     assert data["helpers"]["reflect"]["model"] == "us.amazon.nova-lite-v1:0"
     assert credentials_path(home).read_text() == "AWS_BEARER_TOKEN_BEDROCK=bearer-123\n"
     assert stat.S_IMODE(credentials_path(home).stat().st_mode) == 0o600
-    assert secret.asked == ["AWS_BEARER_TOKEN_BEDROCK: "]
+    assert secret.asked == ["AWS_BEARER_TOKEN_BEDROCK (hidden as you type, enter to skip): "]
     out = screen(console)
     assert "Saved AWS_BEARER_TOKEN_BEDROCK" in out
     assert "bearer-123" not in out
@@ -376,7 +376,7 @@ def test_bedrock_tested_default_comes_first_per_tier():
 def test_bedrock_another_region_and_another_model(tmp_path):
     home = tmp_path / "home"
     console = make_console()
-    answers = ["bedrock", "8", "my.model", "1", "1", "1", "1", "1", "4", "ap-south-1", "env"]
+    answers = ["bedrock", "custom", "8", "my.model", "1", "1", "1", "1", "1", "4", "ap-south-1", "env"]
 
     run_provider_setup(home, make_prompt(console, *answers), console,
                        root=tmp_path, read_secret=no_secret)
@@ -407,7 +407,7 @@ def test_choosing_no_effort_cancels_the_shipped_default(tmp_path):
     home = tmp_path / "home"
     console = make_console()
     # strong: model 1, effort "none" (4th); middle: 1, medium; light: 1, none
-    answers = ["anthropic", "1", "4", "1", "1", "1", "1", "2"]
+    answers = ["anthropic", "custom", "1", "4", "1", "1", "1", "1", "2"]
 
     run_provider_setup(home, make_prompt(console, *answers), console, root=tmp_path,
                        read_secret=no_secret)
@@ -441,7 +441,7 @@ def test_anthropic_saves_the_first_credential_name(tmp_path):
     home = tmp_path / "home"
     console = make_console()
     secret = fake_secret("sk-ant")
-    answers = ["anthropic"] + ["1"] * 6 + ["1"]
+    answers = ["anthropic", "custom"] + ["1"] * 6 + ["1"]
 
     run_provider_setup(home, make_prompt(console, *answers), console, root=tmp_path,
                        read_secret=secret)
@@ -453,7 +453,7 @@ def test_anthropic_saves_the_first_credential_name(tmp_path):
 def test_an_empty_key_saves_nothing(tmp_path):
     home = tmp_path / "home"
     console = make_console()
-    answers = ["openrouter"] + ["1"] * 6 + ["1"]
+    answers = ["openrouter", "custom"] + ["1"] * 6 + ["1"]
 
     run_provider_setup(home, make_prompt(console, *answers), console, root=tmp_path,
                        read_secret=fake_secret("  "))
@@ -493,7 +493,7 @@ def test_a_symlinked_user_config_is_replaced_by_a_regular_file(tmp_path):
     link.symlink_to(target)
     console = make_console()
 
-    run_provider_setup(home, make_prompt(console, "ollama", *["1"] * 6), console,
+    run_provider_setup(home, make_prompt(console, "ollama", "custom", *["1"] * 6), console,
                        root=tmp_path, list_models=lister("m"))
 
     assert not link.is_symlink()
@@ -511,7 +511,7 @@ def test_the_rewrite_keeps_other_settings_and_drops_old_providers(tmp_path):
         "agents:\n  spec: {provider: ollama, model: old}\n")
     console = make_console()
 
-    run_provider_setup(home, make_prompt(console, "ollama", *["1"] * 6), console,
+    run_provider_setup(home, make_prompt(console, "ollama", "custom", *["1"] * 6), console,
                        root=tmp_path, list_models=lister("m"))
 
     data = user_config(home)
@@ -528,7 +528,7 @@ def test_an_unreadable_user_config_is_simply_replaced(tmp_path, content):
     (home / ".k0ntrol" / "config.yaml").write_text(content)
     console = make_console()
 
-    run_provider_setup(home, make_prompt(console, "ollama", *["1"] * 6), console,
+    run_provider_setup(home, make_prompt(console, "ollama", "custom", *["1"] * 6), console,
                        root=tmp_path, list_models=lister("m"))
 
     assert set(user_config(home)) == {"agents", "helpers"}
@@ -537,7 +537,7 @@ def test_an_unreadable_user_config_is_simply_replaced(tmp_path, content):
 def test_no_secret_is_ever_written_to_the_config(tmp_path):
     home = tmp_path / "home"
     console = make_console()
-    answers = ["bedrock"] + ["1"] * 6 + ["1", "save"]
+    answers = ["bedrock", "custom"] + ["1"] * 6 + ["1", "save"]
 
     path = run_provider_setup(home, make_prompt(console, *answers), console, root=tmp_path,
                               read_secret=fake_secret("topsecret"))
@@ -545,3 +545,75 @@ def test_no_secret_is_ever_written_to_the_config(tmp_path):
     assert "topsecret" not in path.read_text()
     assert load_config(tmp_path, home_dir=home)["providers"]["bedrock"]["params"] == {
         "region_name": "us-east-1"}
+
+
+# --- the quick path: recommended models in one answer ---------------------------
+
+
+def test_recommended_models_take_one_answer_for_a_hosted_provider(tmp_path):
+    home = tmp_path / "home"
+    console = make_console()
+
+    run_provider_setup(home, make_prompt(console, "anthropic", "quick", "env"), console,
+                       root=tmp_path, read_secret=no_secret)
+
+    data = user_config(home)
+    assert data["agents"]["spec"] == {"provider": "anthropic", "model": "claude-opus-5-5", "effort": "high"}
+    assert data["agents"]["coder"] == {"provider": "anthropic", "model": "claude-sonnet-5-5", "effort": "medium"}
+    assert data["agents"]["chatty"] == {"provider": "anthropic", "model": "claude-haiku-5-5"}
+    assert screens._HOW in screen(console)
+    picks = screens._recommended("anthropic", None)
+    assert screens._quick_label(picks) == "Recommended: Claude Opus 5.5 · Claude Sonnet 5.5 · Claude Haiku 5.5"
+
+
+def test_bedrock_recommends_its_tested_models(tmp_path):
+    home = tmp_path / "home"
+    console = make_console()
+
+    run_provider_setup(home, make_prompt(console, "bedrock", "quick", "1", "env"), console,
+                       root=tmp_path, read_secret=no_secret)
+
+    data = user_config(home)
+    assert data["agents"]["spec"]["model"] == "qwen.qwen3-next-80b-a3b"
+    assert data["agents"]["coder"]["model"] == "qwen.qwen3-coder-next"
+    assert data["providers"]["bedrock"]["params"]["region_name"] == "us-east-1"
+
+
+def test_a_local_provider_offers_one_installed_model_for_every_agent(tmp_path):
+    home = tmp_path / "home"
+    console = make_console()
+
+    run_provider_setup(home, make_prompt(console, "ollama", "quick"), console,
+                       root=tmp_path, list_models=lister("qwen3:8b", "llama3.1"))
+
+    data = user_config(home)
+    assert {entry["model"] for entry in data["agents"].values()} == {"qwen3:8b"}
+    assert screens._quick_label(screens._recommended("ollama", ["qwen3:8b"])) == "Use qwen3:8b for every agent"
+
+
+def test_placeholder_models_are_never_recommended(tmp_path):
+    seen = []
+
+    class Spy:
+        def choose(self, question, options):
+            seen.append(question)
+            return options[0][0]
+
+    assert screens._ask_tiers(Spy(), "openai", None)["strong"]["model"] == "gpt-6.1-terra"
+    assert screens._HOW not in seen
+
+
+
+def test_a_local_provider_that_is_down_lets_you_choose_another(tmp_path):
+    home = tmp_path / "home"
+    console = make_console()
+
+    def down(provider, base_url):
+        raise ConnectionError("refused")
+
+    answers = ["ollama", "back", "anthropic", "quick", "env"]
+    run_provider_setup(home, make_prompt(console, *answers), console, root=tmp_path,
+                       list_models=down, read_secret=no_secret)
+
+    assert user_config(home)["agents"]["spec"]["provider"] == "anthropic"
+    assert "<urlopen" not in screen(console)
