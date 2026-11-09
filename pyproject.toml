@@ -21,6 +21,12 @@ openrouter = ["langchain-openrouter>=0.2.9,<1"]
 aws = ["langchain-aws>=1.9.0,<2"]
 google = ["langchain-google-genai>=4.4.2,<5"]
 langfuse = ["langfuse>=5.0.4,<6"]
+# The same OpenTelemetry pins langfuse 5.x needs, without langfuse itself.
+otel = [
+    "opentelemetry-api>=1.45.0,<2",
+    "opentelemetry-sdk>=1.45.0,<2",
+    "opentelemetry-exporter-otlp-proto-http>=1.45.0,<2",
+]
 # Every provider at once: `uv tool install --editable ".[all]"` gives a global `k0`.
 all = ["k0ntrol[ollama,openai,anthropic,openrouter,aws,google]"]
 

@@ -42,9 +42,9 @@ from k0ntrol.events import (  # noqa: E402
     events_path,
     new_run_id,
 )
-from k0ntrol.langfuse import build_trace  # noqa: E402
 from k0ntrol.memory.refresh import refresh_memory  # noqa: E402
 from k0ntrol.memory.scan import ScanError  # noqa: E402
+from k0ntrol.otel import build_run_trace, otel_callbacks  # noqa: E402
 from k0ntrol.providers import free_checks, has_errors, report_lines  # noqa: E402
 from k0ntrol.tracker import TRUSTED_ASSOCIATIONS, TrackerError  # noqa: E402
 from k0ntrol.tracker.github import GhTracker, subprocess_runner  # noqa: E402
@@ -136,7 +136,7 @@ def start(
     check: Callable = free_checks,
     scan: Callable = refresh_memory,
     tracker=None,
-    tracing: Callable = build_trace,
+    tracing: Callable = build_run_trace,
     session: str | None = None,
 ) -> Result:
     """Start a run of ``kind`` for ``input``.
@@ -199,7 +199,7 @@ def resume(
     init: Callable = init_chat_model,
     scan: Callable = refresh_memory,
     tracker=None,
-    tracing: Callable = build_trace,
+    tracing: Callable = build_run_trace,
     session: str | None = None,
 ) -> Result:
     """Continue run ``run_id`` with the human's ``decision``.
@@ -536,6 +536,7 @@ def _runnable(run_id: str, ctx: RunContext, session_id=None) -> dict:
     if ctx.trace is not None and ctx.trace.handler is not None:
         config["callbacks"].append(ctx.trace.handler)
         config["metadata"] = _langfuse_metadata(ctx.kind, session_id)
+    config["callbacks"].extend(otel_callbacks(ctx.trace))
     return config
 
 
