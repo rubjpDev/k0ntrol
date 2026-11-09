@@ -227,12 +227,25 @@ def _by_agent(models: list[dict]) -> list[dict]:
 
 
 def _by_day(models: list[dict]) -> list[dict]:
-    days: dict[str, float] = defaultdict(float)
+    """Spend per UTC day, split by agent and by model for the spend board."""
+    days: dict[str, dict] = {}
     for model in models:
         day = str(model.get("ts", ""))[:10]
         if len(day) == 10:
-            days[day] += model.get("cost", 0.0)
-    return [{"day": day, "cost": cost} for day, cost in sorted(days.items())]
+            _add_to_day(days.setdefault(day, _empty_day(day)), model)
+    return [days[day] for day in sorted(days)]
+
+
+def _empty_day(day: str) -> dict:
+    return {"day": day, "cost": 0.0, "calls": 0, "agents": defaultdict(float), "models": defaultdict(float)}
+
+
+def _add_to_day(row: dict, model: dict) -> None:
+    cost = model.get("cost", 0.0)
+    row["cost"] += cost
+    row["calls"] += 1
+    row["agents"][str(model.get("agent") or model.get("helper") or "unknown")] += cost
+    row["models"][str(model.get("model") or "unknown")] += cost
 
 
 def _percentile(sorted_values: list[float], percent: int) -> float:

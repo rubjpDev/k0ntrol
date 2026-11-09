@@ -123,7 +123,27 @@ def test_by_agent_and_by_day_group_cost_and_tokens():
     agents = {a["name"]: a for a in result["by_agent"]}
     assert agents["coder"]["cost"] == 3.0 and agents["coder"]["tokens_in"] == 30
     assert agents["router"]["helper"] is True and agents["coder"]["helper"] is False
-    assert result["by_day"] == [{"day": "2026-11-08", "cost": 1.0}, {"day": "2026-11-09", "cost": 6.0}]
+    assert [(d["day"], d["cost"], d["calls"]) for d in result["by_day"]] == [
+        ("2026-11-08", 1.0, 1), ("2026-11-09", 6.0, 2)
+    ]
+
+
+def test_each_day_splits_its_cost_by_agent_and_by_model():
+    result = analytics([
+        model("2026-11-09T01:00:00.000Z", cost_usd=2.0),
+        model("2026-11-09T02:00:00.000Z", cost_usd=0.5, model="claude-opus-5-5"),
+        model("2026-11-09T03:00:00.000Z", cost_usd=4.0, agent=None, helper="router"),
+    ])
+    (day,) = result["by_day"]
+    assert day["agents"] == {"coder": 2.5, "router": 4.0}
+    assert day["models"] == {"qwen.qwen3-next-80b-a3b": 6.0, "claude-opus-5-5": 0.5}
+
+
+def test_the_page_opens_dark_with_a_theme_switch_and_a_spend_board():
+    page = render_page(build_data([]))
+    assert '<html lang="en" data-theme="dark">' in page
+    assert 'id="theme-toggle"' in page
+    assert 'data-tab="spend"' in page and 'id="spend"' in page
 
 
 def test_latency_percentiles_per_model_use_successful_calls_only():
@@ -212,8 +232,8 @@ def test_page_is_self_contained():
     page = render_page(build_data([]))
     assert "http://" not in page.replace("http://www.w3.org/2000/svg", "")
     assert "https://" not in page
-    assert "prefers-color-scheme" in page
-    for tab in ("Runs", "Log", "Analytics"):
+    assert '[data-theme="light"]' in page  # light is one switch away
+    for tab in ("Runs", "Spend", "Log", "Analytics"):
         assert tab in page
 
 
