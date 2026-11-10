@@ -1,5 +1,7 @@
 # The tracker's work item carries the work, and k0 never merges
 
+> Partly superseded by [ADR 0012](0012-work-is-planned-on-the-tracker-as-a-spec-and-its-tickets.md): a Q&A definition publishes a spec and its tickets in place of SPEC's brief comment. The tracker still carries the work, and k0 still never merges.
+
 From 0.1.0, the work item in the repo's tracker carries what an agent is asked to do, in place of the `spec.md` and `review.md` files in the repo root. In `/full`:
 
 - SPEC's output is posted on the issue as an agent brief comment, which is the contract; the issue body stays the human's request. The spec gate is recorded on the issue.

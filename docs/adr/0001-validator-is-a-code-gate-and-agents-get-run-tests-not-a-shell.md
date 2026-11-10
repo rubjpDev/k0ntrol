@@ -1,5 +1,7 @@
 # VALIDATOR is a code gate, and coding agents get `run_tests`, not a shell
 
+> Partly superseded by [ADR 0011](0011-one-implementer-builds-red-to-green-slices-under-a-code-guard.md): IMPLEMENTER replaces TESTER and CODER. `run_tests`, no shell, and VALIDATOR as a code gate stand.
+
 In 0.1.0, VALIDATOR has no model. It is a deterministic gate node that runs `test_cmd` and the configured `gates`, and on a red result CODER gets the raw output and finds the files to fix with its own read tools, so the old failure summary and `redo:` file list are gone. No agent gets a general shell: TESTER and CODER get one `run_tests` tool, which runs the configured `test_cmd` as an argv list, optionally narrowed to existing test paths, so they can see red and work toward green without choosing a command. SPEC, REVIEWER and CHATTY run nothing. We chose this because the invariant says gates are code, and a shell tool would need the sandboxing and allowlist work that 0.1.0 has not specified yet; agents that read code themselves no longer need a model to summarize failures for them.
 
 ## Considered Options

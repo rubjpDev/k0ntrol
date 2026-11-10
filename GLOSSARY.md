@@ -7,8 +7,32 @@ k0ntrol (`k0`) is a local harness for coding agents: a human defines work and ap
 ### Workflow
 
 **Agent**:
-A model with its own prompt and tool allowlist that the harness runs with fresh context: SPEC, TESTER, CODER and REVIEWER as nodes of the workflow graph, CHATTY on its own for `/ask`.
+A model with its own prompt and tool allowlist that the harness runs with fresh context: PLANNER, RESEARCHER, IMPLEMENTER and REVIEWER as nodes of the workflow graph, CHATTY on its own for `/ask`.
 _Avoid_: Mode, worker, bot
+
+**PLANNER**:
+The agent that runs a Q&A definition with the human and turns its answers into the work to build.
+_Avoid_: SPEC, griller, interviewer
+
+**Q&A definition**:
+The planning session in which PLANNER asks the human numbered questions in rounds, each with its recommended answer, until nothing is left to decide or the question limit is reached.
+_Avoid_: Grilling, interview, refinement
+
+**RESEARCHER**:
+The read-only agent that answers a research decision ticket from primary sources on the web and proposes the decision, with citations.
+_Avoid_: Searcher, crawler
+
+**IMPLEMENTER**:
+The agent that builds one piece of work test-first, one red-to-green slice at a time; the harness lets it change code only after a new test has failed.
+_Avoid_: TESTER, CODER (the two roles it replaces), developer
+
+**Conventions review**:
+REVIEWER's judgement of a change against the repo's documented coding rules and a fixed list of code smells, leaving anything a gate already checks to the gate.
+_Avoid_: Standards review, style review, lint
+
+**Contract review**:
+REVIEWER's judgement of a change against its work item: what is missing, what was not asked for, and what looks wrong.
+_Avoid_: Spec review, acceptance review
 
 **Workflow graph**:
 The graph of agents and the code-defined edges that decide which agent runs next.
@@ -35,7 +59,7 @@ One execution of the workflow graph for one work item, or for one `/fast` task, 
 _Avoid_: Job, session, attempt
 
 **Limit**:
-A cap the harness enforces on how many model calls one agent run may make, or how many automatic attempts one loop of a run may take. Hitting one pauses the run until the human retries or stops it.
+A cap the harness enforces on how many model calls one agent run may make, how many automatic attempts one loop of a run may take, or how many questions one Q&A definition may ask. Hitting one pauses the run until the human decides how it goes on.
 _Avoid_: Budget, quota
 
 **Event**:
@@ -53,8 +77,32 @@ The issue system a repo picks at `k0 init` (GitHub, GitLab, Linear, Jira) where 
 _Avoid_: Backlog, board
 
 **Work item**:
-One issue or ticket in the tracker; the carrier of what an agent is asked to do.
-_Avoid_: Spec file, task file, ticket (when meaning the tracker-agnostic concept)
+One issue in the tracker (a GitHub issue, a Jira or Linear task); the carrier of what an agent is asked to do. A spec, a ticket, a map and a decision ticket are all work items.
+_Avoid_: Spec file, task file
+
+**Spec**:
+The parent work item a Q&A definition produces: the problem, the solution, the user stories and the decisions, with its tickets beneath it. In Jira terms, an epic.
+_Avoid_: Epic (outside Jira), brief, design doc
+
+**Ticket**:
+A child work item of a spec: one thin slice that works end to end, names the tickets that block it, and is sized for one IMPLEMENTER run.
+_Avoid_: Task (alone), story, subtask
+
+**Map**:
+The work item `/research` charts when a question is too foggy to settle in one Q&A definition: its destination, the decisions so far, and decision tickets beneath it.
+_Avoid_: Roadmap, research plan
+
+**Decision ticket**:
+A child work item of a map whose resolution is a decision, not code.
+_Avoid_: Spike, research ticket
+
+**Agent brief**:
+The comment triage posts on a raw work item to make it ready for an agent: what to build, the seams and the acceptance criteria.
+_Avoid_: Spec (a brief is not a spec), triage notes
+
+**Seam**:
+The public boundary a piece of work is tested at, agreed with the human before the first test; IMPLEMENTER writes tests nowhere else.
+_Avoid_: Test boundary, test surface
 
 **Trusted author**:
 A tracker account with write access to the repo. Only trusted authors' content in a work item reaches agents.
