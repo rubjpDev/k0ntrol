@@ -1,5 +1,7 @@
 # Tool safety in 0.1.0 is process hygiene and code guards, not a sandbox
 
+> Amended by [ADR 0013](0013-planner-and-researcher-get-read-only-network-tools.md): PLANNER and RESEARCHER get read-only network tools. The other guards stand.
+
 In 0.1.0, agent-written code runs unsandboxed, with network access, as the user. k0 limits what that code and the agents can reach with checks in code instead of an OS sandbox:
 
 - **Test commands.** Every run of `test_cmd` or `gates` (`run_tests`, the red check, VALIDATOR) gets a scrubbed environment, with provider and tracker vendor variables and secret-shaped names (`*_KEY`, `*_TOKEN`, `*_SECRET`) removed. It also gets a configurable `test_timeout` (default 600 s; a timeout counts as red), and its output is truncated before an agent sees it.
