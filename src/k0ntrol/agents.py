@@ -55,7 +55,7 @@ from k0ntrol.tools.read import make_grep, make_list_files, make_read_file
 from k0ntrol.tools.run_tests import make_run_tests
 from k0ntrol.tools.search_memory import make_search_memory
 from k0ntrol.tools.tracker import tracker_read_tools
-from k0ntrol.tools.write import make_edit_file, make_write_file
+from k0ntrol.tools.write import WriteScope, make_edit_file, make_write_file
 
 _BASE_READ_TOOLS = (
     "read_file",
@@ -82,7 +82,7 @@ ALLOWLISTS: dict[str, tuple[str, ...]] = {
 }
 
 # TESTER writes test paths only, CODER non-test paths only (spec story 9).
-_WRITE_SCOPES = {"tester": "test", "coder": "non_test"}
+_WRITE_SCOPES: dict[str, WriteScope] = {"tester": "test", "coder": "non_test"}
 
 # A model→tools round costs four super-steps in the compiled agent graph
 # (before_model, model, after_model, tools), plus start/end bookkeeping.
@@ -216,9 +216,9 @@ def build_agent(
         model,
         tools=checked,
         system_prompt=_system_prompt(name, root),
-        response_format=_RESPONSE_FORMATS.get(name),
+        response_format=_RESPONSE_FORMATS.get(name),  # type: ignore[arg-type]
         middleware=[
-            ModelCallLimitMiddleware(
+            ModelCallLimitMiddleware(  # type: ignore[list-item]
                 run_limit=entry["model_calls"], exit_behavior="end"
             ),
             ModelRetryMiddleware(
@@ -227,7 +227,7 @@ def build_agent(
                 on_failure="error",
             ),
             ContextEditingMiddleware(
-                edits=[ClearSeenToolResults(exclude_tools=("read_work_item",))]
+                edits=[ClearSeenToolResults(exclude_tools=("read_work_item",))],  # type: ignore[list-item]
             ),
             ToolNameMiddleware(),
             ToolErrorMiddleware(),
@@ -305,7 +305,7 @@ class ToolNameMiddleware(AgentMiddleware):
         handler: Callable[[ModelRequest], ModelResponse],
     ) -> ModelResponse:
         messages = [_clean_tool_names(message) for message in request.messages]
-        return handler(request.override(messages=messages))
+        return handler(request.override(messages=messages))  # type: ignore[arg-type]
 
 
 def _clean_tool_names(message: BaseMessage) -> BaseMessage:
@@ -387,19 +387,22 @@ def _system_prompt(name: str, root: Path) -> str:
 def _tool_factories(
     agent: str, *, root: Path, cfg: dict | None, tracker, init: Callable
 ) -> dict[str, Callable[[], BaseTool]]:
-    scope = _WRITE_SCOPES.get(agent)
-    return {
+    factories: dict[str, Callable[[], BaseTool]] = {
         "read_file": lambda: make_read_file(root),
         "list_files": lambda: make_list_files(root),
         "grep": lambda: make_grep(root),
         "bulk_read": lambda: make_bulk_read(root, cfg, init=init),
         "search_memory": lambda: make_search_memory(root),
-        "write_file": lambda: make_write_file(root, scope),
-        "edit_file": lambda: make_edit_file(root, scope),
         "run_tests": lambda: make_run_tests(root, _need_cfg(cfg)),
         "read_work_item": lambda: _tracker_tool("read_work_item", tracker),
         "read_change_diff": lambda: _tracker_tool("read_change_diff", tracker),
     }
+    scope = _WRITE_SCOPES.get(agent)
+    if scope is not None:
+        policy: WriteScope = scope
+        factories["write_file"] = lambda: make_write_file(root, policy)
+        factories["edit_file"] = lambda: make_edit_file(root, policy)
+    return factories
 
 
 def _need_cfg(cfg: dict | None) -> dict:

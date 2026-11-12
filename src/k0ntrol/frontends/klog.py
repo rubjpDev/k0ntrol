@@ -370,7 +370,8 @@ class Klog:
     def address(self) -> tuple[str, int]:
         """Host and port the running server listens on."""
         assert self._server is not None
-        return self._server.server_address[:2]
+        host, port = self._server.server_address[:2]
+        return str(host), port
 
     def open(self, root: Path) -> str:
         """Regenerate the page, make sure it is served, open it; return its URL."""

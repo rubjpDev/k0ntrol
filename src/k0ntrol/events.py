@@ -195,7 +195,7 @@ class EventWriter:
 
     def emit(self, kind: str, **fields: Any) -> dict:
         """Append one event. `None` fields are omitted; `err` is masked."""
-        event = {"ts": _now_iso(), "kind": kind}
+        event: dict[str, Any] = {"ts": _now_iso(), "kind": kind}
         event["run" if self._run else "chat"] = self._run or self._chat
         err = fields.pop("err", None)
         for key, value in fields.items():

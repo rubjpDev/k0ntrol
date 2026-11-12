@@ -266,11 +266,12 @@ def _provider_membership(cfg: dict, entries: dict[str, dict]) -> list[Check]:
 
 
 def _used_providers(entries: dict[str, dict]) -> list[str]:
-    return sorted({e.get("provider") for e in entries.values()} - {None})
+    providers = {e.get("provider") for e in entries.values()}
+    return sorted(p for p in providers if p is not None)
 
 
 def _extra_checks(entries: dict[str, dict], importable: Callable[[str], bool]) -> list[Check]:
-    checks = []
+    checks: list[Check] = []
     for provider in _used_providers(entries):
         spec = REGISTRY.get(provider)
         if spec is None:
@@ -394,7 +395,7 @@ def _lmstudio_checks(base_url: str, models: list[str], fetch: Callable) -> list[
 
 def _model_checks(entries: dict[str, dict], cfg: dict,
                   init: Callable, environ: Mapping[str, str]) -> list[Check]:
-    checks = []
+    checks: list[Check] = []
     for label, entry in entries.items():
         provider = entry.get("provider")
         if provider not in REGISTRY:
@@ -528,7 +529,7 @@ def live_checks(
     in prose instead of calling ``_ping`` is an error.
     """
     entries = roster_entries(cfg, names)
-    seen = {}
+    seen: dict[tuple[Any, Any], tuple[str, dict]] = {}
     for label, entry in entries.items():
         seen.setdefault((entry.get("provider"), entry.get("model")), (label, entry))
     return [_live_check(label, entry, cfg, init, environ)

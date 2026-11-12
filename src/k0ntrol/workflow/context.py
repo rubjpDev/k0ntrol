@@ -34,7 +34,7 @@ class RunContext:
     init: Callable = init_chat_model
     tracker: Any = None
     scan: Callable = run_scan
-    writer: EventWriter | None = None
+    _writer: EventWriter | None = None
     handler: K0EventHandler | None = None
     trace: RunTrace | None = None
     session: str | None = None  # the REPL sitting's id, when there is one
@@ -42,8 +42,14 @@ class RunContext:
 
     def bind(self, writer: EventWriter) -> None:
         """Attach the run's event writer and its callback handler."""
-        self.writer = writer
+        self._writer = writer
         self.handler = K0EventHandler(writer)
+
+    @property
+    def writer(self) -> EventWriter:
+        """The bound event writer; ``bind`` runs before any node does."""
+        assert self._writer is not None
+        return self._writer
 
     @property
     def timeout(self) -> float:
@@ -52,7 +58,9 @@ class RunContext:
     @property
     def run_id(self) -> str:
         """The run id the bound event writer carries."""
-        return self.writer.run
+        run = self.writer.run
+        assert run is not None
+        return run
 
     @property
     def base_branch(self) -> str:

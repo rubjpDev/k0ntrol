@@ -21,6 +21,8 @@ jobs:
           enable-cache: true
       - name: Install dependencies
         run: uv sync
+      - name: Type check
+        run: uv run mypy src
       - name: Run tests with coverage
         run: uv run pytest -q --cov=k0ntrol --cov-fail-under=90
       - name: Check cognitive complexity

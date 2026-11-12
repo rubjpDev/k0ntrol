@@ -10,7 +10,7 @@ everything the pause needs: the reason, the node to show, the node a
 from collections.abc import Callable
 from typing import Any
 
-from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from langchain_core.messages import AIMessage, HumanMessage, ToolCall, ToolMessage
 from langgraph.types import interrupt
 
 from k0ntrol.tools.path_guard import is_test_path
@@ -318,7 +318,7 @@ def _written_paths(message, succeeded: set) -> list[str]:
     ]
 
 
-def _is_successful_write(call: dict, succeeded: set) -> bool:
+def _is_successful_write(call: ToolCall, succeeded: set) -> bool:
     return (
         call["name"] in _WRITE_TOOLS
         and call["id"] in succeeded

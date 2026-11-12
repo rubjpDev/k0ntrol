@@ -10,6 +10,7 @@ through a handful of methods (``read``, ``line``, ``event``, ``stream``,
 import time
 from collections.abc import Callable
 from pathlib import Path
+from typing import TextIO, cast
 
 import yaml
 from rich.console import Console
@@ -292,7 +293,7 @@ def _editor(console: Console, history: Path | None) -> LineEditor | None:
     if read_key is None:
         return None
     return LineEditor(
-        console.file, read_key=read_key, commands=COMMANDS,
+        cast(TextIO, console.file), read_key=read_key, commands=COMMANDS,
         history_path=history.with_name("prompt_history") if history else None,
         color=console.color_system is not None,
     )
