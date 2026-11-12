@@ -28,10 +28,11 @@ writer.
 
 Shared contract for tool refusals (the `denied` field): a tool refuses a
 call by raising an exception that carries a `denied` attribute with value
-`"allowlist"` or `"path_guard"`. The canonical class is
+`"allowlist"`, `"path_guard"` or `"slice_guard"`. The canonical class is
 `k0ntrol.tools.errors.ToolError` (raised with `denied="path_guard"` /
-`denied="allowlist"`); the handler accepts any exception with a truthy
-`denied` attribute, so tool code never depends on this module.
+`denied="allowlist"` / `denied="slice_guard"`); the handler accepts any
+exception with a truthy `denied` attribute, so tool code never depends on
+this module.
 """
 
 import json

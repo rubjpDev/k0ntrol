@@ -5,6 +5,7 @@ Every failure a tool wants an agent to see is a ``ToolError`` (a
 error ``ToolMessage`` the agent sees, since the tool node alone would
 re-raise it and end the run).
 A refusal carries ``denied`` — ``"path_guard"`` for a path-guard refusal,
+``"slice_guard"`` for a write the slice guard's state refuses,
 ``"allowlist"`` for a call to a tool outside the agent's allowlist — which
 the event handler copies into the ``tool`` event's ``denied`` field.
 Ordinary errors (file not found, ambiguous edit, bad regex) leave it ``None``.
@@ -14,7 +15,7 @@ from typing import Literal
 
 from langchain_core.tools import ToolException
 
-Denied = Literal["allowlist", "path_guard"]
+Denied = Literal["allowlist", "path_guard", "slice_guard"]
 
 
 class ToolError(ToolException):
