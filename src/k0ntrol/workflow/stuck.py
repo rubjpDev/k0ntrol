@@ -163,7 +163,7 @@ def _reason_lines(state: dict, limit: dict) -> list[str]:
 
 
 def _output_tail(state: dict, limit: dict) -> str:
-    output = limit.get("output") or state.get(_NODE_OUTPUT.get(state.get("node"), ""))
+    output = limit.get("output") or state.get(_NODE_OUTPUT.get(state.get("node") or "", ""))
     return str(output or "").rstrip()
 
 

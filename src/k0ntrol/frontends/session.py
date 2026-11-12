@@ -147,7 +147,7 @@ def _offer_mem_with_ui(ui, root: Path) -> None:
     """Reflect's Mem.md proposals as yes/no pickers, one per proposal."""
     for item in list_pending_mem_proposals(root):
         approved = ui.confirm(f"Add to Mem.md: {item['body']}") == "y"
-        apply_mem_decision(root, int(item["id"]), approved)
+        apply_mem_decision(root, int(str(item["id"])), approved)
 
 
 def _reflect_writer(ui, show: Callable[[str], None], transcript: Path) -> Callable[[str], None]:
@@ -338,13 +338,18 @@ def _run_ask(
 ) -> None:
     """Stream CHATTY's answer live; the transcript keeps one entry."""
     deltas: list[str] = []
+
+    def _on_text(delta: str) -> None:
+        stream(delta)
+        deltas.append(delta)
+
     try:
         result = ask(
             question,
             root=root,
             config=config,
             write=show,
-            on_text=lambda delta: (stream(delta), deltas.append(delta)),
+            on_text=_on_text,
             history=_chat_history(chat),
             session=session,
         )

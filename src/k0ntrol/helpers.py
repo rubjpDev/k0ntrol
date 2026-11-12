@@ -15,6 +15,7 @@ passes ``config={"callbacks": [K0EventHandler(...)]}`` itself.
 """
 
 from collections.abc import Callable
+from typing import Any
 
 from langchain.chat_models import init_chat_model
 from langchain_core.messages import HumanMessage
@@ -57,7 +58,7 @@ def _helper_caller(
     init: Callable,
     config: dict | None,
     schema: dict | None = None,
-) -> Callable[[str], object]:
+) -> Callable[[str], Any]:
     cache: dict = {}
 
     def invoke(prompt: str) -> object:

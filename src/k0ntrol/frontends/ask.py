@@ -11,6 +11,7 @@ inlined into the prompt.
 
 from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 from langchain.chat_models import init_chat_model
 from langchain_core.messages import HumanMessage
@@ -159,7 +160,7 @@ def _finish_ask(trace, outcome: str, root: Path, session: str | None) -> None:
 
 def _langfuse_metadata(session: str | None) -> dict:
     """Root-run metadata the Langfuse handler reads: ask tag + sitting."""
-    metadata = {"langfuse_tags": ["ask"]}
+    metadata: dict[str, Any] = {"langfuse_tags": ["ask"]}
     if session:
         metadata["langfuse_session_id"] = session
     return metadata

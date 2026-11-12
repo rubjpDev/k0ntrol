@@ -36,9 +36,11 @@ k0 = "k0ntrol.cli:main"
 [dependency-groups]
 dev = [
     "complexipy>=8.0.1",
+    "mypy>=1.15",
     "pytest>=8",
     "pytest-cov>=7.1.0",
     "pytest-xdist>=3.8.0",
+    "types-pyyaml>=6.0.12.20261111",
 ]
 
 [build-system]
@@ -48,3 +50,18 @@ build-backend = "hatchling.build"
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-n auto"
+
+[tool.mypy]
+python_version = "3.11"
+warn_unused_ignores = true
+
+# opentelemetry.* ships only in the optional `otel` extra.
+[[tool.mypy.overrides]]
+module = ["opentelemetry", "opentelemetry.*"]
+ignore_missing_imports = true
+
+# langgraph's StateGraph generics reject dict-in/dict-out node callables;
+# only the two graph-wiring modules are exempt, and only for call-overload.
+[[tool.mypy.overrides]]
+module = ["k0ntrol.workflow.fast", "k0ntrol.workflow.full"]
+disable_error_code = ["call-overload"]

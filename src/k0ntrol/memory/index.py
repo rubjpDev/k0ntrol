@@ -110,7 +110,7 @@ def _replace_index(
 
 def _fact_rows(facts: list[dict[str, object]]) -> list[tuple[str, str, str, str]]:
     return [
-        (fact_entry_id(int(item["id"])), "fact", "session.sqlite", str(item["body"]))
+        (fact_entry_id(int(str(item["id"]))), "fact", "session.sqlite", str(item["body"]))
         for item in facts
     ]
 
