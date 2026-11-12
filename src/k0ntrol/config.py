@@ -10,7 +10,7 @@ class ConfigError(Exception):
     """Raised when configuration cannot be read or is invalid."""
 
 
-AGENTS = ("spec", "tester", "coder", "reviewer", "chatty")
+AGENTS = ("planner", "researcher", "implementer", "spec", "tester", "coder", "reviewer", "chatty")
 HELPERS = ("bulk_read", "reflect")
 
 _AGENT_KEYS = {"provider", "model", "effort", "params", "model_calls"}

@@ -216,6 +216,27 @@ def test_anthropic_provider_flag_writes_claude_defaults_to_user_config(tmp_path)
     assert all("model_calls" not in e for e in cfg["agents"].values())
 
 
+def test_init_maps_the_new_agents_onto_their_tiers(tmp_path):
+    code, _ = init_lines(tmp_path, tracker="github", provider="anthropic")
+    assert code == 0
+    cfg = read_user_config(tmp_path / "home")
+    assert cfg["agents"]["planner"] == {
+        "provider": "anthropic",
+        "model": "claude-opus-5-5",
+        "effort": "high",
+    }
+    assert cfg["agents"]["researcher"] == {
+        "provider": "anthropic",
+        "model": "claude-sonnet-5-5",
+        "effort": "medium",
+    }
+    assert cfg["agents"]["implementer"] == {
+        "provider": "anthropic",
+        "model": "claude-sonnet-5-5",
+        "effort": "medium",
+    }
+
+
 def test_openrouter_and_bedrock_get_claude_defaults_in_their_model_ids(tmp_path):
     for provider, prefix in (
         ("openrouter", "anthropic/claude-"),
