@@ -31,7 +31,7 @@ def _guard_writable(path: str, root: Path, scope: WriteScope) -> Path:
 def _check_scope(scope: str) -> WriteScope:
     if scope not in _SCOPES:
         raise ValueError(f"scope must be one of {_SCOPES}, got {scope!r}")
-    return scope  # type: ignore[return-value]
+    return scope
 
 
 def make_write_file(root: Path, scope: WriteScope) -> BaseTool:

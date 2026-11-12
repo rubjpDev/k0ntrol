@@ -90,7 +90,7 @@ def offer_mem_proposals(
     """Show pending Mem.md proposals at the session prompt, not mid-turn."""
     for item in list_pending_mem_proposals(root):
         write(f"Mem.md += {item['body']}? y/n")
-        apply_mem_decision(root, int(item["id"]), _read_yn(read_line, write) == "y")
+        apply_mem_decision(root, int(str(item["id"])), _read_yn(read_line, write) == "y")
 
 
 def apply_mem_decision(root: Path, proposal_id: int, approved: bool) -> None:

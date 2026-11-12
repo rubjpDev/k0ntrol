@@ -19,7 +19,8 @@ def add_fact(root: Path, body: str) -> int | None:
         conn.commit()
         if cursor.rowcount == 0:
             return None
-        return int(cursor.lastrowid)
+        assert cursor.lastrowid is not None
+        return cursor.lastrowid
     finally:
         conn.close()
 
@@ -34,7 +35,8 @@ def add_mem_proposal(root: Path, body: str) -> int | None:
         conn.commit()
         if cursor.rowcount == 0:
             return None
-        return int(cursor.lastrowid)
+        assert cursor.lastrowid is not None
+        return cursor.lastrowid
     finally:
         conn.close()
 

@@ -53,6 +53,7 @@ Run from the repo root:
 - Tests: `uv run pytest -q`
 - Tests (while iterating): `uv run pytest -q <file or node id>`
 - Complexity: `uv run complexipy src --max-complexity-allowed 6`
+- Typecheck: `uv run mypy src`
 - Coverage: `uv run pytest --cov=k0ntrol --cov-fail-under=90`
 - CLI: `uv run k0 --help`
 

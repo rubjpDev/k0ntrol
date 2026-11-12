@@ -26,8 +26,11 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any, Literal, cast
 
 from langchain.chat_models import init_chat_model
+from langchain_core.callbacks import BaseCallbackHandler
+from langchain_core.runnables import RunnableConfig
 from langgraph.types import Command
 
 os.environ.setdefault("LANGGRAPH_STRICT_MSGPACK", "true")
@@ -149,6 +152,7 @@ def start(
     """
     if kind not in _BUILDERS:
         raise RunRefused(f"unknown run: {kind}")
+    kind = cast(Literal["full", "fast"], kind)  # _BUILDERS holds only those
     input_text = _checked_input(kind, input)
     tracker = _tracker_for(kind, cfg, root, tracker)
     conn, saver = _open_checkpoints(root)
@@ -272,7 +276,9 @@ def open_runs(saver: SqliteSaver, ctx: RunContext) -> list[tuple[str, str, dict]
     }
     open_ = []
     for thread_id in sorted(threads):
-        graph = graphs[_run_kind(saver, thread_id)]
+        kind = _run_kind(saver, thread_id)
+        assert kind is not None
+        graph = graphs[kind]
         state = graph.get_state(_thread(thread_id))
         if state.next:
             open_.append((thread_id, state.next[0], state.values))
@@ -404,7 +410,7 @@ def _tracker_for(kind: str, cfg: dict, root: Path, tracker):
 
 
 def _log_failed(
-    ctx: RunContext, graph, config: dict, run_id: str, session_id
+    ctx: RunContext, graph, config: RunnableConfig, run_id: str, session_id
 ) -> Outcome:
     """A broken event log ends the run stuck (events contract, #16).
 
@@ -420,7 +426,7 @@ def _log_failed(
     return Outcome(run=run_id, outcome="stuck", reason=reason, node=node)
 
 
-def _stuck_by_log(graph, config: dict, state):
+def _stuck_by_log(graph, config: RunnableConfig, state):
     """Run the stuck effects; a pass already marked ``event_log`` just continues.
 
     Resuming a run whose log is still broken lands here again, and must
@@ -502,7 +508,7 @@ def _initial_state(kind: str, input_text: str, cfg: dict, item=None) -> dict:
 
 def _full_state(task: str, item) -> dict:
     """The ``/full`` fields layered over the shared run state."""
-    state = {
+    state: dict[str, Any] = {
         "task": task,
         "item_ref": None,
         "item_title": "",
@@ -525,18 +531,20 @@ def _full_state(task: str, item) -> dict:
     return state
 
 
-def _runnable(run_id: str, ctx: RunContext, session_id=None) -> dict:
+def _runnable(run_id: str, ctx: RunContext, session_id=None) -> RunnableConfig:
     config = _thread(run_id)
-    config["callbacks"] = [ctx.handler]
+    assert ctx.handler is not None
+    callbacks: list[BaseCallbackHandler] = [ctx.handler]
+    config["callbacks"] = callbacks
     # Always explicit (langgraph's default is a safety net, not a budget):
     # each loop-back costs at most two super-steps per agent node.
     attempts = ctx.cfg.get("max_attempts", 2)
     slack = 16 if ctx.kind == "full" else _OUTER_STEPS_SLACK
     config["recursion_limit"] = _OUTER_STEPS_PER_ATTEMPT * attempts + slack
     if ctx.trace is not None and ctx.trace.handler is not None:
-        config["callbacks"].append(ctx.trace.handler)
+        callbacks.append(ctx.trace.handler)
         config["metadata"] = _langfuse_metadata(ctx.kind, session_id)
-    config["callbacks"].extend(otel_callbacks(ctx.trace))
+    callbacks.extend(otel_callbacks(ctx.trace))
     return config
 
 
@@ -589,11 +597,11 @@ def _trace_finish(ctx: RunContext, outcome: str, session_id, values: dict) -> No
     )
 
 
-def _thread(run_id: str) -> dict:
+def _thread(run_id: str) -> RunnableConfig:
     return {"configurable": {"thread_id": run_id}}
 
 
-def _run_kind(saver: SqliteSaver, run_id: str) -> str | None:
+def _run_kind(saver: SqliteSaver, run_id: str) -> Literal["full", "fast"] | None:
     """The run's kind, read from the checkpoint before a graph is built."""
     tuple_ = saver.get_tuple(_thread(run_id))
     if tuple_ is None:
@@ -609,12 +617,13 @@ def _refuse_finished(state, run_id: str) -> None:
 
 
 def _advance(
-    ctx: RunContext, graph, state, decision: str | None, config: dict
+    ctx: RunContext, graph, state, decision: str | None, config: RunnableConfig
 ) -> None:
     if state.interrupts and decision is None:
         return  # nothing answered: _finish shows the gate again
     if state.interrupts:
         payload = state.interrupts[0].value
+        assert decision is not None
         _check_decision(payload, decision)
         ctx.writer.gate(payload["gate"], _gate_result(decision))
         graph.invoke(Command(resume=decision), config=config, durability="sync")
@@ -656,7 +665,7 @@ def _gate_result(decision: str) -> str:
     return _DECISIONS.get(_decision_verb(decision), _decision_verb(decision))
 
 
-def _finish(ctx: RunContext, graph, run_id: str, config: dict) -> Result:
+def _finish(ctx: RunContext, graph, run_id: str, config: RunnableConfig) -> Result:
     state = graph.get_state(config)
     if state.interrupts:
         if ctx.trace is not None:
