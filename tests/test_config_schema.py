@@ -21,6 +21,9 @@ def test_default_gates_are_empty(cfg):
 
 def test_shipped_agent_defaults_match_the_spec(cfg):
     assert cfg["agents"] == {
+        "planner": {"provider": "anthropic", "model": "claude-opus-5-5", "effort": "high", "model_calls": 25},
+        "researcher": {"provider": "anthropic", "model": "claude-sonnet-5-5", "effort": "medium", "model_calls": 40},
+        "implementer": {"provider": "anthropic", "model": "claude-sonnet-5-5", "effort": "medium", "model_calls": 100},
         "spec": {"provider": "anthropic", "model": "claude-opus-5-5", "effort": "high", "model_calls": 25},
         "tester": {"provider": "anthropic", "model": "claude-sonnet-5-5", "effort": "medium", "model_calls": 40},
         "coder": {"provider": "anthropic", "model": "claude-sonnet-5-5", "effort": "medium", "model_calls": 60},
