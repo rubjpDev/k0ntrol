@@ -19,11 +19,11 @@ def parse_frontmatter(path: Path) -> tuple[dict, str]:
 @pytest.mark.parametrize(
     ("profile", "model"),
     [
-        ("standards-reviewer", "swe-2-medium"),
-        ("spec-reviewer", "swe-2-high"),
-        ("researcher", "swe-2-high"),
-        ("merger", "swe-2-medium"),
-        ("design-variant", "swe-2-max"),
+        ("standards-reviewer", "swe-2-flash-medium"),
+        ("spec-reviewer", "swe-2-flash-high"),
+        ("researcher", "gpt-6.1-sol-high"),
+        ("merger", "swe-2-flash-medium"),
+        ("design-variant", "gpt-6.1-sol-high"),
     ],
 )
 def test_migrated_profile_matches_legacy(profile: str, model: str) -> None:
@@ -45,13 +45,17 @@ def test_migrated_profile_matches_legacy(profile: str, model: str) -> None:
 def test_swe_worker_profile() -> None:
     fm, _body = parse_frontmatter(DEVIN_AGENTS / "swe-worker.md")
     assert fm["name"] == "swe-worker"
-    assert fm["model"] == "swe-2-high"
+    assert fm["model"] == "swe-2-flash-high"
 
 
-def test_every_devin_profile_uses_swe_2() -> None:
+def test_every_devin_profile_pins_a_known_model() -> None:
     for path in DEVIN_AGENTS.glob("*.md"):
         fm, _body = parse_frontmatter(path)
-        assert fm["model"] in ("swe-2-medium", "swe-2-high", "swe-2-max"), path.name
+        assert fm["model"] in (
+            "swe-2-flash-medium",
+            "swe-2-flash-high",
+            "gpt-6.1-sol-high",
+        ), path.name
 
 
 def routing_section() -> str:
@@ -91,7 +95,11 @@ def test_code_review_skill_uses_named_profiles() -> None:
     assert "spec-reviewer" in text
 
 
-DEVIN_TO_CLAUDE_EFFORT = {"swe-2-medium": "medium", "swe-2-high": "high", "swe-2-max": "max"}
+DEVIN_TO_CLAUDE_EFFORT = {
+    "swe-2-flash-medium": "medium",
+    "swe-2-flash-high": "high",
+    "gpt-6.1-sol-high": "high",
+}
 
 
 @pytest.mark.parametrize("path", sorted(DEVIN_AGENTS.glob("*.md")), ids=lambda p: p.stem)

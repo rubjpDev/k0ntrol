@@ -6,7 +6,7 @@ allowed-tools:
   - grep
   - glob
   - exec
-model: swe-2-high
+model: swe-2-flash-high
 ---
 
 You review a git diff against the originating spec. Do not edit files. Do not review coding style or smells.

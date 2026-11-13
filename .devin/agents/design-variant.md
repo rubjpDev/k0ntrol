@@ -6,7 +6,7 @@ allowed-tools:
   - grep
   - glob
   - exec
-model: swe-2-max
+model: gpt-6.1-sol-high
 ---
 
 You design one interface for a module under the design constraint in the prompt. Do not edit files.

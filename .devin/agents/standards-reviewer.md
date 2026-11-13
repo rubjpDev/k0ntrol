@@ -6,7 +6,7 @@ allowed-tools:
   - grep
   - glob
   - exec
-model: swe-2-medium
+model: swe-2-flash-medium
 ---
 
 You review a git diff for coding-standard violations. Do not edit files.
