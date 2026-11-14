@@ -695,3 +695,99 @@ def test_comment_change_is_noop_when_marker_present():
     tracker.comment_change("7", "gate ok", run="r1", node="review_gate")
 
     assert not any(c[:3] == ["gh", "pr", "comment"] for c in runner.calls)
+
+
+def test_link_blocked_by_adds_a_native_dependency_and_repeats_as_a_noop():
+    runner = FakeRunner()
+    runner.script(
+        ["gh", "api", "repos/{owner}/{repo}/issues/7"],
+        stdout=json.dumps(_issue({"number": 7, "id": 555000})),
+    )
+    deps = "repos/{owner}/{repo}/issues/42/dependencies/blocked_by"
+    runner.script(
+        ["gh", "api", "--paginate", "--slurp", deps],
+        stdout=json.dumps([[]]),
+    )
+    runner.script(["gh", "api", "-X", "POST", deps])
+    tracker = GhTracker(runner)
+
+    tracker.link_blocked_by("42", "7")
+
+    posts = [c for c in runner.calls if deps in c and "POST" in c]
+    assert posts == [
+        ["gh", "api", "-X", "POST", deps, "-F", "issue_id=555000"]
+    ]
+
+    runner.script(
+        ["gh", "api", "--paginate", "--slurp", deps],
+        stdout=json.dumps([[{"id": 555000, "number": 7}]]),
+    )
+    tracker.link_blocked_by("42", "7")
+
+    posts = [c for c in runner.calls if deps in c and "POST" in c]
+    assert len(posts) == 1
+
+
+def test_close_work_item_comments_then_closes_and_retries_without_reposting():
+    runner = FakeRunner()
+    runner.script(COMMENTS_ENDPOINT, stdout="[]")
+    runner.script(["gh", "issue", "comment"])
+    runner.script(["gh", "issue", "close"], returncode=1, stderr="boom")
+    tracker = GhTracker(runner)
+    marker = comment_marker("r1", "triage")
+
+    with pytest.raises(TrackerError, match="boom"):
+        tracker.close_work_item("42", "wontfix: duplicate", run="r1", node="triage")
+
+    runner.script(
+        COMMENTS_ENDPOINT,
+        stdout=json.dumps(
+            [
+                {
+                    "body": f"{marker}\n\nwontfix: duplicate",
+                    "user": {"login": "k0"},
+                    "author_association": "OWNER",
+                }
+            ]
+        ),
+    )
+    runner.script(["gh", "issue", "close"])
+    tracker.close_work_item("42", "wontfix: duplicate", run="r1", node="triage")
+
+    comments = [c for c in runner.calls if c[:3] == ["gh", "issue", "comment"]]
+    closes = [c for c in runner.calls if c[:3] == ["gh", "issue", "close"]]
+    assert comments == [
+        ["gh", "issue", "comment", "42", "--body", f"{marker}\n\nwontfix: duplicate"]
+    ]
+    assert closes == [["gh", "issue", "close", "42"]] * 2
+
+
+def test_read_labels_returns_the_work_items_current_label_names():
+    runner = FakeRunner()
+    runner.script(
+        ISSUE_ENDPOINT,
+        stdout=json.dumps(
+            _issue({"labels": [{"name": "bug"}, {"name": "ready-for-agent"}]})
+        ),
+    )
+    tracker = GhTracker(runner)
+
+    assert tracker.read_labels("42") == {"bug", "ready-for-agent"}
+    assert tracker.read_labels("#42") == {"bug", "ready-for-agent"}
+
+
+@pytest.mark.parametrize("ref", ["o/r#42", "four", ""])
+def test_new_work_item_ops_refuse_other_ref_forms(ref):
+    runner = FakeRunner()
+    tracker = GhTracker(runner)
+
+    with pytest.raises(TrackerError, match="expected a work item number"):
+        tracker.read_labels(ref)
+    with pytest.raises(TrackerError, match="expected a work item number"):
+        tracker.close_work_item(ref, "b", run="r", node="n")
+    with pytest.raises(TrackerError, match="expected a work item number"):
+        tracker.link_blocked_by(ref, "7")
+    with pytest.raises(TrackerError, match="expected a work item number"):
+        tracker.link_blocked_by("42", ref)
+
+    assert runner.calls == []

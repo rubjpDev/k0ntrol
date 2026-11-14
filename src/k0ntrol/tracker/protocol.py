@@ -111,6 +111,18 @@ class WorkItems(Protocol):
         """Return the first work-item comment containing the marker."""
         ...
 
+    def link_blocked_by(self, ref: str, blocker: str) -> None:
+        """Link `ref` as blocked by `blocker`; a no-op when already linked."""
+        ...
+
+    def close_work_item(self, ref: str, body: str, *, run: str, node: str) -> None:
+        """Post a marked comment, then close the work item."""
+        ...
+
+    def read_labels(self, ref: str) -> set[str]:
+        """Return the work item's current label names."""
+        ...
+
 
 class Changes(Protocol):
     """Change operations: branches and pull requests on the code host."""
