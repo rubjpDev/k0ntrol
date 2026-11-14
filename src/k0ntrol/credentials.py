@@ -1,8 +1,9 @@
 """API keys k0 saves for the user: ``~/.k0ntrol/credentials``, mode 0600.
 
 The file holds ``KEY=VALUE`` lines. :func:`load_credentials` copies the keys
-that name a known provider credential into the environment, never over a
-variable the user already set. Secrets never go in ``config.yaml``.
+that name a known credential — a provider's or a search API's — into the
+environment, never over a variable the user already set. Secrets never go
+in ``config.yaml``.
 """
 
 import os
@@ -11,6 +12,7 @@ from collections.abc import MutableMapping
 from pathlib import Path
 
 from k0ntrol.providers import REGISTRY
+from k0ntrol.search import SEARCH_PROVIDERS
 
 _NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _FILE_MODE = 0o600
@@ -21,7 +23,9 @@ def credentials_path(home: Path) -> Path:
 
 
 def known_credential_names() -> frozenset[str]:
-    return frozenset(name for spec in REGISTRY.values() for name in spec.credentials)
+    names = {name for spec in REGISTRY.values() for name in spec.credentials}
+    names.update(provider.key_env for provider in SEARCH_PROVIDERS.values())
+    return frozenset(names)
 
 
 def save_credential(home: Path, name: str, value: str) -> None:
