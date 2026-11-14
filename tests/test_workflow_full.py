@@ -1383,7 +1383,7 @@ def test_a_full_text_run_paused_before_its_issue_is_offered_back(tmp_path):
 
 def test_an_open_run_for_a_closed_issue_is_refused_not_offered(tmp_path):
     tracker, coder, reviewer, pending = full_to_review_gate(tmp_path)
-    tracker.close_work_item("1")
+    tracker.set_work_item_closed("1")
 
     with pytest.raises(RunRefused, match="work item #1 is closed"):
         run_full(tmp_path, full_cfg(), tracker, input="#1")
@@ -1549,7 +1549,7 @@ def test_rerun_refuses_a_merged_or_closed_pr_on_a_remote_only_branch(tmp_path, s
 
 def test_rerun_refuses_a_closed_issue(tmp_path):
     tracker = done_run(tmp_path)
-    tracker.close_work_item("1")
+    tracker.set_work_item_closed("1")
 
     with pytest.raises(RunRefused, match="work item #1 is closed"):
         rerun(tmp_path, tracker)

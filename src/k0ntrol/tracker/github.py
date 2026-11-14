@@ -13,6 +13,7 @@ from pathlib import Path
 
 from k0ntrol.tracker.protocol import (
     Change,
+    ChildWorkItem,
     Comment,
     TrackerError,
     WorkItem,
@@ -46,10 +47,82 @@ class GhTracker:
     # -- work items ------------------------------------------------------
 
     def read_work_item(self, ref: str) -> WorkItem:
-        ref = _number(ref, "work item")
-        issue = self._gh_json(["gh", "api", f"repos/{{owner}}/{{repo}}/issues/{ref}"])
+        return self._work_item(self._issue(ref))
+
+    def create_work_item(self, title: str, body: str) -> WorkItem:
+        out = self._run(["gh", "issue", "create", "--title", title, "--body", body])
+        return self.read_work_item(_number_from_url(out.stdout))
+
+    def ensure_work_item(self, title: str, body: str, *, run: str, node: str) -> WorkItem:
+        marker = comment_marker(run, node)
+        found = self._marked_issue(self._work_items(), marker)
+        if found is not None:
+            return self._work_item(found)
+        return self.create_work_item(title, f"{body}\n\n{marker}")
+
+    def create_child_work_item(
+        self, parent: str, title: str, body: str, *, run: str, node: str
+    ) -> WorkItem:
+        parent = _number(parent, "work item")
+        marker = comment_marker(run, node)
+        child = self._marked_issue(self._sub_issues(parent), marker)
+        if child is not None:
+            return self._work_item(child)
+        orphan = self._marked_issue(self._work_items(), marker)
+        if orphan is not None:
+            self._add_sub_issue(parent, orphan["id"])
+            return self._work_item(orphan)
+        out = self._run(
+            ["gh", "issue", "create", "--title", title, "--body", f"{body}\n\n{marker}"]
+        )
+        issue = self._issue(_number_from_url(out.stdout))
+        self._add_sub_issue(parent, issue["id"])
+        return self._work_item(issue)
+
+    def list_children(self, parent: str) -> tuple[ChildWorkItem, ...]:
+        parent = _number(parent, "work item")
+        return tuple(
+            ChildWorkItem(
+                ref=str(issue["number"]),
+                title=issue["title"],
+                state=issue["state"].lower(),
+                labels=tuple(label["name"] for label in issue["labels"]),
+            )
+            for issue in self._sub_issues(parent)
+        )
+
+    def _work_items(self) -> list[dict]:
+        return self._paginated_json(
+            "repos/{owner}/{repo}/issues?state=all&per_page=100"
+        )
+
+    def _sub_issues(self, parent: str) -> list[dict]:
+        return self._paginated_json(
+            f"repos/{{owner}}/{{repo}}/issues/{parent}/sub_issues?per_page=100"
+        )
+
+    def _paginated_json(self, endpoint: str) -> list[dict]:
+        pages = self._gh_json([
+            "gh", "api", "--paginate", "--slurp", endpoint,
+        ])
+        return [item for page in pages for item in page]
+
+    def _marked_issue(self, issues: list[dict], marker: str) -> dict | None:
+        for issue in issues:
+            if self._has_own_marker(issue, marker):
+                return issue
+        return None
+
+    def _issue(self, ref: str) -> dict:
+        return self._gh_json([
+            "gh", "api",
+            f"repos/{{owner}}/{{repo}}/issues/{_number(ref, 'work item')}",
+        ])
+
+    def _work_item(self, issue: dict) -> WorkItem:
+        ref = str(issue["number"])
         return WorkItem(
-            ref=str(issue["number"]),
+            ref=ref,
             title=issue["title"],
             body=issue["body"] or "",
             state=issue["state"].lower(),
@@ -59,23 +132,13 @@ class GhTracker:
             comments=self._comments(ref),
         )
 
-    def create_work_item(self, title: str, body: str) -> WorkItem:
-        out = self._run(["gh", "issue", "create", "--title", title, "--body", body])
-        return self.read_work_item(_number_from_url(out.stdout))
-
-    def ensure_work_item(self, title: str, body: str, *, run: str, node: str) -> WorkItem:
-        marker = comment_marker(run, node)
-        for issue in self._work_items():
-            if self._has_own_marker(issue, marker):
-                return self.read_work_item(str(issue["number"]))
-        return self.create_work_item(title, f"{body}\n\n{marker}")
-
-    def _work_items(self) -> list[dict]:
-        pages = self._gh_json([
-            "gh", "api", "--paginate", "--slurp",
-            "repos/{owner}/{repo}/issues?state=all&per_page=100",
+    def _add_sub_issue(self, parent: str, sub_issue_id: int) -> None:
+        """Attach by the issue's database `id`, not its number."""
+        self._run([
+            "gh", "api", "--method", "POST",
+            f"repos/{{owner}}/{{repo}}/issues/{parent}/sub_issues",
+            "-F", f"sub_issue_id={sub_issue_id}",
         ])
-        return [issue for page in pages for issue in page]
 
     def _has_own_marker(self, issue: dict, marker: str) -> bool:
         """A body marker counts only on an issue authored by the gh user."""
@@ -111,6 +174,29 @@ class GhTracker:
 
     def find_comment(self, ref: str, marker: str) -> Comment | None:
         return _first_with_marker(self._comments(ref), marker)
+
+    def link_blocked_by(self, ref: str, blocker: str) -> None:
+        ref = _number(ref, "work item")
+        blocker = _number(blocker, "work item")
+        blocker_id = self._issue(blocker)["id"]
+        dependencies = self._paginated_json(
+            f"repos/{{owner}}/{{repo}}/issues/{ref}/dependencies/blocked_by"
+        )
+        if any(dep["id"] == blocker_id for dep in dependencies):
+            return
+        self._run([
+            "gh", "api", "-X", "POST",
+            f"repos/{{owner}}/{{repo}}/issues/{ref}/dependencies/blocked_by",
+            "-F", f"issue_id={blocker_id}",
+        ])
+
+    def close_work_item(self, ref: str, body: str, *, run: str, node: str) -> None:
+        ref = _number(ref, "work item")
+        self.comment_work_item(ref, body, run=run, node=node)
+        self._run(["gh", "issue", "close", ref])
+
+    def read_labels(self, ref: str) -> set[str]:
+        return self._label_names(_number(ref, "work item"))
 
     # -- changes -----------------------------------------------------------
 

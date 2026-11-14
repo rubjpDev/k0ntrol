@@ -125,6 +125,55 @@ def test_new_agent_model_calls_keep_the_minimum(tmp_path):
         load_config(tmp_path, tmp_path / "home")
 
 
+def test_planning_settings_have_defaults(tmp_path):
+    cfg = load_config(tmp_path, tmp_path / "home")
+    assert cfg["max_questions"] == 25
+    assert cfg["max_round_questions"] == 7
+    assert cfg["ticket_size"] == "small"
+
+
+def test_project_config_overrides_planning_settings(tmp_path):
+    write(
+        tmp_path / ".k0-mem/config.yaml",
+        "max_questions: 40\nmax_round_questions: 3\nticket_size: large\n",
+    )
+    cfg = load_config(tmp_path, tmp_path / "home")
+    assert cfg["max_questions"] == 40
+    assert cfg["max_round_questions"] == 3
+    assert cfg["ticket_size"] == "large"
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "max_questions: 0",
+        "max_questions: -5",
+        "max_questions: \"25\"",
+        "max_round_questions: 0",
+        "max_round_questions: -2",
+        "max_round_questions: 7.5",
+    ],
+)
+def test_invalid_question_limits_are_rejected(tmp_path, line):
+    key = line.split(":", 1)[0]
+    write(tmp_path / ".k0-mem/config.yaml", line + "\n")
+    with pytest.raises(ConfigError, match=key):
+        load_config(tmp_path, tmp_path / "home")
+
+
+@pytest.mark.parametrize("size", ["small", "medium", "large"])
+def test_ticket_size_accepts_the_three_sizes(tmp_path, size):
+    write(tmp_path / ".k0-mem/config.yaml", f"ticket_size: {size}\n")
+    assert load_config(tmp_path, tmp_path / "home")["ticket_size"] == size
+
+
+@pytest.mark.parametrize("line", ["ticket_size: huge", "ticket_size: Small", "ticket_size: 42", "ticket_size: true"])
+def test_invalid_ticket_size_is_rejected(tmp_path, line):
+    write(tmp_path / ".k0-mem/config.yaml", line + "\n")
+    with pytest.raises(ConfigError, match="ticket_size"):
+        load_config(tmp_path, tmp_path / "home")
+
+
 def test_legacy_agent_keys_load_exactly_as_before(tmp_path):
     home = tmp_path / "home"
     write(

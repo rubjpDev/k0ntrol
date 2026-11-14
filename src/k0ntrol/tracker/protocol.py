@@ -49,6 +49,14 @@ class WorkItem:
 
 
 @dataclass(frozen=True)
+class ChildWorkItem:
+    ref: str
+    title: str
+    state: str
+    labels: tuple[str, ...] = field(default_factory=tuple)
+
+
+@dataclass(frozen=True)
 class Change:
     ref: str
     branch: str
@@ -73,6 +81,16 @@ class WorkItems(Protocol):
         """Create a marked work item, or recover the one already created."""
         ...
 
+    def create_child_work_item(
+        self, parent: str, title: str, body: str, *, run: str, node: str
+    ) -> WorkItem:
+        """Create a marked work item and attach it as a child of `parent`."""
+        ...
+
+    def list_children(self, parent: str) -> tuple[ChildWorkItem, ...]:
+        """List `parent`'s children in tracker order."""
+        ...
+
     def comment_work_item(self, ref: str, body: str, *, run: str, node: str) -> None:
         """Post a marked comment; a no-op when the marker already exists."""
         ...
@@ -91,6 +109,18 @@ class WorkItems(Protocol):
 
     def find_comment(self, ref: str, marker: str) -> Comment | None:
         """Return the first work-item comment containing the marker."""
+        ...
+
+    def link_blocked_by(self, ref: str, blocker: str) -> None:
+        """Link `ref` as blocked by `blocker`; a no-op when already linked."""
+        ...
+
+    def close_work_item(self, ref: str, body: str, *, run: str, node: str) -> None:
+        """Post a marked comment, then close the work item."""
+        ...
+
+    def read_labels(self, ref: str) -> set[str]:
+        """Return the work item's current label names."""
         ...
 
 
