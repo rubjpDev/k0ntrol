@@ -36,6 +36,7 @@ from pydantic import ConfigDict, Field
 
 from k0ntrol.tracker import (
     Change,
+    ChildWorkItem,
     Comment,
     TrackerError,
     WorkItem,
@@ -270,19 +271,37 @@ class FakeTracker:
         author_association: str = "OWNER",
     ) -> WorkItem:
         self.calls.append(("create_work_item", title))
-        ref = str(self._next_item)
-        self._next_item += 1
-        self._items[ref] = {
-            "title": title,
-            "body": body,
-            "state": "open",
-            "url": f"https://github.com/{self.repo}/issues/{ref}",
-            "author": author,
-            "author_association": author_association,
-            "comments": [],
-        }
-        self._item_labels[ref] = set()
-        return self.read_work_item(ref)
+        return self._create_item(title, body, None, author, author_association)
+
+    def create_child_work_item(
+        self, parent: str, title: str, body: str, *, run: str, node: str
+    ) -> WorkItem:
+        self.calls.append(("create_child_work_item", parent, title))
+        parent = str(parent)
+        self._item(parent)
+        marker = comment_marker(run, node)
+        for ref, item in self._items.items():
+            if item["parent"] == parent and marker in item["body"]:
+                return self.read_work_item(ref)
+        for ref, item in self._items.items():
+            if item["parent"] is None and marker in item["body"]:
+                item["parent"] = parent
+                return self.read_work_item(ref)
+        return self._create_item(title, f"{body}\n\n{marker}", parent, "rubenjp", "OWNER")
+
+    def list_children(self, parent: str) -> tuple[ChildWorkItem, ...]:
+        parent = str(parent)
+        self._item(parent)
+        return tuple(
+            ChildWorkItem(
+                ref=ref,
+                title=item["title"],
+                state=item["state"],
+                labels=tuple(sorted(self._item_labels[ref])),
+            )
+            for ref, item in self._items.items()
+            if item["parent"] == parent
+        )
 
     def ensure_work_item(self, title: str, body: str, *, run: str, node: str) -> WorkItem:
         marker = comment_marker(run, node)
@@ -448,6 +467,29 @@ class FakeTracker:
         self._item(ref)["state"] = "closed"
 
     # -- internals ---------------------------------------------------------
+
+    def _create_item(
+        self,
+        title: str,
+        body: str,
+        parent: str | None,
+        author: str,
+        author_association: str,
+    ) -> WorkItem:
+        ref = str(self._next_item)
+        self._next_item += 1
+        self._items[ref] = {
+            "title": title,
+            "body": body,
+            "state": "open",
+            "url": f"https://github.com/{self.repo}/issues/{ref}",
+            "author": author,
+            "author_association": author_association,
+            "comments": [],
+            "parent": parent,
+        }
+        self._item_labels[ref] = set()
+        return self.read_work_item(ref)
 
     def _item(self, ref: str) -> dict:
         try:
