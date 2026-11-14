@@ -74,6 +74,8 @@ In Devin, use the profiles in `.devin/agents/`; in Claude Code, the same-named p
 
 A custom Devin profile without `model` uses the subagent router, not the parent's model, so every profile in `.devin/agents/` pins an explicit model: `swe-2-flash-medium` for mechanical work and standards review (`merger`, `standards-reviewer`), `swe-2-flash-high` for implementation and spec review (`swe-worker`, `spec-reviewer`), and `gpt-6.1-sol-high` for research and interface design (`researcher`, `design-variant`). The `.claude/agents/` profiles mirror those tiers on `sonnet` with matching `effort`; the parent session is the Opus orchestrator.
 
+When a run explicitly requires a different model, launch a clean Devin session with `devin --model`, or use a dedicated profile that existed before the orchestrator session starts (`swe-worker-flash-max`, `spec-reviewer-max`); do not edit a shared profile mid-run. If an embedded parent session's inherited environment hides CLI auth, retry `devin` with a minimal environment before treating child sessions as unavailable. After spawning a model-sensitive subagent, verify the server-reported model (`/session-stats` or runtime response metadata) before letting it do real work.
+
 Never let a reviewer, merger, implementer or exploration subagent run on the orchestrator's model. This holds in Devin cloud too, where a step may run as a child session instead of a profile subagent: name the model explicitly, the profile's model or `swe-2-flash-high` when unsure. If no profile or explicit model is available, run the step inline in the parent instead of spawning a copy of it; for `/code-review`, that means one inline pass per axis, not two spawned sessions.
 
 ### Issue tracker

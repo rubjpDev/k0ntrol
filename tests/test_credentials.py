@@ -16,7 +16,12 @@ def test_credentials_path_is_under_the_k0ntrol_dir(tmp_path):
 
 def test_known_names_cover_every_provider_variable():
     names = known_credential_names()
-    assert {"ANTHROPIC_API_KEY", "AWS_BEARER_TOKEN_BEDROCK", "OPENAI_API_KEY"} <= names
+    assert {
+        "ANTHROPIC_API_KEY",
+        "AWS_BEARER_TOKEN_BEDROCK",
+        "BRAVE_SEARCH_API_KEY",
+        "OPENAI_API_KEY",
+    } <= names
 
 
 def test_save_creates_the_dir_and_a_private_file(tmp_path):
