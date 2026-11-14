@@ -92,18 +92,20 @@ class GhTracker:
         )
 
     def _work_items(self) -> list[dict]:
-        pages = self._gh_json([
-            "gh", "api", "--paginate", "--slurp",
-            "repos/{owner}/{repo}/issues?state=all&per_page=100",
-        ])
-        return [issue for page in pages for issue in page]
+        return self._paginated_json(
+            "repos/{owner}/{repo}/issues?state=all&per_page=100"
+        )
 
     def _sub_issues(self, parent: str) -> list[dict]:
+        return self._paginated_json(
+            f"repos/{{owner}}/{{repo}}/issues/{parent}/sub_issues?per_page=100"
+        )
+
+    def _paginated_json(self, endpoint: str) -> list[dict]:
         pages = self._gh_json([
-            "gh", "api", "--paginate", "--slurp",
-            f"repos/{{owner}}/{{repo}}/issues/{parent}/sub_issues?per_page=100",
+            "gh", "api", "--paginate", "--slurp", endpoint,
         ])
-        return [issue for page in pages for issue in page]
+        return [item for page in pages for item in page]
 
     def _marked_issue(self, issues: list[dict], marker: str) -> dict | None:
         for issue in issues:
@@ -176,14 +178,11 @@ class GhTracker:
     def link_blocked_by(self, ref: str, blocker: str) -> None:
         ref = _number(ref, "work item")
         blocker = _number(blocker, "work item")
-        blocker_id = self._gh_json(
-            ["gh", "api", f"repos/{{owner}}/{{repo}}/issues/{blocker}"]
-        )["id"]
-        pages = self._gh_json([
-            "gh", "api", "--paginate", "--slurp",
-            f"repos/{{owner}}/{{repo}}/issues/{ref}/dependencies/blocked_by",
-        ])
-        if any(dep["id"] == blocker_id for page in pages for dep in page):
+        blocker_id = self._issue(blocker)["id"]
+        dependencies = self._paginated_json(
+            f"repos/{{owner}}/{{repo}}/issues/{ref}/dependencies/blocked_by"
+        )
+        if any(dep["id"] == blocker_id for dep in dependencies):
             return
         self._run([
             "gh", "api", "-X", "POST",

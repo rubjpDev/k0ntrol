@@ -30,6 +30,18 @@ COMMENTS = [
 
 ISSUE_ENDPOINT = ["gh", "api", "repos/{owner}/{repo}/issues/42"]
 COMMENTS_ENDPOINT = ["gh", "api", "--paginate", "repos/{owner}/{repo}/issues/42/comments"]
+ALL_ISSUES_ENDPOINT = [
+    "gh", "api", "--paginate", "--slurp",
+    "repos/{owner}/{repo}/issues?state=all&per_page=100",
+]
+SUB_ISSUES_ENDPOINT = [
+    "gh", "api", "--paginate", "--slurp",
+    "repos/{owner}/{repo}/issues/1/sub_issues?per_page=100",
+]
+ATTACH_SUB_ISSUE = [
+    "gh", "api", "--method", "POST",
+    "repos/{owner}/{repo}/issues/1/sub_issues",
+]
 
 
 def _issue(overrides=None):
@@ -104,7 +116,7 @@ def test_ensure_work_item_uses_creation_marker(existing):
     marker = comment_marker("r1", "create_issue")
     runner, tracker = _tracker(issue=_issue({"body": f"request\n\n{marker}"}))
     runner.script(
-        ["gh", "api", "--paginate", "--slurp", "repos/{owner}/{repo}/issues?state=all&per_page=100"],
+        ALL_ISSUES_ENDPOINT,
         stdout=json.dumps([[ISSUE], [_issue({"body": marker})]] if existing else [[]]),
     )
     runner.script(["gh", "api", "user"], stdout=json.dumps({"login": "rubenjp"}))
@@ -123,7 +135,7 @@ def test_ensure_work_item_ignores_a_spoofed_marker():
     runner, tracker = _tracker(issue=_issue({"body": f"request\n\n{marker}"}))
     spoofed = _issue({"number": 99, "body": marker, "user": {"login": "mallory"}})
     runner.script(
-        ["gh", "api", "--paginate", "--slurp", "repos/{owner}/{repo}/issues?state=all&per_page=100"],
+        ALL_ISSUES_ENDPOINT,
         stdout=json.dumps([[spoofed]]),
     )
     runner.script(["gh", "api", "user"], stdout=json.dumps({"login": "rubenjp"}))
@@ -175,27 +187,16 @@ def test_create_child_work_item_creates_the_issue_and_attaches_it():
     marker = comment_marker("r1", "publish_ticket")
     runner = FakeRunner()
     runner.script(
-        [
-            "gh", "api", "--paginate", "--slurp",
-            "repos/{owner}/{repo}/issues/1/sub_issues?per_page=100",
-        ],
+        SUB_ISSUES_ENDPOINT,
         stdout="[[]]",
     )
-    runner.script(
-        [
-            "gh", "api", "--paginate", "--slurp",
-            "repos/{owner}/{repo}/issues?state=all&per_page=100",
-        ],
-        stdout="[[]]",
-    )
+    runner.script(ALL_ISSUES_ENDPOINT, stdout="[[]]")
     runner.script(["gh", "issue", "create"], stdout="https://github.com/o/r/issues/7\n")
     runner.script(
         ["gh", "api", "repos/{owner}/{repo}/issues/7"],
         stdout=json.dumps(_issue({"number": 7, "id": 7007, "body": f"do it\n\n{marker}"})),
     )
-    runner.script(
-        ["gh", "api", "--method", "POST", "repos/{owner}/{repo}/issues/1/sub_issues"]
-    )
+    runner.script(ATTACH_SUB_ISSUE)
     runner.script(
         ["gh", "api", "--paginate", "repos/{owner}/{repo}/issues/7/comments"],
         stdout="[]",
@@ -211,13 +212,7 @@ def test_create_child_work_item_creates_the_issue_and_attaches_it():
     assert len(creates) == 1
     assert creates[0][-1] == f"do it\n\n{marker}"
     posts = [c for c in runner.calls if c[:2] == ["gh", "api"] and "--method" in c]
-    assert posts == [
-        [
-            "gh", "api", "--method", "POST",
-            "repos/{owner}/{repo}/issues/1/sub_issues",
-            "-F", "sub_issue_id=7007",
-        ]
-    ]
+    assert posts == [ATTACH_SUB_ISSUE + ["-F", "sub_issue_id=7007"]]
 
 
 def test_create_child_work_item_returns_the_marked_child_without_duplicating():
@@ -227,10 +222,7 @@ def test_create_child_work_item_returns_the_marked_child_without_duplicating():
     )
     runner = FakeRunner()
     runner.script(
-        [
-            "gh", "api", "--paginate", "--slurp",
-            "repos/{owner}/{repo}/issues/1/sub_issues?per_page=100",
-        ],
+        SUB_ISSUES_ENDPOINT,
         stdout=json.dumps([[child]]),
     )
     runner.script(["gh", "api", "user"], stdout=json.dumps({"login": "rubenjp"}))
@@ -246,10 +238,7 @@ def test_create_child_work_item_returns_the_marked_child_without_duplicating():
 
     assert item.ref == "7"
     assert runner.calls == [
-        [
-            "gh", "api", "--paginate", "--slurp",
-            "repos/{owner}/{repo}/issues/1/sub_issues?per_page=100",
-        ],
+        SUB_ISSUES_ENDPOINT,
         ["gh", "api", "user"],
         ["gh", "api", "--paginate", "repos/{owner}/{repo}/issues/7/comments"],
     ]
@@ -257,27 +246,15 @@ def test_create_child_work_item_returns_the_marked_child_without_duplicating():
 
 def test_create_child_work_item_retries_the_attach_after_a_failed_post():
     marker = comment_marker("r1", "publish_ticket")
-    children = [
-        "gh", "api", "--paginate", "--slurp",
-        "repos/{owner}/{repo}/issues/1/sub_issues?per_page=100",
-    ]
-    all_issues = [
-        "gh", "api", "--paginate", "--slurp",
-        "repos/{owner}/{repo}/issues?state=all&per_page=100",
-    ]
-    post = [
-        "gh", "api", "--method", "POST",
-        "repos/{owner}/{repo}/issues/1/sub_issues",
-    ]
     runner = FakeRunner()
-    runner.script(children, stdout="[[]]")
-    runner.script(all_issues, stdout="[[]]")
+    runner.script(SUB_ISSUES_ENDPOINT, stdout="[[]]")
+    runner.script(ALL_ISSUES_ENDPOINT, stdout="[[]]")
     runner.script(["gh", "issue", "create"], stdout="https://github.com/o/r/issues/7\n")
     runner.script(
         ["gh", "api", "repos/{owner}/{repo}/issues/7"],
         stdout=json.dumps(_issue({"number": 7, "id": 7007})),
     )
-    runner.script(post, returncode=1, stderr="attach failed")
+    runner.script(ATTACH_SUB_ISSUE, returncode=1, stderr="attach failed")
     runner.script(
         ["gh", "api", "--paginate", "repos/{owner}/{repo}/issues/7/comments"],
         stdout="[]",
@@ -290,9 +267,9 @@ def test_create_child_work_item_retries_the_attach_after_a_failed_post():
         )
 
     orphan = _issue({"number": 7, "id": 7007, "body": f"do it\n\n{marker}"})
-    runner.script(all_issues, stdout=json.dumps([[orphan]]))
+    runner.script(ALL_ISSUES_ENDPOINT, stdout=json.dumps([[orphan]]))
     runner.script(["gh", "api", "user"], stdout=json.dumps({"login": "rubenjp"}))
-    runner.script(post)
+    runner.script(ATTACH_SUB_ISSUE)
 
     item = tracker.create_child_work_item(
         "1", "Ticket A", "do it", run="r1", node="publish_ticket"
@@ -332,10 +309,7 @@ def test_list_children_refuses_other_ref_forms(ref):
 def test_list_children_returns_ref_title_state_and_labels_in_order():
     runner = FakeRunner()
     runner.script(
-        [
-            "gh", "api", "--paginate", "--slurp",
-            "repos/{owner}/{repo}/issues/1/sub_issues?per_page=100",
-        ],
+        SUB_ISSUES_ENDPOINT,
         stdout=json.dumps(
             [
                 [
@@ -375,10 +349,7 @@ def test_list_children_returns_ref_title_state_and_labels_in_order():
     )
 
     runner.script(
-        [
-            "gh", "api", "--paginate", "--slurp",
-            "repos/{owner}/{repo}/issues/1/sub_issues?per_page=100",
-        ],
+        SUB_ISSUES_ENDPOINT,
         stdout="[[]]",
     )
     assert tracker.list_children("1") == ()

@@ -354,11 +354,10 @@ class FakeTracker:
         blocked.setdefault("blocked_by", set()).add(str(blocker))
 
     def close_work_item(
-        self, ref: str, body: str = "", *, run: str = "", node: str = ""
+        self, ref: str, body: str, *, run: str, node: str
     ) -> None:
         self.calls.append(("close_work_item", ref))
-        if body:
-            self.comment_work_item(ref, body, run=run, node=node)
+        self.comment_work_item(ref, body, run=run, node=node)
         self._item(ref)["state"] = "closed"
 
     def read_labels(self, ref: str) -> set[str]:
@@ -472,6 +471,9 @@ class FakeTracker:
 
     def close_change(self, ref: str) -> None:
         self._change(ref)["state"] = "closed"
+
+    def set_work_item_closed(self, ref: str) -> None:
+        self._item(ref)["state"] = "closed"
 
     def add_comment(
         self, ref: str, body: str, *, author: str = "rubenjp", author_association: str = "OWNER"
