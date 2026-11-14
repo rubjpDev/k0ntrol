@@ -4,7 +4,10 @@ No live network: ``connect`` is the transport's socket seam, fed by
 ``socket.socketpair`` ends holding canned responses.
 """
 
+import shutil
 import socket
+import ssl
+import subprocess
 import threading
 import time
 
@@ -247,3 +250,99 @@ def test_resolve_addresses_reraises_a_lookup_failure(monkeypatch):
     monkeypatch.setattr(socket, "getaddrinfo", failing)
     with pytest.raises(socket.gaierror):
         resolve_addresses("example.com", timeout=5)
+
+
+def test_socket_transport_bounds_a_stalled_tls_handshake():
+    client, peer = socket.socketpair()
+    start = time.monotonic()
+    try:
+        with pytest.raises(TimeoutError):
+            socket_transport(
+                make_target(scheme="https", port=443),
+                ("93.184.216.34",),
+                timeout=0.3,
+                max_bytes=100,
+                connect=lambda address, timeout: client,
+            )
+    finally:
+        client.close()
+        peer.close()
+    assert time.monotonic() - start < 2
+
+
+@pytest.fixture
+def localhost_cert(tmp_path):
+    if shutil.which("openssl") is None:
+        pytest.skip("openssl CLI not available")
+    cert, key = tmp_path / "cert.pem", tmp_path / "key.pem"
+    subprocess.run(
+        [
+            "openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes",
+            "-keyout", str(key), "-out", str(cert), "-days", "1",
+            "-subj", "/CN=localhost", "-addext", "subjectAltName=DNS:localhost",
+        ],
+        check=True,
+        capture_output=True,
+    )
+    return cert, key
+
+
+def test_socket_transport_bounds_a_dripping_tls_body(monkeypatch, localhost_cert):
+    cert, key = localhost_cert
+    client_context = ssl.create_default_context(cafile=str(cert))
+    monkeypatch.setattr(ssl, "create_default_context", lambda: client_context)
+    server_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    server_context.load_cert_chain(str(cert), str(key))
+    client, peer = socket.socketpair()
+    stop = threading.Event()
+
+    def serve():
+        try:
+            tls = server_context.wrap_socket(peer, server_side=True)
+            tls.recv(65536)
+            tls.sendall(canned_response(b"a", length=1000))
+            while not stop.wait(0.02):
+                tls.send(b"a")
+        except OSError:
+            return
+
+    server = threading.Thread(target=serve, daemon=True)
+    server.start()
+    start = time.monotonic()
+    try:
+        with pytest.raises(TimeoutError):
+            socket_transport(
+                make_target(scheme="https", host="localhost", port=443),
+                ("93.184.216.34",),
+                timeout=0.5,
+                max_bytes=10_000,
+                connect=lambda address, timeout: client,
+            )
+    finally:
+        stop.set()
+        client.close()
+        peer.close()
+        server.join(5)
+    assert time.monotonic() - start < 3
+
+
+def test_socket_transport_closes_a_socket_connected_past_the_deadline():
+    client, peer = socket.socketpair()
+
+    def slow_connect(address, timeout):
+        time.sleep(0.1)
+        return client
+
+    try:
+        with pytest.raises(TimeoutError):
+            socket_transport(
+                make_target(),
+                ("93.184.216.34",),
+                timeout=0.05,
+                max_bytes=100,
+                connect=slow_connect,
+            )
+        assert client.fileno() == -1
+    finally:
+        client.close()
+        peer.close()

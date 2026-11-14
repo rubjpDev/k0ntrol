@@ -123,33 +123,48 @@ class _Deadline:
 
 
 class _Watchdog:
-    """Shuts the socket down at the deadline, unblocking any pending read.
+    """Shuts the live socket down at the deadline, unblocking any read.
 
     Socket timeouts bound each blocking call, not the request: a server
     dripping one byte per read would never trip them. The watchdog bounds
-    the whole exchange — TLS handshake, headers and body.
+    the whole exchange — TLS handshake, headers and body. ``watch`` starts
+    the timer on the first socket and retargets it when TLS wraps the
+    socket (the wrap detaches the original), so the shutdown always hits
+    the descriptor in use.
     """
 
     def __init__(self, deadline: _Deadline) -> None:
         self._deadline = deadline
+        self._lock = threading.Lock()
+        self._sock: socket.socket | None = None
         self._timer: threading.Timer | None = None
         self.fired = False
 
-    def arm(self, sock: socket.socket) -> None:
-        self._timer = threading.Timer(
-            self._deadline.remaining(), self._fire, args=(sock,)
-        )
-        self._timer.daemon = True
-        self._timer.start()
+    def watch(self, sock: socket.socket) -> None:
+        with self._lock:
+            self._sock = sock
+            if self.fired:
+                raise TimeoutError("fetch deadline passed")
+        if self._timer is None:
+            self._timer = threading.Timer(self._deadline.remaining(), self._fire)
+            self._timer.daemon = True
+            self._timer.start()
 
     def cancel(self) -> None:
         if self._timer is not None:
             self._timer.cancel()
 
-    def _fire(self, sock: socket.socket) -> None:
-        self.fired = True
-        with contextlib.suppress(OSError):
-            sock.shutdown(socket.SHUT_RDWR)
+    def _fire(self) -> None:
+        with self._lock:
+            self.fired = True
+            if self._sock is not None:
+                _shutdown(self._sock)
+
+
+def _shutdown(sock: socket.socket) -> None:
+    """Shut the descriptor down; for TLS, skips the ``SSLSocket`` unwrap."""
+    with contextlib.suppress(OSError):
+        socket.socket.shutdown(sock, socket.SHUT_RDWR)
 
 
 def socket_transport(
@@ -193,13 +208,7 @@ def _get_once(
     connect: Connect,
 ) -> HttpResponse:
     watchdog = _Watchdog(deadline)
-
-    def guarded_connect(where: tuple[str, int], timeout: float) -> socket.socket:
-        sock = connect(where, timeout)
-        watchdog.arm(sock)
-        return sock
-
-    conn = _connection(target, address, deadline.remaining(), guarded_connect)
+    conn = _connection(target, address, deadline.remaining(), connect, watchdog)
     try:
         response = _exchange(conn, target, max_bytes)
     except (OSError, http.client.HTTPException) as error:
@@ -229,10 +238,14 @@ def _exchange(
 
 
 def _connection(
-    target: FetchTarget, address: str, timeout: float, connect: Connect
+    target: FetchTarget,
+    address: str,
+    timeout: float,
+    connect: Connect,
+    watchdog: _Watchdog,
 ) -> http.client.HTTPConnection:
     cls = _PinnedHTTPSConnection if target.scheme == "https" else _PinnedHTTPConnection
-    return cls(target.host, target.port, address, timeout, connect)
+    return cls(target.host, target.port, address, timeout, connect, watchdog)
 
 
 def _request_headers() -> dict[str, str]:
@@ -245,7 +258,11 @@ def _request_headers() -> dict[str, str]:
 
 
 class _PinnedHTTPConnection(http.client.HTTPConnection):
-    """Connects to a validated address while naming ``host`` in requests."""
+    """Connects to a validated address while naming ``host`` in requests.
+
+    The socket is stored before the watchdog sees it, so ``close`` still
+    reaches it when watching fails past the deadline.
+    """
 
     def __init__(
         self,
@@ -254,17 +271,24 @@ class _PinnedHTTPConnection(http.client.HTTPConnection):
         address: str,
         timeout: float,
         connect: Connect,
+        watchdog: _Watchdog,
     ) -> None:
         super().__init__(host, port, timeout=timeout)
         self._address = address
         self._connect = connect
+        self._watchdog = watchdog
 
     def connect(self) -> None:
         self.sock = self._connect((self._address, self.port), self.timeout)
+        self._watchdog.watch(self.sock)
 
 
 class _PinnedHTTPSConnection(http.client.HTTPSConnection):
-    """Like ``_PinnedHTTPConnection``; TLS still verifies ``host``."""
+    """Like ``_PinnedHTTPConnection``; TLS still verifies ``host``.
+
+    The handshake runs only after the watchdog follows the socket into
+    its TLS wrapper, so the deadline bounds the handshake too.
+    """
 
     def __init__(
         self,
@@ -273,13 +297,21 @@ class _PinnedHTTPSConnection(http.client.HTTPSConnection):
         address: str,
         timeout: float,
         connect: Connect,
+        watchdog: _Watchdog,
     ) -> None:
         context = ssl.create_default_context()
         super().__init__(host, port, timeout=timeout, context=context)
         self._address = address
         self._connect = connect
+        self._watchdog = watchdog
         self._tls_context = context
 
     def connect(self) -> None:
         self.sock = self._connect((self._address, self.port), self.timeout)
-        self.sock = self._tls_context.wrap_socket(self.sock, server_hostname=self.host)
+        self._watchdog.watch(self.sock)
+        tls = self._tls_context.wrap_socket(
+            self.sock, server_hostname=self.host, do_handshake_on_connect=False
+        )
+        self.sock = tls
+        self._watchdog.watch(tls)
+        tls.do_handshake()
