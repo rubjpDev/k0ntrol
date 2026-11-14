@@ -21,9 +21,11 @@ def parse_frontmatter(path: Path) -> tuple[dict, str]:
     [
         ("standards-reviewer", "swe-2-flash-medium"),
         ("spec-reviewer", "swe-2-flash-high"),
+        ("spec-reviewer-max", "swe-2-max"),
         ("researcher", "gpt-6.1-sol-high"),
         ("merger", "swe-2-flash-medium"),
         ("design-variant", "gpt-6.1-sol-high"),
+        ("swe-worker-flash-max", "swe-2-flash-max"),
     ],
 )
 def test_migrated_profile_matches_legacy(profile: str, model: str) -> None:
@@ -36,7 +38,7 @@ def test_migrated_profile_matches_legacy(profile: str, model: str) -> None:
     assert devin_body == legacy_body
     assert "tools" not in devin_fm
 
-    if profile in ("standards-reviewer", "spec-reviewer", "design-variant"):
+    if profile in ("standards-reviewer", "spec-reviewer", "spec-reviewer-max", "design-variant"):
         assert devin_fm["allowed-tools"] == ["read", "grep", "glob", "exec"]
     else:
         assert "allowed-tools" not in devin_fm
@@ -54,6 +56,8 @@ def test_every_devin_profile_pins_a_known_model() -> None:
         assert fm["model"] in (
             "swe-2-flash-medium",
             "swe-2-flash-high",
+            "swe-2-flash-max",
+            "swe-2-max",
             "gpt-6.1-sol-high",
         ), path.name
 
@@ -76,8 +80,14 @@ def test_agents_routing_section() -> None:
         "merger",
         "swe-worker",
         "design-variant",
+        "swe-worker-flash-max",
+        "spec-reviewer-max",
     ):
         assert name in section
+    assert "before the orchestrator session starts" in section
+    assert "devin --model" in section
+    assert "minimal environment" in section
+    assert "server-reported model" in section
     assert "implementer" in section
     assert "exploration" in section
     assert "other designers" in section
@@ -98,6 +108,8 @@ def test_code_review_skill_uses_named_profiles() -> None:
 DEVIN_TO_CLAUDE_EFFORT = {
     "swe-2-flash-medium": "medium",
     "swe-2-flash-high": "high",
+    "swe-2-flash-max": "max",
+    "swe-2-max": "max",
     "gpt-6.1-sol-high": "high",
 }
 
