@@ -4,7 +4,8 @@ One append-only file, `.k0-mem/events.jsonl`, one JSON line per event. The
 schema is the contract in spec #33 ("Events and Langfuse"): every line has
 `ts` (ISO UTC, ms), `kind`, and `run` — or `chat` for `/ask`. Fields that do
 not apply are omitted, never `null`. No prompts, completions, file contents
-or tool arguments other than `path` are ever written.
+or tool arguments other than `path` (file tools) and `host` (the hostname of
+a tool call's `url` argument, for the network tools) are ever written.
 
 Rotation: when an `EventWriter` is created and `events.jsonl` is over
 `EVENTS_MAX_BYTES`, the file is renamed to `events.1.jsonl`, the previous
@@ -28,9 +29,11 @@ writer.
 
 Shared contract for tool refusals (the `denied` field): a tool refuses a
 call by raising an exception that carries a `denied` attribute with value
-`"allowlist"`, `"path_guard"` or `"slice_guard"`. The canonical class is
+`"allowlist"`, `"path_guard"`, `"slice_guard"` or `"network_guard"`. The
+canonical class is
 `k0ntrol.tools.errors.ToolError` (raised with `denied="path_guard"` /
-`denied="allowlist"` / `denied="slice_guard"`); the handler accepts any
+`denied="allowlist"` / `denied="slice_guard"` / `denied="network_guard"`);
+the handler accepts any
 exception with a truthy `denied` attribute, so tool code never depends on
 this module.
 """
@@ -43,6 +46,7 @@ from collections.abc import Callable, Iterable, Mapping
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal
+from urllib.parse import urlsplit
 from uuid import uuid4
 
 from langgraph.callbacks import GraphCallbackHandler, GraphInterruptEvent
@@ -409,9 +413,15 @@ class K0EventHandler(GraphCallbackHandler):
             "agent": _agent_name(metadata),
             "tool": (serialized or {}).get("name"),
             "path": str(path) if path else None,
+            "host": _input_host(inputs),
         }
         start = self._tool_starts[run_id]
-        self._writer.working(agent=start["agent"], tool=start["tool"], path=start["path"])
+        self._writer.working(
+            agent=start["agent"],
+            tool=start["tool"],
+            path=start["path"],
+            host=start["host"],
+        )
 
     def on_tool_end(
         self,
@@ -427,6 +437,7 @@ class K0EventHandler(GraphCallbackHandler):
             agent=start.get("agent"),
             tool=start.get("tool"),
             path=start.get("path"),
+            host=start.get("host"),
             ms=_elapsed_ms(start),
             ok=True,
         )
@@ -445,6 +456,7 @@ class K0EventHandler(GraphCallbackHandler):
             agent=start.get("agent"),
             tool=start.get("tool"),
             path=start.get("path"),
+            host=start.get("host"),
             ms=_elapsed_ms(start),
             ok=False,
             err=str(error),
@@ -458,6 +470,23 @@ class K0EventHandler(GraphCallbackHandler):
             value = interrupt.value
             if isinstance(value, Mapping) and value.get("gate"):
                 self._writer.gate(str(value["gate"]), "waiting")
+
+
+_HOST_MAX = 253
+
+
+def _input_host(inputs: Any) -> str | None:
+    """The hostname of a tool call's ``url`` argument — never the rest."""
+    if not isinstance(inputs, dict):
+        return None
+    url = inputs.get("url")
+    if not isinstance(url, str):
+        return None
+    try:
+        host = urlsplit(url).hostname
+    except ValueError:
+        return None
+    return host[:_HOST_MAX] if host else None
 
 
 def _call_start(metadata: Mapping | None) -> dict:
@@ -583,6 +612,8 @@ def _render_tool(e: dict) -> str:
     head = f"tool {e.get('agent', '?')} {e.get('tool', '?')}"
     if e.get("path"):
         head += f" {e['path']}"
+    if e.get("host"):
+        head += f" {e['host']}"
     if e.get("denied"):
         return f"{head} denied {e['denied']} ({e.get('ms', 0)}ms)"
     if e.get("ok"):
