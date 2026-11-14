@@ -16,6 +16,7 @@ HELPERS = ("bulk_read", "reflect")
 _AGENT_KEYS = {"provider", "model", "effort", "params", "model_calls"}
 _HELPER_KEYS = {"provider", "model", "effort", "params"}
 _EFFORT_LEVELS = {"low", "medium", "high"}
+_TICKET_SIZES = ("small", "medium", "large")
 
 # Which issue trackers make sense for each code host (vcs); a missing vcs is github.
 VCS_TRACKERS = {
@@ -86,6 +87,9 @@ def _validate_top_level(cfg: dict) -> list[str]:
     errors.extend(_validate_optional_text("base_branch", cfg.get("base_branch")))
     errors.extend(_validate_integer("max_attempts", cfg.get("max_attempts"), 1))
     errors.extend(_validate_integer("test_timeout", cfg.get("test_timeout"), 1))
+    errors.extend(_validate_integer("max_questions", cfg.get("max_questions"), 1))
+    errors.extend(_validate_integer("max_round_questions", cfg.get("max_round_questions"), 1))
+    errors.extend(_validate_choice("ticket_size", cfg.get("ticket_size"), _TICKET_SIZES))
     errors.extend(_validate_roster("agents", cfg.get("agents")))
     errors.extend(_validate_roster("helpers", cfg.get("helpers")))
     errors.extend(_validate_providers(cfg.get("providers")))
@@ -239,6 +243,12 @@ def _validate_gate(index: int, gate: object) -> list[str]:
 def _validate_integer(name: str, value: object, minimum: int) -> list[str]:
     if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
         return [f"{name}: must be an integer >= {minimum}"]
+    return []
+
+
+def _validate_choice(name: str, value: object, choices: tuple) -> list[str]:
+    if value not in choices:
+        return [f"{name}: must be one of {', '.join(choices)}"]
     return []
 
 
