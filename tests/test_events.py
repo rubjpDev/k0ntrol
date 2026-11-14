@@ -341,6 +341,12 @@ def boom(path: str) -> str:
     raise ValueError("kaboom")
 
 
+@tool
+def fetchish(url: str) -> str:
+    """A tool that takes a URL, like the network tools."""
+    return "page text"
+
+
 def make_handler(tmp_path: Path, **kwargs) -> tuple[K0EventHandler, Path]:
     path = tmp_path / ".k0-mem" / "events.jsonl"
     path.parent.mkdir(parents=True)
@@ -478,6 +484,55 @@ def test_tool_error_without_denial_has_no_denied(tmp_path):
     assert event["ok"] is False
     assert "denied" not in event
     assert "kaboom" in event["err"]
+
+
+def test_tool_event_records_the_host_not_the_url(tmp_path):
+    handler, path = make_handler(tmp_path)
+    fetchish.invoke(
+        {"url": "https://example.com/private/path?token=sekret"},
+        config={"callbacks": [handler], "metadata": {"k0_agent": "researcher"}},
+    )
+    (event,) = read_events(path)
+    assert event["kind"] == "tool"
+    assert event["agent"] == "researcher"
+    assert event["tool"] == "fetchish"
+    assert event["host"] == "example.com"
+    assert event["ok"] is True
+    blob = json.dumps(event)
+    assert "sekret" not in blob
+    assert "private/path" not in blob
+    assert "https://" not in blob
+
+
+def test_tool_error_event_records_the_host_and_hides_the_url(tmp_path):
+    @tool
+    def bad_fetch(url: str) -> str:
+        """A network tool call that is refused."""
+        raise ToolError("non-public address", denied="network_guard")
+
+    handler, path = make_handler(tmp_path)
+    with pytest.raises(ToolError):
+        bad_fetch.invoke(
+            {"url": "http://169.254.169.254/latest?token=sekret"},
+            config={"callbacks": [handler], "metadata": {"k0_agent": "planner"}},
+        )
+    (event,) = read_events(path)
+    assert event["host"] == "169.254.169.254"
+    assert event["denied"] == "network_guard"
+    assert event["ok"] is False
+    blob = json.dumps(event)
+    assert "sekret" not in blob
+    assert "latest" not in blob
+
+
+def test_tool_event_without_a_url_has_no_host(tmp_path):
+    handler, path = make_handler(tmp_path)
+    read_file.invoke(
+        {"path": "src/x.py"},
+        config={"callbacks": [handler], "metadata": {"k0_agent": "coder"}},
+    )
+    (event,) = read_events(path)
+    assert "host" not in event
 
 
 def test_gate_waiting_from_interrupt_payload(tmp_path):
