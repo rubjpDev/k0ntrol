@@ -49,6 +49,14 @@ class WorkItem:
 
 
 @dataclass(frozen=True)
+class ChildWorkItem:
+    ref: str
+    title: str
+    state: str
+    labels: tuple[str, ...] = field(default_factory=tuple)
+
+
+@dataclass(frozen=True)
 class Change:
     ref: str
     branch: str
@@ -71,6 +79,16 @@ class WorkItems(Protocol):
 
     def ensure_work_item(self, title: str, body: str, *, run: str, node: str) -> WorkItem:
         """Create a marked work item, or recover the one already created."""
+        ...
+
+    def create_child_work_item(
+        self, parent: str, title: str, body: str, *, run: str, node: str
+    ) -> WorkItem:
+        """Create a marked work item and attach it as a child of `parent`."""
+        ...
+
+    def list_children(self, parent: str) -> tuple[ChildWorkItem, ...]:
+        """List `parent`'s children in tracker order."""
         ...
 
     def comment_work_item(self, ref: str, body: str, *, run: str, node: str) -> None:

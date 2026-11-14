@@ -6,7 +6,7 @@ import sys
 import pytest
 
 from fakes import FakeRunner
-from k0ntrol.tracker import TrackerError, comment_marker
+from k0ntrol.tracker import ChildWorkItem, TrackerError, comment_marker
 from k0ntrol.tracker.github import GhTracker, subprocess_runner
 
 ISSUE = {
@@ -169,6 +169,219 @@ def test_create_work_item_posts_and_reads_back():
         "--body",
         "Users must log in.",
     ] in runner.calls
+
+
+def test_create_child_work_item_creates_the_issue_and_attaches_it():
+    marker = comment_marker("r1", "publish_ticket")
+    runner = FakeRunner()
+    runner.script(
+        [
+            "gh", "api", "--paginate", "--slurp",
+            "repos/{owner}/{repo}/issues/1/sub_issues?per_page=100",
+        ],
+        stdout="[[]]",
+    )
+    runner.script(
+        [
+            "gh", "api", "--paginate", "--slurp",
+            "repos/{owner}/{repo}/issues?state=all&per_page=100",
+        ],
+        stdout="[[]]",
+    )
+    runner.script(["gh", "issue", "create"], stdout="https://github.com/o/r/issues/7\n")
+    runner.script(
+        ["gh", "api", "repos/{owner}/{repo}/issues/7"],
+        stdout=json.dumps(_issue({"number": 7, "id": 7007, "body": f"do it\n\n{marker}"})),
+    )
+    runner.script(
+        ["gh", "api", "--method", "POST", "repos/{owner}/{repo}/issues/1/sub_issues"]
+    )
+    runner.script(
+        ["gh", "api", "--paginate", "repos/{owner}/{repo}/issues/7/comments"],
+        stdout="[]",
+    )
+    tracker = GhTracker(runner)
+
+    item = tracker.create_child_work_item(
+        "1", "Ticket A", "do it", run="r1", node="publish_ticket"
+    )
+
+    assert item.ref == "7"
+    creates = [c for c in runner.calls if c[:3] == ["gh", "issue", "create"]]
+    assert len(creates) == 1
+    assert creates[0][-1] == f"do it\n\n{marker}"
+    posts = [c for c in runner.calls if c[:2] == ["gh", "api"] and "--method" in c]
+    assert posts == [
+        [
+            "gh", "api", "--method", "POST",
+            "repos/{owner}/{repo}/issues/1/sub_issues",
+            "-F", "sub_issue_id=7007",
+        ]
+    ]
+
+
+def test_create_child_work_item_returns_the_marked_child_without_duplicating():
+    marker = comment_marker("r1", "publish_ticket")
+    child = _issue(
+        {"number": 7, "id": 7007, "title": "Ticket A", "body": f"do it\n\n{marker}"}
+    )
+    runner = FakeRunner()
+    runner.script(
+        [
+            "gh", "api", "--paginate", "--slurp",
+            "repos/{owner}/{repo}/issues/1/sub_issues?per_page=100",
+        ],
+        stdout=json.dumps([[child]]),
+    )
+    runner.script(["gh", "api", "user"], stdout=json.dumps({"login": "rubenjp"}))
+    runner.script(
+        ["gh", "api", "--paginate", "repos/{owner}/{repo}/issues/7/comments"],
+        stdout="[]",
+    )
+    tracker = GhTracker(runner)
+
+    item = tracker.create_child_work_item(
+        "1", "Ticket A", "do it", run="r1", node="publish_ticket"
+    )
+
+    assert item.ref == "7"
+    assert runner.calls == [
+        [
+            "gh", "api", "--paginate", "--slurp",
+            "repos/{owner}/{repo}/issues/1/sub_issues?per_page=100",
+        ],
+        ["gh", "api", "user"],
+        ["gh", "api", "--paginate", "repos/{owner}/{repo}/issues/7/comments"],
+    ]
+
+
+def test_create_child_work_item_retries_the_attach_after_a_failed_post():
+    marker = comment_marker("r1", "publish_ticket")
+    children = [
+        "gh", "api", "--paginate", "--slurp",
+        "repos/{owner}/{repo}/issues/1/sub_issues?per_page=100",
+    ]
+    all_issues = [
+        "gh", "api", "--paginate", "--slurp",
+        "repos/{owner}/{repo}/issues?state=all&per_page=100",
+    ]
+    post = [
+        "gh", "api", "--method", "POST",
+        "repos/{owner}/{repo}/issues/1/sub_issues",
+    ]
+    runner = FakeRunner()
+    runner.script(children, stdout="[[]]")
+    runner.script(all_issues, stdout="[[]]")
+    runner.script(["gh", "issue", "create"], stdout="https://github.com/o/r/issues/7\n")
+    runner.script(
+        ["gh", "api", "repos/{owner}/{repo}/issues/7"],
+        stdout=json.dumps(_issue({"number": 7, "id": 7007})),
+    )
+    runner.script(post, returncode=1, stderr="attach failed")
+    runner.script(
+        ["gh", "api", "--paginate", "repos/{owner}/{repo}/issues/7/comments"],
+        stdout="[]",
+    )
+    tracker = GhTracker(runner)
+
+    with pytest.raises(TrackerError, match="attach failed"):
+        tracker.create_child_work_item(
+            "1", "Ticket A", "do it", run="r1", node="publish_ticket"
+        )
+
+    orphan = _issue({"number": 7, "id": 7007, "body": f"do it\n\n{marker}"})
+    runner.script(all_issues, stdout=json.dumps([[orphan]]))
+    runner.script(["gh", "api", "user"], stdout=json.dumps({"login": "rubenjp"}))
+    runner.script(post)
+
+    item = tracker.create_child_work_item(
+        "1", "Ticket A", "do it", run="r1", node="publish_ticket"
+    )
+
+    assert item.ref == "7"
+    creates = [c for c in runner.calls if c[:3] == ["gh", "issue", "create"]]
+    assert len(creates) == 1
+    posts = [c for c in runner.calls if c[:2] == ["gh", "api"] and "--method" in c]
+    assert len(posts) == 2
+
+
+@pytest.mark.parametrize(
+    "ref", ["o/r#1", "https://github.com/o/r/issues/1", "one", "", "#", "1 2"]
+)
+def test_create_child_work_item_refuses_other_ref_forms(ref):
+    runner = FakeRunner()
+    tracker = GhTracker(runner)
+
+    with pytest.raises(TrackerError, match="expected a work item number like 42 or #42"):
+        tracker.create_child_work_item(ref, "T", "b", run="r", node="n")
+
+    assert runner.calls == []
+
+
+@pytest.mark.parametrize("ref", ["o/r#1", "one", ""])
+def test_list_children_refuses_other_ref_forms(ref):
+    runner = FakeRunner()
+    tracker = GhTracker(runner)
+
+    with pytest.raises(TrackerError, match="expected a work item number like 42 or #42"):
+        tracker.list_children(ref)
+
+    assert runner.calls == []
+
+
+def test_list_children_returns_ref_title_state_and_labels_in_order():
+    runner = FakeRunner()
+    runner.script(
+        [
+            "gh", "api", "--paginate", "--slurp",
+            "repos/{owner}/{repo}/issues/1/sub_issues?per_page=100",
+        ],
+        stdout=json.dumps(
+            [
+                [
+                    _issue(
+                        {
+                            "number": 8,
+                            "title": "Ticket A",
+                            "state": "open",
+                            "labels": [{"name": "ready-for-agent"}],
+                        }
+                    )
+                ],
+                [
+                    _issue(
+                        {
+                            "number": 9,
+                            "title": "Ticket B",
+                            "state": "closed",
+                            "labels": [{"name": "bug"}, {"name": "k0:done"}],
+                        }
+                    )
+                ],
+            ]
+        ),
+    )
+    tracker = GhTracker(runner)
+
+    children = tracker.list_children("1")
+
+    assert children == (
+        ChildWorkItem(
+            ref="8", title="Ticket A", state="open", labels=("ready-for-agent",)
+        ),
+        ChildWorkItem(
+            ref="9", title="Ticket B", state="closed", labels=("bug", "k0:done")
+        ),
+    )
+
+    runner.script(
+        [
+            "gh", "api", "--paginate", "--slurp",
+            "repos/{owner}/{repo}/issues/1/sub_issues?per_page=100",
+        ],
+        stdout="[[]]",
+    )
+    assert tracker.list_children("1") == ()
 
 
 def test_comment_work_item_marks_and_skips_when_marker_present():
