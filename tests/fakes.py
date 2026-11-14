@@ -328,6 +328,24 @@ class FakeTracker:
                 )
         return None
 
+    def link_blocked_by(self, ref: str, blocker: str) -> None:
+        self.calls.append(("link_blocked_by", ref, blocker))
+        blocked = self._item(ref)
+        self._item(blocker)
+        blocked.setdefault("blocked_by", set()).add(str(blocker))
+
+    def close_work_item(
+        self, ref: str, body: str = "", *, run: str = "", node: str = ""
+    ) -> None:
+        self.calls.append(("close_work_item", ref))
+        if body:
+            self.comment_work_item(ref, body, run=run, node=node)
+        self._item(ref)["state"] = "closed"
+
+    def read_labels(self, ref: str) -> set[str]:
+        self._item(ref)
+        return set(self._item_labels[ref])
+
     # -- changes -----------------------------------------------------------
 
     def create_branch(self, branch: str, base: str) -> None:
@@ -443,9 +461,6 @@ class FakeTracker:
         self._item(ref)["comments"].append(
             {"author": author, "author_association": author_association, "body": body}
         )
-
-    def close_work_item(self, ref: str) -> None:
-        self._item(ref)["state"] = "closed"
 
     # -- internals ---------------------------------------------------------
 

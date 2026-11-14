@@ -112,6 +112,32 @@ class GhTracker:
     def find_comment(self, ref: str, marker: str) -> Comment | None:
         return _first_with_marker(self._comments(ref), marker)
 
+    def link_blocked_by(self, ref: str, blocker: str) -> None:
+        ref = _number(ref, "work item")
+        blocker = _number(blocker, "work item")
+        blocker_id = self._gh_json(
+            ["gh", "api", f"repos/{{owner}}/{{repo}}/issues/{blocker}"]
+        )["id"]
+        pages = self._gh_json([
+            "gh", "api", "--paginate", "--slurp",
+            f"repos/{{owner}}/{{repo}}/issues/{ref}/dependencies/blocked_by",
+        ])
+        if any(dep["id"] == blocker_id for page in pages for dep in page):
+            return
+        self._run([
+            "gh", "api", "-X", "POST",
+            f"repos/{{owner}}/{{repo}}/issues/{ref}/dependencies/blocked_by",
+            "-F", f"issue_id={blocker_id}",
+        ])
+
+    def close_work_item(self, ref: str, body: str, *, run: str, node: str) -> None:
+        ref = _number(ref, "work item")
+        self.comment_work_item(ref, body, run=run, node=node)
+        self._run(["gh", "issue", "close", ref])
+
+    def read_labels(self, ref: str) -> set[str]:
+        return self._label_names(_number(ref, "work item"))
+
     # -- changes -----------------------------------------------------------
 
     def create_branch(self, branch: str, base: str) -> None:
