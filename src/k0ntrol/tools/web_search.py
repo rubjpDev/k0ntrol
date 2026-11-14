@@ -92,9 +92,12 @@ def http_fetch(request: SearchRequest) -> bytes:
     try:
         response = opener.open(req, timeout=TIMEOUT)
     except urllib.error.HTTPError as error:
-        if 300 <= error.code < 400:
-            raise ToolError("search endpoint redirected") from error
-        raise
+        try:
+            if 300 <= error.code < 400:
+                raise ToolError("search endpoint redirected") from error
+            raise
+        finally:
+            error.close()
     try:
         body = response.read(_MAX_BODY + 1)
     finally:

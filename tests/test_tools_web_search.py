@@ -5,8 +5,11 @@ credentials saved through ``credentials.py`` like provider keys.
 """
 
 import asyncio
+import io
 import json
 import threading
+import urllib.error
+import urllib.request
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
@@ -316,3 +319,19 @@ def test_http_fetch_refuses_a_redirect():
 def test_http_fetch_refuses_an_oversized_response():
     with pytest.raises(ToolError, match="too large"):
         _local_fetch("/huge")()
+
+
+@pytest.mark.parametrize("code", [302, 500])
+def test_http_fetch_closes_an_error_response(monkeypatch, code):
+    stream = io.BytesIO(b"error body")
+
+    class Opener:
+        def open(self, req, timeout):
+            raise urllib.error.HTTPError(req.full_url, code, "err", {}, stream)
+
+    monkeypatch.setattr(urllib.request, "build_opener", lambda *a: Opener())
+    with pytest.raises((ToolError, urllib.error.HTTPError)):
+        http_fetch(
+            SearchRequest(method="GET", url="https://search.example/", headers={})
+        )
+    assert stream.closed

@@ -266,7 +266,27 @@ def test_fetch_url_passes_its_bounds_to_the_transport():
         resolve=public_dns, transport=transport, timeout=3.5, max_bytes=64
     )
     tool.invoke({"url": "https://example.com/"})
-    assert seen == {"timeout": 3.5, "max_bytes": 64}
+    assert 0 < seen["timeout"] <= 3.5
+    assert seen["max_bytes"] == 64
+
+
+def test_fetch_url_shares_one_deadline_across_redirects():
+    budgets = []
+
+    def transport(target, addresses, *, timeout, max_bytes):
+        budgets.append(timeout)
+        time.sleep(0.03)
+        return HttpResponse(302, {"location": "/again"}, b"", False)
+
+    tool = make_fetch_url(
+        resolve=public_dns, transport=transport, timeout=0.1, max_redirects=50
+    )
+    start = time.monotonic()
+    with pytest.raises(ToolError, match="timed out for example.com"):
+        tool.invoke({"url": "https://example.com/"})
+    assert time.monotonic() - start < 1
+    assert len(budgets) < 10
+    assert budgets == sorted(budgets, reverse=True)
 
 
 def test_fetch_url_tool_event_records_only_the_host(tmp_path):

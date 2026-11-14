@@ -12,7 +12,7 @@ page.
 import codecs
 import http.client
 import ipaddress
-from functools import partial
+import time
 from urllib.parse import quote, urljoin, urlsplit
 
 from langchain_core.tools import BaseTool, tool
@@ -44,18 +44,22 @@ def make_fetch_url(
     timeout: float = TIMEOUT,
     max_redirects: int = MAX_REDIRECTS,
 ) -> BaseTool:
-    """Build the ``fetch_url`` tool with injectable DNS and HTTP."""
-    resolver = resolve or partial(resolve_addresses, timeout=timeout)
+    """Build the ``fetch_url`` tool with injectable DNS and HTTP.
+
+    ``timeout`` is one deadline per call, shared by every DNS lookup,
+    redirect hop and transfer.
+    """
     transport = transport or socket_transport
 
     @tool
     def fetch_url(url: str) -> str:
         """Fetch one web page over HTTP(S); returns its text, marked untrusted."""
+        clock = _Clock(timeout)
         return _fetch_page(
             url,
-            resolver,
+            resolve or clock.resolver,
             transport,
-            timeout=timeout,
+            clock=clock,
             max_bytes=max_bytes,
             max_redirects=max_redirects,
         )
@@ -63,12 +67,28 @@ def make_fetch_url(
     return fetch_url
 
 
+class _Clock:
+    """The remaining budget of one ``fetch_url`` call."""
+
+    def __init__(self, timeout: float) -> None:
+        self._end = time.monotonic() + timeout
+
+    def remaining(self, host: str) -> float:
+        left = self._end - time.monotonic()
+        if left <= 0:
+            raise ToolError(f"fetch timed out for {host}")
+        return left
+
+    def resolver(self, host: str) -> list[str]:
+        return resolve_addresses(host, timeout=self.remaining(host))
+
+
 def _fetch_page(
     url: str,
     resolver: Resolver,
     transport: Transport,
     *,
-    timeout: float,
+    clock: _Clock,
     max_bytes: int,
     max_redirects: int,
 ) -> str:
@@ -77,6 +97,7 @@ def _fetch_page(
     while True:
         target = _target(current)
         addresses = _addresses(target.host, resolver)
+        timeout = clock.remaining(target.host)
         page = _fetch(transport, target, addresses, timeout, max_bytes)
         location = _redirect_location(page)
         if location is None:

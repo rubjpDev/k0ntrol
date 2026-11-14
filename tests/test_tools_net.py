@@ -10,6 +10,7 @@ import time
 
 import pytest
 
+from k0ntrol.tools import net
 from k0ntrol.tools.net import FetchTarget, resolve_addresses, socket_transport
 
 
@@ -145,3 +146,104 @@ def test_resolve_addresses_times_out_a_hanging_lookup(monkeypatch):
     finally:
         release.set()
     assert time.monotonic() - start < 5
+
+
+def test_socket_transport_bounds_a_dripping_body_by_one_deadline():
+    client, peer = socket.socketpair()
+    peer.sendall(canned_response(b"a", length=1000))
+    stop = threading.Event()
+
+    def drip():
+        while not stop.wait(0.02):
+            try:
+                peer.send(b"a")
+            except OSError:
+                return
+
+    dripper = threading.Thread(target=drip, daemon=True)
+    dripper.start()
+    start = time.monotonic()
+    try:
+        with pytest.raises(TimeoutError):
+            socket_transport(
+                make_target(),
+                ("93.184.216.34",),
+                timeout=0.3,
+                max_bytes=10_000,
+                connect=lambda address, timeout: client,
+            )
+    finally:
+        stop.set()
+        dripper.join(5)
+        client.close()
+        peer.close()
+    assert time.monotonic() - start < 2
+
+
+def test_socket_transport_shares_its_deadline_across_addresses():
+    tried = []
+
+    def connect(address, timeout):
+        tried.append(timeout)
+        time.sleep(0.06)
+        raise OSError("connection refused")
+
+    with pytest.raises(TimeoutError):
+        socket_transport(
+            make_target(),
+            tuple(f"192.0.2.{n}" for n in range(1, 20)),
+            timeout=0.15,
+            max_bytes=100,
+            connect=connect,
+        )
+    assert len(tried) < 5
+
+
+def test_resolve_addresses_runs_lookups_on_daemon_threads(monkeypatch):
+    release = threading.Event()
+    threads = []
+
+    def sleeper(*args, **kwargs):
+        threads.append(threading.current_thread())
+        release.wait(30)
+        return []
+
+    monkeypatch.setattr(socket, "getaddrinfo", sleeper)
+    try:
+        with pytest.raises(TimeoutError):
+            resolve_addresses("example.com", timeout=0.05)
+        assert threads and all(thread.daemon for thread in threads)
+    finally:
+        release.set()
+
+
+def test_resolve_addresses_caps_hung_lookups(monkeypatch):
+    release = threading.Event()
+    started = []
+
+    def sleeper(*args, **kwargs):
+        started.append(1)
+        release.wait(30)
+        return []
+
+    monkeypatch.setattr(socket, "getaddrinfo", sleeper)
+    try:
+        for _ in range(net.DNS_LOOKUP_SLOTS + 3):
+            with pytest.raises(TimeoutError):
+                resolve_addresses("example.com", timeout=0.02)
+        assert len(started) == net.DNS_LOOKUP_SLOTS
+    finally:
+        release.set()
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        if resolve_addresses("93.184.216.34", timeout=1) == ["93.184.216.34"]:
+            break
+
+
+def test_resolve_addresses_reraises_a_lookup_failure(monkeypatch):
+    def failing(*args, **kwargs):
+        raise socket.gaierror("no such host")
+
+    monkeypatch.setattr(socket, "getaddrinfo", failing)
+    with pytest.raises(socket.gaierror):
+        resolve_addresses("example.com", timeout=5)

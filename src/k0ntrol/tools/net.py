@@ -9,13 +9,18 @@ ambient ``HTTP_PROXY`` cannot smuggle a request past the guards.
 ``resolve_addresses`` is the default DNS lookup callers inject around.
 """
 
+import contextlib
 import http.client
 import socket
 import ssl
+import threading
+import time
 from collections.abc import Callable, Sequence
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Any, Protocol
+
+DNS_LOOKUP_SLOTS = 4
+_dns_slots = threading.BoundedSemaphore(DNS_LOOKUP_SLOTS)
 
 
 @dataclass(frozen=True)
@@ -64,20 +69,87 @@ Connect = Callable[..., socket.socket]
 def resolve_addresses(host: str, *, timeout: float) -> list[str]:
     """The host's addresses via ``getaddrinfo``, deduplicated and sorted.
 
-    ``getaddrinfo`` has no timeout of its own, so the lookup runs on a
-    single-use executor and ``timeout`` bounds the wait; on expiry a
-    ``TimeoutError`` surfaces for the caller to turn into a tool error.
+    ``getaddrinfo`` has no timeout and cannot be cancelled, so the lookup
+    runs on a daemon thread — a hung resolver never blocks process exit —
+    and at most ``DNS_LOOKUP_SLOTS`` lookups run at once, so hung lookups
+    cannot pile up threads. ``timeout`` bounds the whole wait, slot
+    included; on expiry a ``TimeoutError`` surfaces for the caller to turn
+    into a tool error.
     """
-    pool = ThreadPoolExecutor(max_workers=1)
-    try:
-        infos = pool.submit(
-            socket.getaddrinfo, host, None, type=socket.SOCK_STREAM
-        ).result(timeout=timeout)
-    finally:
-        pool.shutdown(wait=False, cancel_futures=True)
+    start = time.monotonic()
+    if not _dns_slots.acquire(timeout=timeout):
+        raise TimeoutError("DNS resolver busy")
+    lookup = _Lookup(host)
+    threading.Thread(target=lookup.run, name="k0-dns", daemon=True).start()
+    if not lookup.done.wait(max(0.0, timeout - (time.monotonic() - start))):
+        raise TimeoutError("DNS lookup timed out")
+    if lookup.error is not None:
+        raise lookup.error
     return sorted(
-        {info[4][0] for info in infos if isinstance(info[4][0], str)}
+        {info[4][0] for info in lookup.infos if isinstance(info[4][0], str)}
     )
+
+
+class _Lookup:
+    """One ``getaddrinfo`` call run off-thread; frees its DNS slot when done."""
+
+    def __init__(self, host: str) -> None:
+        self.host = host
+        self.done = threading.Event()
+        self.infos: list[Any] = []
+        self.error: Exception | None = None
+
+    def run(self) -> None:
+        try:
+            self.infos = socket.getaddrinfo(self.host, None, type=socket.SOCK_STREAM)
+        except Exception as error:
+            self.error = error
+        finally:
+            _dns_slots.release()
+            self.done.set()
+
+
+class _Deadline:
+    """A monotonic deadline; ``remaining`` raises once it has passed."""
+
+    def __init__(self, timeout: float) -> None:
+        self._end = time.monotonic() + timeout
+
+    def remaining(self) -> float:
+        left = self._end - time.monotonic()
+        if left <= 0:
+            raise TimeoutError("fetch deadline passed")
+        return left
+
+
+class _Watchdog:
+    """Shuts the socket down at the deadline, unblocking any pending read.
+
+    Socket timeouts bound each blocking call, not the request: a server
+    dripping one byte per read would never trip them. The watchdog bounds
+    the whole exchange — TLS handshake, headers and body.
+    """
+
+    def __init__(self, deadline: _Deadline) -> None:
+        self._deadline = deadline
+        self._timer: threading.Timer | None = None
+        self.fired = False
+
+    def arm(self, sock: socket.socket) -> None:
+        self._timer = threading.Timer(
+            self._deadline.remaining(), self._fire, args=(sock,)
+        )
+        self._timer.daemon = True
+        self._timer.start()
+
+    def cancel(self) -> None:
+        if self._timer is not None:
+            self._timer.cancel()
+
+    def _fire(self, sock: socket.socket) -> None:
+        self.fired = True
+        with contextlib.suppress(OSError):
+            sock.shutdown(socket.SHUT_RDWR)
 
 
 def socket_transport(
@@ -90,17 +162,21 @@ def socket_transport(
 ) -> HttpResponse:
     """GET ``target`` through the first reachable pinned address.
 
+    ``timeout`` is one deadline for the whole call — every address tried,
+    connect, TLS, headers and body — not a per-read socket timeout.
     ``connect`` is the socket seam (``socket.create_connection`` in
-    production). Raises the last ``OSError``/``HTTPException`` when no
-    address answers; the caller turns it into a tool error.
+    production). Raises ``TimeoutError`` past the deadline, else the last
+    ``OSError``/``HTTPException`` when no address answers; the caller turns
+    it into a tool error.
     """
     if not addresses:
         raise ValueError("socket_transport needs at least one address")
+    deadline = _Deadline(timeout)
     failure: OSError | http.client.HTTPException | None = None
     for address in addresses:
         try:
             return _get_once(
-                target, address, timeout=timeout, max_bytes=max_bytes, connect=connect
+                target, address, deadline=deadline, max_bytes=max_bytes, connect=connect
             )
         except (OSError, http.client.HTTPException) as error:
             failure = error
@@ -112,23 +188,44 @@ def _get_once(
     target: FetchTarget,
     address: str,
     *,
-    timeout: float,
+    deadline: _Deadline,
     max_bytes: int,
     connect: Connect,
 ) -> HttpResponse:
-    conn = _connection(target, address, timeout, connect)
+    watchdog = _Watchdog(deadline)
+
+    def guarded_connect(where: tuple[str, int], timeout: float) -> socket.socket:
+        sock = connect(where, timeout)
+        watchdog.arm(sock)
+        return sock
+
+    conn = _connection(target, address, deadline.remaining(), guarded_connect)
     try:
-        conn.request("GET", target.selector, headers=_request_headers())
-        response = conn.getresponse()
-        body = response.read(max_bytes + 1)
-        return HttpResponse(
-            status=response.status,
-            headers={name.lower(): value for name, value in response.getheaders()},
-            body=body[:max_bytes],
-            truncated=len(body) > max_bytes,
-        )
+        response = _exchange(conn, target, max_bytes)
+    except (OSError, http.client.HTTPException) as error:
+        if watchdog.fired:
+            raise TimeoutError("fetch deadline passed") from error
+        raise
     finally:
+        watchdog.cancel()
         conn.close()
+    if watchdog.fired:
+        raise TimeoutError("fetch deadline passed")
+    return response
+
+
+def _exchange(
+    conn: http.client.HTTPConnection, target: FetchTarget, max_bytes: int
+) -> HttpResponse:
+    conn.request("GET", target.selector, headers=_request_headers())
+    response = conn.getresponse()
+    body = response.read(max_bytes + 1)
+    return HttpResponse(
+        status=response.status,
+        headers={name.lower(): value for name, value in response.getheaders()},
+        body=body[:max_bytes],
+        truncated=len(body) > max_bytes,
+    )
 
 
 def _connection(
