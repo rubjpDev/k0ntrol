@@ -6,6 +6,7 @@ derived recursion limit, behind a fresh-context wrapper.
 """
 
 import json
+import sys
 
 import httpx
 import pytest
@@ -113,6 +114,86 @@ def test_build_agent_accepts_the_fast_allowlist(tmp_path):
         allowlist=allowlist_for("tester", tracker=False),
     )
     assert {t.name for t in agent.tools} == set(allowlist_for("tester", tracker=False))
+
+
+def test_implementer_tools_equal_its_allowlist(tmp_path):
+    tools = agent_tools(
+        "implementer",
+        root=tmp_path,
+        cfg={"test_cmd": "pytest -q"},
+        tracker=_tracker(),
+        init=_init(_scripted()),
+    )
+    assert [t.name for t in tools] == [
+        "read_file",
+        "list_files",
+        "grep",
+        "bulk_read",
+        "search_memory",
+        "write_file",
+        "edit_file",
+        "run_tests",
+        "read_work_item",
+        "read_change_diff",
+    ]
+
+
+def _implementer_tools(root, test_cmd):
+    tools = agent_tools(
+        "implementer",
+        root=root,
+        cfg={"test_cmd": test_cmd},
+        tracker=_tracker(),
+        init=_init(_scripted()),
+    )
+    return {tool.name: tool for tool in tools}
+
+
+def test_implementer_writes_and_run_tests_share_one_slice_guard_per_tool_group(tmp_path):
+    red_cmd = f'{sys.executable} -c "import sys; sys.exit(1)"'
+    tools = _implementer_tools(tmp_path, red_cmd)
+
+    tools["write_file"].invoke({"path": "tests/test_new.py", "content": "x\n"})
+    with pytest.raises(ToolError):
+        tools["write_file"].invoke({"path": "src/app.py", "content": "X = 1\n"})
+    tools["run_tests"].invoke({"paths": []})
+    tools["write_file"].invoke({"path": "src/app.py", "content": "X = 2\n"})
+    assert (tmp_path / "src" / "app.py").read_text() == "X = 2\n"
+    with pytest.raises(ToolError):
+        tools["write_file"].invoke({"path": "tests/test_other.py", "content": "x\n"})
+
+    other = _implementer_tools(tmp_path, red_cmd)
+    with pytest.raises(ToolError):
+        other["write_file"].invoke({"path": "src/other.py", "content": "X = 3\n"})
+
+
+def test_build_agent_builds_implementer_from_its_config(tmp_path):
+    model = _scripted(AIMessage(content="done"))
+    cfg = cfg_with(
+        {
+            "implementer": {
+                "provider": "anthropic",
+                "model": "m",
+                "effort": "medium",
+                "model_calls": 7,
+            }
+        }
+    )
+    cfg["test_cmd"] = "pytest -q"
+    tools = agent_tools(
+        "implementer", root=tmp_path, cfg=cfg, tracker=_tracker(), init=_init(model)
+    )
+
+    agent = build_agent(
+        "implementer", cfg, tools, root=tmp_path, init=_init(model)
+    )
+
+    assert agent.name == "implementer"
+    assert agent.model_calls == 7
+    assert agent.effort == "medium"
+    assert {tool.name for tool in agent.tools} == set(
+        allowlist_for("implementer", tracker=True)
+    )
 
 
 # --- building and answering --------------------------------------------------

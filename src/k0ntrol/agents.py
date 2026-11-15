@@ -54,8 +54,9 @@ from k0ntrol.tools.errors import ToolError
 from k0ntrol.tools.read import make_grep, make_list_files, make_read_file
 from k0ntrol.tools.run_tests import make_run_tests
 from k0ntrol.tools.search_memory import make_search_memory
+from k0ntrol.tools.slice_guard import SliceGuard
 from k0ntrol.tools.tracker import tracker_read_tools
-from k0ntrol.tools.write import WriteScope, make_edit_file, make_write_file
+from k0ntrol.tools.write import WritePolicy, WriteScope, make_edit_file, make_write_file
 
 _BASE_READ_TOOLS = (
     "read_file",
@@ -73,6 +74,9 @@ _TRACKER_TOOLS = ("read_work_item", "read_change_diff")
 # tracker lands (#43).
 ALLOWLISTS: dict[str, tuple[str, ...]] = {
     "chatty": _BASE_READ_TOOLS,
+    "implementer": _BASE_READ_TOOLS
+    + ("write_file", "edit_file", "run_tests")
+    + _TRACKER_TOOLS,
     "spec": _BASE_READ_TOOLS + ("read_work_item",),
     "tester": _BASE_READ_TOOLS
     + ("read_work_item", "write_file", "edit_file", "run_tests"),
@@ -387,19 +391,21 @@ def _system_prompt(name: str, root: Path) -> str:
 def _tool_factories(
     agent: str, *, root: Path, cfg: dict | None, tracker, init: Callable
 ) -> dict[str, Callable[[], BaseTool]]:
+    guard = SliceGuard() if agent == "implementer" else None
     factories: dict[str, Callable[[], BaseTool]] = {
         "read_file": lambda: make_read_file(root),
         "list_files": lambda: make_list_files(root),
         "grep": lambda: make_grep(root),
         "bulk_read": lambda: make_bulk_read(root, cfg, init=init),
         "search_memory": lambda: make_search_memory(root),
-        "run_tests": lambda: make_run_tests(root, _need_cfg(cfg)),
+        "run_tests": lambda: make_run_tests(root, _need_cfg(cfg), guard),
         "read_work_item": lambda: _tracker_tool("read_work_item", tracker),
         "read_change_diff": lambda: _tracker_tool("read_change_diff", tracker),
     }
-    scope = _WRITE_SCOPES.get(agent)
-    if scope is not None:
-        policy: WriteScope = scope
+    policy: WritePolicy | None = (
+        guard if guard is not None else _WRITE_SCOPES.get(agent)
+    )
+    if policy is not None:
         factories["write_file"] = lambda: make_write_file(root, policy)
         factories["edit_file"] = lambda: make_edit_file(root, policy)
     return factories
