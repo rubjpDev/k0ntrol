@@ -3,8 +3,8 @@
 It runs the configured ``test_cmd`` as an argv list, optionally narrowed to
 existing test paths, through the same scrubbed/timed-out/truncated runner
 the red check and VALIDATOR use. There is no shell tool. Given a
-``SliceGuard`` (IMPLEMENTER's), the verdict flips the guard's green/red
-state (ADR 0011).
+``SliceGuard`` (IMPLEMENTER's), the verdict is the guard's green/red signal
+(ADR 0011).
 """
 
 from pathlib import Path

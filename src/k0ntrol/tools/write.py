@@ -2,8 +2,8 @@
 
 The ``"test"`` flavour allows test paths only and ``"non_test"`` the rest,
 so the two batch agents cannot cheat each other (spec user story 9);
-IMPLEMENTER gets a ``SliceGuard`` instead, whose green/red state decides
-which path kinds may be written (ADR 0011). New files are allowed. The
+IMPLEMENTER gets a ``SliceGuard`` instead, whose state decides which path
+kinds may be written (ADR 0011). New files are allowed. The
 check runs on the resolved path, after the path guard's root and
 protected-path checks.
 """
