@@ -6,7 +6,11 @@ working-tree summary the diff gate shows. #44/#45 add the write side
 as marker-idempotent nodes through this module.
 """
 
+import hashlib
+import json
+import os
 import re
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -215,3 +219,164 @@ def _git(root: Path, *args: str) -> subprocess.CompletedProcess:
         text=True,
         check=False,
     )
+
+
+# --- working-tree snapshots (/implement's diff-gate ``n``, #116) ---------------
+
+
+def worktree_snapshot_dir(root: Path, run_id: str) -> Path:
+    """Where run ``run_id``'s pre-run working-tree snapshot lives."""
+    return root / ".k0-mem" / "snapshots" / run_id
+
+
+def is_git_repo(root: Path) -> bool:
+    """Whether ``root`` sits inside a git work tree.
+
+    The snapshot is built on ``git ls-files`` — outside a repo it would
+    be empty and ``n`` would silently keep every change, so ``/implement``
+    refuses such roots up front.
+    """
+    result = _git(root, "rev-parse", "--is-inside-work-tree")
+    return result.returncode == 0 and result.stdout.strip() == "true"
+
+
+def snapshot_worktree(root: Path, dest: Path) -> None:
+    """Copy the working tree's files into ``dest`` for ``restore_worktree``.
+
+    The set is what git sees — tracked files plus untracked non-ignored
+    ones — minus ``.k0-mem/``: agents cannot write protected paths, so
+    everything under it is harness bookkeeping, never the change.
+    """
+    _ensure_snapshot_ignored(root)
+    dest.mkdir(parents=True, exist_ok=True)
+    manifest: dict[str, str] = {}
+    links: dict[str, str] = {}
+    dirs: list[str] = []
+    for relative in _worktree_files(root):
+        source = root / relative
+        if source.is_symlink():
+            links[relative] = os.readlink(source)
+        elif source.is_file():
+            target = dest / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, target)
+            manifest[relative] = _sha256(source)
+        elif source.is_dir():
+            # a gitlink (submodule): recorded so restore leaves it alone
+            dirs.append(relative)
+    (dest / "manifest.json").write_text(
+        json.dumps(
+            {"files": manifest, "links": links, "dirs": dirs},
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+
+def restore_worktree(root: Path, snapshot: Path) -> None:
+    """Put the tree back as the snapshot found it.
+
+    Files the run added are deleted (emptying their dirs), files it
+    edited or removed are copied back from the snapshot. ``.k0-mem/`` is
+    never in the file set, so events and checkpoints survive.
+    """
+    recorded = json.loads(
+        (snapshot / "manifest.json").read_text(encoding="utf-8")
+    )
+    manifest: dict[str, str] = recorded["files"]
+    links: dict[str, str] = recorded.get("links", {})
+    dirs: list[str] = recorded.get("dirs", [])
+    known = set(manifest) | set(links) | set(dirs)
+    _remove_new_files(root, known)
+    for relative, digest in manifest.items():
+        _restore_file(root, snapshot, relative, digest)
+    for relative, link_target in links.items():
+        _restore_link(root, relative, link_target)
+
+
+def _remove_new_files(root: Path, known: set[str]) -> None:
+    """Delete what the run added; empty dirs it leaves are pruned."""
+    for relative in _worktree_files(root):
+        if relative not in known:
+            _remove(root / relative)
+            _prune_empty_dirs(root, relative)
+
+
+def _restore_file(root: Path, snapshot: Path, relative: str, digest: str) -> None:
+    """Copy one snapshotted file back unless the tree already matches."""
+    target = root / relative
+    unchanged = (
+        not target.is_symlink()
+        and target.is_file()
+        and _sha256(target) == digest
+    )
+    if unchanged:
+        return
+    target.parent.mkdir(parents=True, exist_ok=True)
+    _remove(target)  # a symlink or dir here must go before copy2 writes
+    shutil.copy2(snapshot / relative, target)
+
+
+def drop_worktree_snapshot(root: Path, snapshot: Path) -> None:
+    """A finished run keeps no snapshot."""
+    shutil.rmtree(snapshot, ignore_errors=True)
+
+
+def _restore_link(root: Path, relative: str, link_target: str) -> None:
+    """Recreate a symlink the run removed or retargeted; leave a correct one."""
+    path = root / relative
+    if path.is_symlink() and os.readlink(path) == link_target:
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    _remove(path)
+    path.symlink_to(link_target)
+
+
+def _worktree_files(root: Path) -> list[str]:
+    """Tracked plus untracked-nonignored paths, minus ``.k0-mem/``."""
+    seen = dict.fromkeys(
+        _git_paths(root, "ls-files", "-z")
+        + _git_paths(root, "ls-files", "--others", "--exclude-standard", "-z")
+    )
+    return sorted(p for p in seen if p and not p.startswith(".k0-mem/"))
+
+
+def _git_paths(root: Path, *args: str) -> list[str]:
+    return [p for p in _git(root, *args).stdout.split("\0") if p]
+
+
+def _sha256(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _remove(path: Path) -> None:
+    if path.is_dir() and not path.is_symlink():
+        shutil.rmtree(path)
+    else:
+        path.unlink(missing_ok=True)
+
+
+def _prune_empty_dirs(root: Path, relative: str) -> None:
+    """Remove ancestor dirs the run emptied, stopping at the first non-empty."""
+    base = root.resolve()
+    current = (base / relative).parent
+    while current != base:
+        try:
+            current.rmdir()
+        except OSError:
+            return
+        current = current.parent
+
+
+def _ensure_snapshot_ignored(root: Path) -> None:
+    """Keep ``.k0-mem/snapshots/`` out of ``git status`` like the rest of
+    the harness's scratch (same append-only pattern as event rotation)."""
+    gitignore = root / ".k0-mem" / ".gitignore"
+    text = gitignore.read_text(encoding="utf-8") if gitignore.exists() else ""
+    if "snapshots/" in text.splitlines():
+        return
+    prefix = "" if not text or text.endswith("\n") else "\n"
+    with open(gitignore, "a", encoding="utf-8") as fh:
+        fh.write(f"{prefix}snapshots/\n")

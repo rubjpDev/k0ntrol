@@ -41,7 +41,7 @@ WELCOME_LINES = (
     "  Tips for getting started:",
     "  1. type a question: k0 answers and remembers the conversation",
     "  2. #<issue> takes a work item to a pull request",
-    "  3. /fast <task> for a quick test-first change · /full <task> for new work",
+    "  3. /fast <task> for a quick change · /implement <task> to build in the tree · /full <task> for new work",
 )
 _UP_KEYS = {"up", "k"}
 _DOWN_KEYS = {"down", "j"}

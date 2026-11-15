@@ -44,6 +44,7 @@ def test_help_stays_on_screen_and_quit_exits(tmp_path):
     assert "/ask" in text
     assert "/fast" in text
     assert "/full" in text
+    assert "/implement" in text
     assert "/quit" in text
     assert "\x1b[?1049h" not in text
 
@@ -82,6 +83,30 @@ def test_full_routes_to_the_work_seam(tmp_path):
     )
     assert code == 0
     assert calls == [("start", "full", "add checkout")]
+
+
+def test_implement_routes_to_the_work_seam(tmp_path):
+    """``/implement <task>`` drives the working-tree graph through the
+    same start→Pending→resume loop as ``/fast``."""
+    from k0ntrol.workflow import Outcome
+
+    calls = []
+
+    def fake_start(kind, task, **kwargs):
+        calls.append(("start", kind, task))
+        return Outcome(run="r1", outcome="done")
+
+    lines = iter(["/implement add a calc module", "/quit"])
+    shown = []
+    code = run_session(
+        lambda: next(lines),
+        shown.append,
+        root=tmp_path,
+        config=config(),
+        start=fake_start,
+    )
+    assert code == 0
+    assert calls == [("start", "implement", "add a calc module")]
 
 
 def test_fast_drives_the_pending_gate_to_done(tmp_path):

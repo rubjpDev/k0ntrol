@@ -54,14 +54,23 @@ from k0ntrol.tracker.github import GhTracker, subprocess_runner  # noqa: E402
 from k0ntrol.workflow.change import (  # noqa: E402
     current_branch,
     dirty_paths,
+    drop_worktree_snapshot,
     existing_branch,
+    is_git_repo,
+    snapshot_worktree,
+    worktree_snapshot_dir,
 )
 from k0ntrol.workflow.context import RunContext  # noqa: E402
 from k0ntrol.workflow.fast import build_fast_graph  # noqa: E402
 from k0ntrol.workflow.full import build_full_graph  # noqa: E402
+from k0ntrol.workflow.implement import build_implement_graph  # noqa: E402
 from k0ntrol.workflow.stuck import stuck_update  # noqa: E402
 
-_BUILDERS = {"fast": build_fast_graph, "full": build_full_graph}
+_BUILDERS = {
+    "fast": build_fast_graph,
+    "full": build_full_graph,
+    "implement": build_implement_graph,
+}
 
 # The roster each run kind uses; the free doctor checks gate start on it.
 # Every agent gets the bulk_read tool, so the helper is part of each roster
@@ -75,6 +84,7 @@ _ROSTER = {
         "agents.reviewer",
         "helpers.bulk_read",
     ),
+    "implement": ("agents.implementer", "helpers.bulk_read"),
 }
 
 # Outer recursion limit: each loop iteration costs two super-steps at most.
@@ -144,15 +154,17 @@ def start(
 ) -> Result:
     """Start a run of ``kind`` for ``input``.
 
-    ``/full <text>`` drafts a brief; ``/full #<n>`` refines issue ``n``.
+    ``/full <text>`` drafts a brief; ``/full #<n>`` refines issue ``n``;
+    ``/implement <task>`` runs the working-tree path (#116).
     Refuses — ``RunRefused`` — on bad usage, a missing tracker or work
     item, an untrusted issue body, a dirty tree (``.k0-mem/`` ignored),
-    failed doctor checks, a failed rescan or (for ``/fast``) another open
-    run. ``/full #<n>`` answers an open run for item ``n`` with ``Unfinished``.
+    failed doctor checks, a failed rescan or (for ``/fast`` and
+    ``/implement``) another open run. ``/full #<n>`` answers an open run
+    for item ``n`` with ``Unfinished``.
     """
     if kind not in _BUILDERS:
         raise RunRefused(f"unknown run: {kind}")
-    kind = cast(Literal["full", "fast"], kind)  # _BUILDERS holds only those
+    kind = cast(Literal["full", "fast", "implement"], kind)  # _BUILDERS' keys
     input_text = _checked_input(kind, input)
     tracker = _tracker_for(kind, cfg, root, tracker)
     conn, saver = _open_checkpoints(root)
@@ -169,6 +181,8 @@ def start(
         item = _full_preflight(kind, input_text, tracker, root)
         graph = _BUILDERS[kind](ctx, saver)
         run_id = new_run_id()
+        if kind == "implement":
+            _snapshot_worktree(root, run_id)
         _bind_events(ctx, root, run_id, write)
         ctx.trace = tracing(run_id)
         session_id = item.qualified_ref if item else _sitting_session(ctx)
@@ -260,7 +274,10 @@ def abandon(run_id: str, *, root: Path) -> None:
     _refuse_dirty(root)
     conn, saver = _open_checkpoints(root)
     try:
+        kind = _run_kind(saver, run_id)
         saver.delete_thread(run_id)
+        if kind == "implement":
+            drop_worktree_snapshot(root, worktree_snapshot_dir(root, run_id))
     finally:
         conn.close()
 
@@ -363,6 +380,16 @@ def _rescan(scan: Callable, root: Path) -> None:
         raise RunRefused(f"scan failed: {error}") from error
 
 
+def _snapshot_worktree(root: Path, run_id: str) -> None:
+    """``/implement``'s diff-gate ``n`` restores this pre-run snapshot."""
+    if not is_git_repo(root):
+        raise RunRefused("/implement needs a git repository")
+    try:
+        snapshot_worktree(root, worktree_snapshot_dir(root, run_id))
+    except OSError as error:
+        raise RunRefused(f"could not snapshot the working tree: {error}") from error
+
+
 def _bind_events(
     ctx: RunContext, root: Path, run_id: str, write: Callable | None
 ) -> None:
@@ -379,7 +406,9 @@ def _bind_events(
 def _checked_input(kind: str, input) -> str:
     """Non-empty input in the kind's accepted forms, or a usage refusal."""
     text = str(input).strip()
-    if not text or (kind == "full" and not _full_usage_ok(text)):
+    if not text or (kind == "full" and not _full_usage_ok(text)) or (
+        kind == "implement" and text.startswith("#")
+    ):
         raise RunRefused(_usage(kind))
     return text
 
@@ -423,6 +452,8 @@ def _log_failed(
         state = _stuck_by_log(graph, config, state)
         reason, node = "event_log", state.values.get("node")
     _trace_finish(ctx, "stuck", session_id, state.values)
+    if ctx.kind == "implement":
+        drop_worktree_snapshot(ctx.root, worktree_snapshot_dir(ctx.root, run_id))
     return Outcome(run=run_id, outcome="stuck", reason=reason, node=node)
 
 
@@ -503,7 +534,21 @@ def _initial_state(kind: str, input_text: str, cfg: dict, item=None) -> dict:
     }
     if kind == "full":
         state.update(_full_state(state["task"], item))
+    if kind == "implement":
+        state.update(_implement_state())
     return state
+
+
+def _implement_state() -> dict:
+    """The ``/implement <task>`` fields layered over the shared run state."""
+    return {
+        "files": [],
+        "seam_attempts": 0,
+        "seam_proposal": "",
+        "seam_approved": False,
+        "seam_feedback": None,
+        "implementer_attempts": 0,
+    }
 
 
 def _full_state(task: str, item) -> dict:
@@ -569,9 +614,10 @@ def _session_id(ctx: RunContext, values: dict) -> str | None:
 
 
 def _sitting_session(ctx: RunContext) -> str | None:
-    """``/fast`` has no work item: its session is the sitting. ``/full``'s
-    is always the work item, which outlives any one sitting."""
-    return ctx.session if ctx.kind == "fast" else None
+    """``/fast`` and ``/implement <task>`` have no work item: their session
+    is the sitting. ``/full``'s is always the work item, which outlives any
+    one sitting."""
+    return ctx.session if ctx.kind in ("fast", "implement") else None
 
 
 def _trace_metadata(ctx: RunContext, values: dict) -> dict:
@@ -601,7 +647,9 @@ def _thread(run_id: str) -> RunnableConfig:
     return {"configurable": {"thread_id": run_id}}
 
 
-def _run_kind(saver: SqliteSaver, run_id: str) -> Literal["full", "fast"] | None:
+def _run_kind(
+    saver: SqliteSaver, run_id: str
+) -> Literal["full", "fast", "implement"] | None:
     """The run's kind, read from the checkpoint before a graph is built."""
     tuple_ = saver.get_tuple(_thread(run_id))
     if tuple_ is None:
@@ -684,6 +732,8 @@ def _finish(ctx: RunContext, graph, run_id: str, config: RunnableConfig) -> Resu
         node=values.get("node"),
     )
     _trace_finish(ctx, outcome, _session_id(ctx, values), values)
+    if ctx.kind == "implement":
+        drop_worktree_snapshot(ctx.root, worktree_snapshot_dir(ctx.root, run_id))
     return Outcome(
         run=run_id,
         outcome=outcome,

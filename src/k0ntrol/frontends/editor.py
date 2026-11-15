@@ -28,7 +28,7 @@ from typing import TextIO
 
 from rich.cells import cell_len
 
-from k0ntrol.frontends.theme import ACCENT, BRAND, DIM, POINTER, WARN
+from k0ntrol.frontends.theme import ACCENT, BRAND, DIM, OK, POINTER, WARN
 
 try:
     import termios
@@ -63,8 +63,14 @@ DEFAULT_MODES = (
     Mode("chat", BRAND, "ask about this repo"),
     Mode("fast", WARN, "quick test-first change"),
     Mode("full", ACCENT, "new work, spec first"),
+    Mode("implement", OK, "build a task in the working tree"),
 )
-_PREFIX_MODES = {"/fast": "fast", "/full": "full", "/ask": "chat"}
+_PREFIX_MODES = {
+    "/fast": "fast",
+    "/full": "full",
+    "/implement": "implement",
+    "/ask": "chat",
+}
 _ISSUE_REF = re.compile(r"#\d+")
 
 
