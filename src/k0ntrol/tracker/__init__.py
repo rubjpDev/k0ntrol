@@ -11,6 +11,7 @@ from k0ntrol.tracker.protocol import (
     WorkItem,
     WorkItems,
     comment_marker,
+    is_k0_work_item,
 )
 
 __all__ = [
@@ -24,4 +25,5 @@ __all__ = [
     "WorkItem",
     "WorkItems",
     "comment_marker",
+    "is_k0_work_item",
 ]

@@ -43,6 +43,21 @@ def render_work_item(item: WorkItem) -> str:
     return "\n".join(parts)
 
 
+def latest_agent_brief(item: WorkItem) -> str | None:
+    """The latest ``## Agent Brief`` comment from a trusted author, or ``None``.
+
+    ``/implement #<n>`` runs IMPLEMENTER on this brief when there is one,
+    else on the work item's body (#117, ADR 0012).
+    """
+    briefs = [
+        comment.body
+        for comment in item.comments
+        if comment.author_association in TRUSTED_ASSOCIATIONS
+        and _BRIEF_HEADING.search(comment.body)
+    ]
+    return briefs[-1] if briefs else None
+
+
 def tracker_read_tools(tracker: Tracker) -> list[BaseTool]:
     """Build the tracker read tools bound to one tracker."""
 
