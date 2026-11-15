@@ -78,6 +78,52 @@ def _tools(root, guard, test_cmd):
     )
 
 
+def test_a_refactor_start_allows_code_and_the_first_test_write_returns_to_green(root):
+    guard = SliceGuard(start="refactor")
+    write, edit, run_tests = _tools(root, guard, RED_CMD)
+
+    edit.invoke({"path": "src/app.py", "old": "return 1", "new": "return 2"})
+    assert "return 2" in (root / "src" / "app.py").read_text()
+
+    write.invoke({"path": "docs/refactor.md", "content": "# refactor\n"})
+    assert (root / "docs" / "refactor.md").read_text() == "# refactor\n"
+
+    edit.invoke({"path": "src/app.py", "old": "return 2", "new": "return 3"})
+    assert "return 3" in (root / "src" / "app.py").read_text()
+
+    with pytest.raises(ToolError) as error:
+        edit.invoke(
+            {"path": "tests/test_app.py", "old": "assert True", "new": "assert False"}
+        )
+    assert "refactor" in str(error.value)
+    assert "assert True" in (root / "tests" / "test_app.py").read_text()
+
+    with pytest.raises(ToolError):
+        write.invoke({"path": "src/app.py", "content": "X = 3\n"})
+    write.invoke({"path": "tests/test_new.py", "content": "x\n"})
+    run_tests.invoke({"paths": []})
+
+    edit.invoke({"path": "src/app.py", "old": "return 3", "new": "return 4"})
+    assert "return 4" in (root / "src" / "app.py").read_text()
+    with pytest.raises(ToolError) as error:
+        write.invoke({"path": "tests/test_other.py", "content": "x\n"})
+    assert "red" in str(error.value)
+
+
+def test_run_tests_does_not_leave_a_refactor_start(root):
+    guard = SliceGuard(start="refactor")
+    write, _, run_tests = _tools(root, guard, GREEN_CMD)
+
+    run_tests.invoke({"paths": []})
+    write.invoke({"path": "src/app.py", "content": "X = 2\n"})
+    assert (root / "src" / "app.py").read_text() == "X = 2\n"
+
+    with pytest.raises(ToolError) as error:
+        write.invoke({"path": "tests/test_new.py", "content": "x\n"})
+    assert "refactor" in str(error.value)
+    assert not (root / "tests" / "test_new.py").exists()
+
+
 def test_a_red_run_tests_after_a_test_write_moves_to_red(root):
     guard = SliceGuard()
     write, _, run_tests = _tools(root, guard, RED_CMD)
