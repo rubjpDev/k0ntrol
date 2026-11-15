@@ -13,11 +13,23 @@ import pytest
 from langchain.agents.middleware import model_retry
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_core.tools import BaseTool, tool
+from pydantic import ValidationError
 
 from fakes import FakeChatModel, FakeTracker, cfg_with
-from k0ntrol.agents import ALLOWLISTS, agent_tools, allowlist_for, build_agent
+from k0ntrol.agents import (
+    ALLOWLISTS,
+    MissingStructuredOutput,
+    QuestionRound,
+    ResearchFinding,
+    Spec,
+    TicketList,
+    agent_tools,
+    allowlist_for,
+    build_agent,
+)
 from k0ntrol.events import EventWriter, K0EventHandler
 from k0ntrol.tools.errors import ToolError
+from k0ntrol.tools.net import HttpResponse
 from k0ntrol.tools.tracker import tracker_read_tools
 from k0ntrol.tracker import TrackerError
 
@@ -52,10 +64,260 @@ def test_agent_tools_equal_the_allowlist(tmp_path):
         assert {t.name for t in tools} == set(allowlist)
 
 
+def test_planner_and_researcher_tool_allowlists_are_exact(tmp_path):
+    tracker = _tracker()
+    planner = agent_tools(
+        "planner",
+        root=tmp_path,
+        cfg={"test_cmd": "pytest -q"},
+        tracker=tracker,
+    )
+    researcher = agent_tools(
+        "researcher",
+        root=tmp_path,
+        cfg={"test_cmd": "pytest -q"},
+        tracker=tracker,
+    )
+
+    assert {t.name for t in planner} == {
+        "read_file",
+        "list_files",
+        "grep",
+        "bulk_read",
+        "search_memory",
+        "read_work_item",
+        "read_change_diff",
+        "fetch_url",
+        "web_search",
+    }
+    assert {t.name for t in researcher} == {
+        "read_file",
+        "list_files",
+        "grep",
+        "fetch_url",
+        "web_search",
+    }
+    for tools in (planner, researcher):
+        assert not {t.name for t in tools} & {"write_file", "edit_file", "run_tests"}
+
+
+@pytest.mark.parametrize("name", ["planner", "researcher"])
+def test_network_tools_use_injected_boundaries(tmp_path, name):
+    fetches = []
+
+    def fetch(request):
+        fetches.append(request)
+        return json.dumps(
+            {
+                "web": {
+                    "results": [
+                        {
+                            "title": "Primary source",
+                            "url": "https://example.com/docs",
+                            "description": "A snippet.",
+                        }
+                    ]
+                }
+            }
+        ).encode()
+
+    def transport(target, addresses, *, timeout, max_bytes):
+        return HttpResponse(200, {}, b"page text", False)
+
+    tools = agent_tools(
+        name,
+        root=tmp_path,
+        cfg={"search": {"provider": "brave"}},
+        tracker=_tracker(),
+        resolve=lambda host: ["93.184.216.34"],
+        transport=transport,
+        environ={"BRAVE_SEARCH_API_KEY": "fake-key"},
+        fetch=fetch,
+    )
+    by_name = {tool.name: tool for tool in tools}
+
+    page = by_name["fetch_url"].invoke({"url": "https://example.com/docs"})
+    results = by_name["web_search"].invoke({"query": "primary source"})
+
+    assert "UNTRUSTED" in page
+    assert "page text" in page
+    assert "UNTRUSTED" in results
+    assert "Primary source" in results
+    assert fetches
+
+
 def _tracker():
     from fakes import FakeTracker
 
     return FakeTracker()
+
+
+def _structured_agent(tmp_path, name, model):
+    effort = "high" if name == "planner" else "medium"
+    cfg = cfg_with(
+        {name: {"provider": "anthropic", "model": "m", "model_calls": 5, "effort": effort}}
+    )
+    tools = agent_tools(
+        name,
+        root=tmp_path,
+        cfg=cfg,
+        tracker=_tracker() if name == "planner" else None,
+        init=_init(model),
+    )
+    return build_agent(name, cfg, tools, root=tmp_path, init=_init(model))
+
+
+def test_researcher_returns_a_research_finding(tmp_path):
+    model = _scripted(
+        AIMessage(
+            content="",
+            tool_calls=[
+                {
+                    "name": "ResearchFinding",
+                    "args": {
+                        "findings": ["The docs recommend X."],
+                        "proposed_decision": "Use X",
+                        "citations": [
+                            {"title": "Docs", "url": "https://example.com/docs"}
+                        ],
+                    },
+                    "id": "r1",
+                }
+            ],
+        )
+    )
+    agent = _structured_agent(tmp_path, "researcher", model)
+
+    result = agent.invoke([HumanMessage("research X")])
+
+    assert agent.name == "researcher"
+    assert agent.model_calls == 5
+    assert agent.effort == "medium"
+    assert isinstance(result.structured_response, ResearchFinding)
+    assert result.structured_response.proposed_decision == "Use X"
+    assert result.structured_response.citations[0].url == "https://example.com/docs"
+
+
+def test_planner_structured_outputs_validate(tmp_path):
+    cases = [
+        (
+            "QuestionRound",
+            {
+                "questions": [
+                    {
+                        "number": 1,
+                        "question": "Which database?",
+                        "recommendation": "Postgres",
+                        "rationale": "Already operated here",
+                    }
+                ]
+            },
+            QuestionRound,
+        ),
+        (
+            "Spec",
+            {
+                "title": "Plan workflow",
+                "problem_statement": "Planning is one-shot.",
+                "solution": "Ask, then publish spec and tickets.",
+                "user_stories": ["As a human I want questions first."],
+                "implementation_decisions": ["Use tracker work items."],
+                "testing_decisions": ["Test workflow entry points."],
+                "seams": ["workflow start/resume"],
+                "glossary_and_decisions": ["PLANNER asks numbered questions."],
+                "not_yet_decided": ["Ticket size default"],
+                "out_of_scope": ["Parallel builds"],
+            },
+            Spec,
+        ),
+        (
+            "TicketList",
+            {
+                "tickets": [
+                    {
+                        "title": "Glossary and ADRs",
+                        "what_to_build": "Record terms and decisions.",
+                        "seams": ["docs"],
+                        "acceptance_criteria": ["Glossary updated"],
+                        "blocked_by": [],
+                    },
+                    {
+                        "title": "Planner agent",
+                        "what_to_build": "Build PLANNER.",
+                        "seams": ["agent tools"],
+                        "acceptance_criteria": ["Allowlist is exact"],
+                        "blocked_by": [0],
+                    },
+                ]
+            },
+            TicketList,
+        ),
+    ]
+
+    for index, (tool_name, args, expected) in enumerate(cases):
+        model = _scripted(
+            AIMessage(
+                content="",
+                tool_calls=[{"name": tool_name, "args": args, "id": f"o{index}"}],
+            )
+        )
+        result = _structured_agent(tmp_path, "planner", model).invoke(
+            [HumanMessage("plan")]
+        )
+        assert isinstance(result.structured_response, expected)
+
+    assert result.structured_response.tickets[1].blocked_by == [0]
+
+
+def test_ticket_list_rejects_blockers_that_are_not_earlier():
+    with pytest.raises(ValidationError):
+        TicketList.model_validate(
+            {
+                "tickets": [
+                    {
+                        "title": "second",
+                        "what_to_build": "x",
+                        "seams": [],
+                        "acceptance_criteria": [],
+                        "blocked_by": [1],
+                    },
+                    {
+                        "title": "first",
+                        "what_to_build": "x",
+                        "seams": [],
+                        "acceptance_criteria": [],
+                        "blocked_by": [],
+                    },
+                ]
+            }
+        )
+
+
+@pytest.mark.parametrize("field", ["findings", "proposed_decision", "citations"])
+def test_research_finding_requires_content(field):
+    payload = {
+        "findings": ["The docs recommend X."],
+        "proposed_decision": "Use X",
+        "citations": [{"title": "Docs", "url": "https://example.com/docs"}],
+    }
+    payload[field] = "" if field == "proposed_decision" else []
+
+    with pytest.raises(ValidationError):
+        ResearchFinding.model_validate(payload)
+
+
+@pytest.mark.parametrize(
+    "name,match",
+    [
+        ("planner", "PLANNER returned no structured output"),
+        ("researcher", "RESEARCHER returned no research finding"),
+    ],
+)
+def test_new_agents_missing_structured_output_raises(tmp_path, name, match):
+    model = _scripted(AIMessage(content="prose, not a tool call"))
+
+    with pytest.raises(MissingStructuredOutput, match=match):
+        _structured_agent(tmp_path, name, model).invoke([HumanMessage("go")])
 
 
 def test_chatty_allowlist_is_the_read_tools(tmp_path):

@@ -18,7 +18,7 @@ allowlist check in the tool node.
 """
 
 import re
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from importlib.resources import files
 from pathlib import Path
@@ -35,6 +35,7 @@ from langchain.agents.middleware import (
     ModelRetryMiddleware,
     ToolCallRequest,
 )
+from langchain.agents.structured_output import ToolStrategy
 from langchain.chat_models import init_chat_model
 from langchain_core.messages import (
     AIMessage,
@@ -44,35 +45,38 @@ from langchain_core.messages import (
 )
 from langchain_core.tools import BaseTool
 from langgraph.types import Command
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, model_validator
 
 from k0ntrol.events import META_AGENT, META_EFFORT
 from k0ntrol.memory.index import custom_rules_text, custom_topology_text
 from k0ntrol.providers import build_chat_model
 from k0ntrol.tools.bulk_read import make_bulk_read
 from k0ntrol.tools.errors import ToolError
+from k0ntrol.tools.fetch_url import make_fetch_url
+from k0ntrol.tools.net import Resolver, Transport
 from k0ntrol.tools.read import make_grep, make_list_files, make_read_file
 from k0ntrol.tools.run_tests import make_run_tests
 from k0ntrol.tools.search_memory import make_search_memory
 from k0ntrol.tools.slice_guard import SliceGuard
 from k0ntrol.tools.tracker import tracker_read_tools
+from k0ntrol.tools.web_search import Fetch, make_web_search
 from k0ntrol.tools.write import WritePolicy, WriteScope, make_edit_file, make_write_file
 
-_BASE_READ_TOOLS = (
-    "read_file",
-    "list_files",
-    "grep",
-    "bulk_read",
-    "search_memory",
-)
+_PRIMARY_READ_TOOLS = ("read_file", "list_files", "grep")
+_HELPER_READ_TOOLS = ("bulk_read", "search_memory")
+_BASE_READ_TOOLS = _PRIMARY_READ_TOOLS + _HELPER_READ_TOOLS
 
 # Reads that need a tracker; ``/fast`` has no work item so they drop off.
 _TRACKER_TOOLS = ("read_work_item", "read_change_diff")
+
+_NETWORK_TOOLS = ("fetch_url", "web_search")
 
 # The roster's tool allowlists (issue #12). `bulk_read` and `search_memory`
 # are on the base reads (#40); CHATTY's `read_work_item` joins when the
 # tracker lands (#43).
 ALLOWLISTS: dict[str, tuple[str, ...]] = {
+    "planner": _BASE_READ_TOOLS + _TRACKER_TOOLS + _NETWORK_TOOLS,
+    "researcher": _PRIMARY_READ_TOOLS + _NETWORK_TOOLS,
     "chatty": _BASE_READ_TOOLS,
     "implementer": _BASE_READ_TOOLS
     + ("write_file", "edit_file", "run_tests")
@@ -136,10 +140,89 @@ class Review(BaseModel):
     findings: list[str]
 
 
+class Question(BaseModel):
+    """One numbered PLANNER question with its recommended answer."""
+
+    number: int
+    question: str
+    recommendation: str
+    rationale: str = ""
+
+
+class QuestionRound(BaseModel):
+    """PLANNER's structured output for one Q&A round."""
+
+    questions: list[Question]
+
+
+class Spec(BaseModel):
+    """PLANNER's structured output: the spec draft for the spec gate."""
+
+    title: str
+    problem_statement: str
+    solution: str
+    user_stories: list[str]
+    implementation_decisions: list[str]
+    testing_decisions: list[str]
+    seams: list[str]
+    glossary_and_decisions: list[str]
+    not_yet_decided: list[str]
+    out_of_scope: list[str]
+
+
+class Ticket(BaseModel):
+    """One child work item in PLANNER's ticket breakdown."""
+
+    title: str
+    what_to_build: str
+    seams: list[str]
+    acceptance_criteria: list[str]
+    blocked_by: list[int] = Field(default_factory=list)
+
+
+def _earlier_ticket(index: int, blocker: int) -> bool:
+    return 0 <= blocker < index
+
+
+class TicketList(BaseModel):
+    """PLANNER's structured output: the spec's tickets, blockers first."""
+
+    tickets: list[Ticket]
+
+    @model_validator(mode="after")
+    def _blockers_point_backwards(self) -> "TicketList":
+        for index, ticket in enumerate(self.tickets):
+            if any(not _earlier_ticket(index, blocker) for blocker in ticket.blocked_by):
+                raise ValueError("ticket blockers must be earlier ticket indexes")
+        return self
+
+
+class ResearchCitation(BaseModel):
+    """A primary source RESEARCHER cites."""
+
+    title: str
+    url: str
+
+
+class ResearchFinding(BaseModel):
+    """RESEARCHER's structured output: cited findings and a proposed decision."""
+
+    findings: list[str] = Field(min_length=1)
+    proposed_decision: str = Field(min_length=1)
+    citations: list[ResearchCitation] = Field(min_length=1)
+
+
+_PLANNER_OUTPUT = QuestionRound | Spec | TicketList
+
 # Agents whose ``create_agent`` gets a structured ``response_format`` (spec
 # #33): the schema becomes a tool the model calls; the validated value lands
 # on ``AgentResult.structured_response``.
-_RESPONSE_FORMATS = {"spec": AgentBrief, "reviewer": Review}
+_RESPONSE_FORMATS: dict[str, Any] = {
+    "planner": ToolStrategy(_PLANNER_OUTPUT),
+    "researcher": ResearchFinding,
+    "spec": AgentBrief,
+    "reviewer": Review,
+}
 
 
 class MissingStructuredOutput(Exception):
@@ -152,6 +235,8 @@ class MissingStructuredOutput(Exception):
 
 
 _MISSING_OUTPUT = {
+    "planner": "PLANNER returned no structured output",
+    "researcher": "RESEARCHER returned no research finding",
     "spec": "SPEC returned no agent brief",
     "reviewer": "REVIEWER returned no review",
 }
@@ -176,12 +261,18 @@ def agent_tools(
     cfg: dict | None = None,
     tracker=None,
     init: Callable = init_chat_model,
+    resolve: Resolver | None = None,
+    transport: Transport | None = None,
+    environ: Mapping[str, str] | None = None,
+    fetch: Fetch | None = None,
 ) -> list[BaseTool]:
     """The tools on agent ``name``'s allowlist, bound to the run context.
 
-    ``cfg`` supplies ``test_cmd``/``test_timeout`` for ``run_tests`` and
-    ``helpers.*`` for ``bulk_read``; ``tracker`` feeds the tracker reads;
-    ``init`` builds helper models. Each is needed only by tools that use
+    ``cfg`` supplies ``test_cmd``/``test_timeout`` for ``run_tests``,
+    ``helpers.*`` for ``bulk_read`` and ``search.provider`` for
+    ``web_search``; ``tracker`` feeds the tracker reads; ``init`` builds
+    helper models; ``resolve``/``transport``/``environ``/``fetch`` are the
+    network tools' injected seams. Each is needed only by tools that use
     it, and only when the tool runs. With ``tracker=None`` the tracker
     reads are left off entirely (``/fast``), matching
     ``allowlist_for(name, tracker=False)``.
@@ -191,7 +282,15 @@ def agent_tools(
     except KeyError:
         raise ValueError(f"unknown agent: {name!r}") from None
     factories = _tool_factories(
-        name, root=root, cfg=cfg, tracker=tracker, init=init
+        name,
+        root=root,
+        cfg=cfg,
+        tracker=tracker,
+        init=init,
+        resolve=resolve,
+        transport=transport,
+        environ=environ,
+        fetch=fetch,
     )
     return [factories[tool_name]() for tool_name in names]
 
@@ -220,7 +319,7 @@ def build_agent(
         model,
         tools=checked,
         system_prompt=_system_prompt(name, root),
-        response_format=_RESPONSE_FORMATS.get(name),  # type: ignore[arg-type]
+        response_format=_RESPONSE_FORMATS.get(name),
         middleware=[
             ModelCallLimitMiddleware(  # type: ignore[list-item]
                 run_limit=entry["model_calls"], exit_behavior="end"
@@ -389,7 +488,16 @@ def _system_prompt(name: str, root: Path) -> str:
 
 
 def _tool_factories(
-    agent: str, *, root: Path, cfg: dict | None, tracker, init: Callable
+    agent: str,
+    *,
+    root: Path,
+    cfg: dict | None,
+    tracker,
+    init: Callable,
+    resolve: Resolver | None,
+    transport: Transport | None,
+    environ: Mapping[str, str] | None,
+    fetch: Fetch | None,
 ) -> dict[str, Callable[[], BaseTool]]:
     guard = SliceGuard() if agent == "implementer" else None
     factories: dict[str, Callable[[], BaseTool]] = {
@@ -398,6 +506,10 @@ def _tool_factories(
         "grep": lambda: make_grep(root),
         "bulk_read": lambda: make_bulk_read(root, cfg, init=init),
         "search_memory": lambda: make_search_memory(root),
+        "fetch_url": lambda: make_fetch_url(resolve=resolve, transport=transport),
+        "web_search": lambda: make_web_search(
+            cfg or {}, environ=environ, fetch=fetch
+        ),
         "run_tests": lambda: make_run_tests(root, _need_cfg(cfg), guard),
         "read_work_item": lambda: _tracker_tool("read_work_item", tracker),
         "read_change_diff": lambda: _tracker_tool("read_change_diff", tracker),
