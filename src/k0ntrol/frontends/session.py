@@ -175,7 +175,7 @@ def _closing(ui) -> None:
 def _commands(
     ui, show: Callable[[str], None], config: dict, root: Path, klog: Callable[[Path], str]
 ) -> dict:
-    """The slash commands besides /ask, /fast, /full and /quit."""
+    """The slash commands besides /ask, /fast, /full, /implement and /quit."""
     help_ = ui.help if ui is not None else lambda: show(_HELP)
     rows = lambda: _status_rows(config, root)  # noqa: E731
     status = (lambda: ui.status(rows())) if ui is not None else (lambda: _show_rows(show, rows()))
@@ -209,7 +209,7 @@ def _reconfigure(ui, show: Callable[[str], None], config: dict, root: Path) -> N
     config.update(fresh)
 
 
-_HELP = "commands: /ask, /fast, /full, /status, /klog, /quit"
+_HELP = "commands: /ask, /fast, /full, /implement, /status, /klog, /quit"
 
 
 def _status_rows(config: dict, root: Path) -> list[tuple[str, str]]:
@@ -660,6 +660,7 @@ def _handle_command(
         "/ask": ask,
         "/fast": lambda task: work("fast", task),
         "/full": lambda task: work("full", task),
+        "/implement": lambda task: work("implement", task),
     }
     handlers.update({name: lambda _arg, f=f: f() for name, f in commands.items()})
     handler = handlers.get(command)

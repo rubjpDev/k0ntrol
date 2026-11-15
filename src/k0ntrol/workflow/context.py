@@ -67,18 +67,31 @@ class RunContext:
         """The branch k0/<n>-<slug> cuts from: configured or origin's HEAD."""
         return self.cfg.get("base_branch") or default_base_branch(self.root)
 
-    def agent(self, name: str) -> K0Agent:
-        """The named agent, built once per run on first use."""
-        if name not in self._agents:
-            names = allowlist_for(name, tracker=self.tracker is not None)
+    def agent(
+        self, name: str, *, slot: str | None = None, read_only: bool = False
+    ) -> K0Agent:
+        """The named agent, built once per run on first use.
+
+        ``slot`` builds a second instance of the same agent — its own
+        tools and slice guard — for a phase that must not share mutable
+        tool state with the agent's main instance (``/implement``'s seam
+        proposal vs its build). ``read_only`` strips the mutating tools
+        for proposal phases.
+        """
+        key = name if slot is None else f"{name}:{slot}"
+        if key not in self._agents:
+            names = allowlist_for(
+                name, tracker=self.tracker is not None, read_only=read_only
+            )
             tools = agent_tools(
                 name,
                 root=self.root,
                 cfg=self.cfg,
                 tracker=self.tracker,
                 init=self.init,
+                read_only=read_only,
             )
-            self._agents[name] = build_agent(
+            self._agents[key] = build_agent(
                 name,
                 self.cfg,
                 tools,
@@ -86,7 +99,7 @@ class RunContext:
                 init=self.init,
                 allowlist=names,
             )
-        return self._agents[name]
+        return self._agents[key]
 
     def agent_config(self, attempt: int) -> dict:
         """The config for one agent run: handlers + attempt tag.

@@ -133,5 +133,35 @@ def _route_ci(state: dict, *, prefix: str, skipped: str) -> str:
     return f"{prefix}ci_reject_comment"
 
 
+# --- /implement (#116): seam gate, then implementer → validator → diff ------
+
+
+def route_after_seam(state: dict) -> str:
+    """A proposal run that hit its model-call limit never reaches the gate."""
+    if state.get("limit"):
+        return "limit_hit"
+    return "seam_gate"
+
+
+def route_seam_gate(state: dict) -> str:
+    """Approve → IMPLEMENTER builds; redo → propose again with feedback."""
+    return "implementer" if state.get("seam_approved") else "seam"
+
+
+def route_after_implementer(state: dict) -> str:
+    if state.get("limit"):
+        return "limit_hit"
+    return "validator"
+
+
+def route_implement_validator(state: dict) -> str:
+    """Green → the diff gate; red → IMPLEMENTER while attempts remain."""
+    if state.get("validator_ok"):
+        return "diff_gate"
+    if _exhausted(state, "implementer_attempts"):
+        return "limit_hit"
+    return "implementer"
+
+
 def _exhausted(state: dict, key: str) -> bool:
     return state.get(key, 0) >= state.get("max_attempts", DEFAULT_MAX_ATTEMPTS)

@@ -242,16 +242,28 @@ _MISSING_OUTPUT = {
 }
 
 
-def allowlist_for(name: str, *, tracker: bool) -> tuple[str, ...]:
+# The tools a proposal-only run never gets: no writes, no test runs —
+# ``/implement``'s seam gate is a human decision, not a build (#116).
+_SEAM_DROP = ("write_file", "edit_file", "run_tests")
+
+
+def allowlist_for(name: str, *, tracker: bool, read_only: bool = False) -> tuple[str, ...]:
     """Agent ``name``'s allowlist for this run.
 
     Without a tracker (``/fast`` — there is no work item), the tracker
     reads drop off the allowlist; the agent can never see the tool.
+    ``read_only`` drops the mutating tools for proposal phases.
     """
     names = ALLOWLISTS[name]
+    if read_only:
+        names = _without(names, _SEAM_DROP)
     if tracker:
         return names
-    return tuple(n for n in names if n not in _TRACKER_TOOLS)
+    return _without(names, _TRACKER_TOOLS)
+
+
+def _without(names: tuple[str, ...], dropped: tuple[str, ...]) -> tuple[str, ...]:
+    return tuple(n for n in names if n not in dropped)
 
 
 def agent_tools(
@@ -265,6 +277,7 @@ def agent_tools(
     transport: Transport | None = None,
     environ: Mapping[str, str] | None = None,
     fetch: Fetch | None = None,
+    read_only: bool = False,
 ) -> list[BaseTool]:
     """The tools on agent ``name``'s allowlist, bound to the run context.
 
@@ -275,10 +288,13 @@ def agent_tools(
     network tools' injected seams. Each is needed only by tools that use
     it, and only when the tool runs. With ``tracker=None`` the tracker
     reads are left off entirely (``/fast``), matching
-    ``allowlist_for(name, tracker=False)``.
+    ``allowlist_for(name, tracker=False)``. ``read_only`` matches
+    ``allowlist_for(..., read_only=True)`` the same way.
     """
     try:
-        names = allowlist_for(name, tracker=tracker is not None)
+        names = allowlist_for(
+            name, tracker=tracker is not None, read_only=read_only
+        )
     except KeyError:
         raise ValueError(f"unknown agent: {name!r}") from None
     factories = _tool_factories(

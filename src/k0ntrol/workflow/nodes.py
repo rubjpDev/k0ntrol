@@ -65,13 +65,20 @@ def _brief_with_retry(brief: Callable[[dict], str], state: dict) -> str:
     return text
 
 
-def _call_limit(ctx: RunContext, name: str, result) -> dict:
-    """The ``limit`` field for an agent that hit its model-call limit."""
-    calls = ctx.agent(name).model_calls
+def _call_limit(
+    ctx: RunContext, name: str, result, *, node: str | None = None
+) -> dict:
+    """The ``limit`` field for an agent that hit its model-call limit.
+
+    ``node`` overrides the graph node shown and retried when the agent
+    runs under a different node name (``/implement``'s seam proposal).
+    """
+    node = node or name
+    calls = ctx.cfg["agents"][name]["model_calls"]
     return {
         "reason": "model_call_limit",
-        "node": name,
-        "retry_node": name,
+        "node": node,
+        "retry_node": node,
         "what": "model calls",
         "used": calls,
         "max": calls,
@@ -141,8 +148,15 @@ def _red_update(red: bool, result, state: dict) -> dict:
     }
 
 
-def make_validator(ctx: RunContext) -> Callable[[dict], dict]:
-    """VALIDATOR: ``test_cmd`` plus the configured ``gates``, all in code."""
+def make_validator(
+    ctx: RunContext, *, retry_node: str = "coder"
+) -> Callable[[dict], dict]:
+    """VALIDATOR: ``test_cmd`` plus the configured ``gates``, all in code.
+
+    ``retry_node`` is the node a ``limit_hit`` ``retry`` reruns when the
+    loop runs dry — ``coder`` on ``/fast`` and ``/full``, ``implementer``
+    on ``/implement``.
+    """
 
     def node(state: dict) -> dict:
         results = _run_checks(ctx)
@@ -154,7 +168,7 @@ def make_validator(ctx: RunContext) -> Callable[[dict], dict]:
             "limit": (
                 None
                 if ok
-                else _attempt_limit(state, "validator", "coder", _format(results))
+                else _attempt_limit(state, "validator", retry_node, _format(results))
             ),
         }
 
@@ -167,8 +181,14 @@ def _emit_gate_events(ctx: RunContext, results: list[tuple[str, Any]], ok: bool)
     ctx.writer.gate("validator", "pass" if ok else "fail")
 
 
-def make_diff_gate(ctx: RunContext) -> Callable[[dict], dict]:
-    """The diff gate: show the working tree, ``y`` done / ``n`` rejected."""
+def make_diff_gate(
+    ctx: RunContext, *, on_reject: Callable[[], None] | None = None
+) -> Callable[[dict], dict]:
+    """The diff gate: show the working tree, ``y`` done / ``n`` rejected.
+
+    ``on_reject`` runs on ``n`` before the outcome lands — ``/implement``'s
+    working-tree path uses it to restore the pre-run snapshot (#116).
+    """
 
     def node(state: dict) -> dict:
         decision = interrupt(
@@ -180,6 +200,8 @@ def make_diff_gate(ctx: RunContext) -> Callable[[dict], dict]:
             }
         )
         approved = str(decision).strip().lower() in ("y", "yes")
+        if not approved and on_reject is not None:
+            on_reject()
         return {"outcome": "done" if approved else "rejected"}
 
     return node

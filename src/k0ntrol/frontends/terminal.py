@@ -30,6 +30,7 @@ COMMANDS = {
     "/ask": "ask a question about this repo",
     "/full": "take #<issue> or a task to a ready pull request",
     "/fast": "a quick test-first change in the working tree",
+    "/implement": "build a task in the working tree, seams first",
     "/status": "provider, models and project settings",
     "/klog": "open the event log in your browser",
     "/config": "change the models or this project's setup",
@@ -40,6 +41,7 @@ COMMANDS = {
 # Each gate's answers in plain words, in the order the gate lists them.
 GATE_OPTIONS: dict[str, list[tuple[str, str]]] = {
     "spec": [("ok", "Approve the brief"), ("redo", "Send back to SPEC with feedback")],
+    "seam": [("ok", "Approve the seams"), ("redo", "Send back to IMPLEMENTER with feedback")],
     "test": [("ok", "Approve the tests"), ("redo", "Send back to TESTER with feedback")],
     "review": [
         ("ok", "Approve: mark the pull request ready"),

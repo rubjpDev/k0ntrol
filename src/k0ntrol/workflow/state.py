@@ -12,8 +12,8 @@ from typing import Any, TypedDict
 class RunState(TypedDict, total=False):
     """One run's state; every field is a plain msgpack-safe value."""
 
-    kind: str  # "fast" | "full"
-    task: str  # the /fast or /full task text (issue body for /full #<n>)
+    kind: str  # "fast" | "full" | "implement"
+    task: str  # the run's task text (issue body for /full #<n>)
     start_ms: int  # epoch ms when the run started (run_end.ms)
     max_attempts: int  # agent runs allowed per loop (default 2)
 
@@ -60,6 +60,15 @@ class RunState(TypedDict, total=False):
     ci_round: int  # approvals so far (gate-comment marker suffix)
     ci_feedback: str | None  # the feedback of the last CI-gate reject
     ci_rejections: list[str]  # earlier CI-gate feedback, for the comment
+
+    # /implement <task> (#116): the working-tree path — seam gate, then
+    # IMPLEMENTER's red-to-green slices under the guard.
+    files: list[str]  # paths IMPLEMENTER wrote (tests and code)
+    seam_attempts: int  # IMPLEMENTER proposal runs so far
+    seam_proposal: str  # the seams IMPLEMENTER proposed (gate detail, brief)
+    seam_approved: bool  # the human ok'd the seams
+    seam_feedback: str | None  # the feedback of the last seam-gate reject
+    implementer_attempts: int  # IMPLEMENTER build runs so far (VALIDATOR loop)
 
     limit: dict[str, Any] | None  # set when the last node can hit a limit
     retry_node: str | None  # the node a limit_hit retry sends back to
