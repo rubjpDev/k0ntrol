@@ -2,12 +2,15 @@
 
 The ``"test"`` flavour allows test paths only and ``"non_test"`` the rest,
 so the two batch agents cannot cheat each other (spec user story 9);
-IMPLEMENTER gets a ``SliceGuard`` instead, whose green/red state decides
-which path kinds may be written (ADR 0011). New files are allowed. The
+IMPLEMENTER gets a ``SliceGuard`` instead, whose state decides which path
+kinds may be written (ADR 0011). New files are allowed. The
 check runs on the resolved path, after the path guard's root and
-protected-path checks.
+protected-path checks. A ``SliceGuard`` policy's ``lock`` serializes the
+whole check/write/note op, so a parallel ``run_tests`` verdict cannot
+land between a write's permission check and its mutation (ADR 0007).
 """
 
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Literal
 
@@ -27,6 +30,8 @@ class _StaticScope:
 
     def __init__(self, scope: WriteScope) -> None:
         self._scope = scope
+        # No shared state to race: the lock is a no-op.
+        self.lock = nullcontext()
 
     def check_write(self, relative: str) -> None:
         if self._scope == "test" and not is_test_path(relative):
@@ -67,11 +72,12 @@ def make_write_file(root: Path, scope: WritePolicy) -> BaseTool:
     @tool
     def write_file(path: str, content: str) -> str:
         """Write `content` to `path`, relative to the repo root. Creates dirs."""
-        resolved, relative = _guard_writable(path, root, checked)
-        resolved.parent.mkdir(parents=True, exist_ok=True)
-        resolved.write_text(content, encoding="utf-8")
-        checked.note_write(relative)
-        return f"wrote {relative}"
+        with checked.lock:
+            resolved, relative = _guard_writable(path, root, checked)
+            resolved.parent.mkdir(parents=True, exist_ok=True)
+            resolved.write_text(content, encoding="utf-8")
+            checked.note_write(relative)
+            return f"wrote {relative}"
 
     return write_file
 
@@ -83,12 +89,13 @@ def make_edit_file(root: Path, scope: WritePolicy) -> BaseTool:
     @tool
     def edit_file(path: str, old: str, new: str) -> str:
         """Replace the single occurrence of `old` with `new` in `path`."""
-        resolved, relative = _guard_writable(path, root, checked)
-        text = _existing_text(resolved, path)
-        replaced = _replace_once(text, old, new, path)
-        resolved.write_text(replaced, encoding="utf-8")
-        checked.note_write(relative)
-        return f"edited {relative}"
+        with checked.lock:
+            resolved, relative = _guard_writable(path, root, checked)
+            text = _existing_text(resolved, path)
+            replaced = _replace_once(text, old, new, path)
+            resolved.write_text(replaced, encoding="utf-8")
+            checked.note_write(relative)
+            return f"edited {relative}"
 
     return edit_file
 

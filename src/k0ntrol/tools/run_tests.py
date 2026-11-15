@@ -3,10 +3,13 @@
 It runs the configured ``test_cmd`` as an argv list, optionally narrowed to
 existing test paths, through the same scrubbed/timed-out/truncated runner
 the red check and VALIDATOR use. There is no shell tool. Given a
-``SliceGuard`` (IMPLEMENTER's), the verdict flips the guard's green/red
-state (ADR 0011).
+``SliceGuard`` (IMPLEMENTER's), the verdict is the guard's green/red signal
+(ADR 0011). Given a guard the whole call — narrowing, command, verdict —
+runs under its ``lock``, so a parallel write cannot slip between a check
+and the verdict that flips it (ADR 0007).
 """
 
+from contextlib import nullcontext
 from pathlib import Path
 
 from langchain_core.tools import BaseTool, tool
@@ -25,15 +28,19 @@ def make_run_tests(
     """Build the ``run_tests`` tool bound to ``root`` and the project config."""
     test_cmd = config["test_cmd"]
     timeout = config.get("test_timeout", DEFAULT_TEST_TIMEOUT)
+    lock = guard.lock if guard is not None else nullcontext()
 
     @tool
     def run_tests(paths: list[str] | None = None) -> str:
         """Run the project's test command. `paths` may narrow it to test files."""
-        narrowed = _existing_test_paths(paths or [], root)
-        result = run_command(test_cmd, root=root, timeout=timeout, extra_args=narrowed)
-        if guard is not None:
-            guard.note_test_result(result.ok)
-        return _format(result)
+        with lock:
+            narrowed = _existing_test_paths(paths or [], root)
+            result = run_command(
+                test_cmd, root=root, timeout=timeout, extra_args=narrowed
+            )
+            if guard is not None:
+                guard.note_test_result(result.ok)
+            return _format(result)
 
     return run_tests
 

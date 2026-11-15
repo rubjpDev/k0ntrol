@@ -8,12 +8,14 @@ written, test writes are refused. A green result moves back. Markdown under
 
 import subprocess
 import sys
+import threading
 from pathlib import Path
 
 import pytest
 
 from k0ntrol.tools.errors import ToolError
 from k0ntrol.tools.run_tests import make_run_tests
+from k0ntrol.tools.runner import CommandResult
 from k0ntrol.tools.slice_guard import SliceGuard
 from k0ntrol.tools.write import make_edit_file, make_write_file
 
@@ -76,6 +78,52 @@ def _tools(root, guard, test_cmd):
         make_edit_file(root, guard),
         make_run_tests(root, {"test_cmd": test_cmd}, guard),
     )
+
+
+def test_a_refactor_start_allows_code_and_the_first_test_write_returns_to_green(root):
+    guard = SliceGuard(start="refactor")
+    write, edit, run_tests = _tools(root, guard, RED_CMD)
+
+    edit.invoke({"path": "src/app.py", "old": "return 1", "new": "return 2"})
+    assert "return 2" in (root / "src" / "app.py").read_text()
+
+    write.invoke({"path": "docs/refactor.md", "content": "# refactor\n"})
+    assert (root / "docs" / "refactor.md").read_text() == "# refactor\n"
+
+    edit.invoke({"path": "src/app.py", "old": "return 2", "new": "return 3"})
+    assert "return 3" in (root / "src" / "app.py").read_text()
+
+    with pytest.raises(ToolError) as error:
+        edit.invoke(
+            {"path": "tests/test_app.py", "old": "assert True", "new": "assert False"}
+        )
+    assert "refactor" in str(error.value)
+    assert "assert True" in (root / "tests" / "test_app.py").read_text()
+
+    with pytest.raises(ToolError):
+        write.invoke({"path": "src/app.py", "content": "X = 3\n"})
+    write.invoke({"path": "tests/test_new.py", "content": "x\n"})
+    run_tests.invoke({"paths": []})
+
+    edit.invoke({"path": "src/app.py", "old": "return 3", "new": "return 4"})
+    assert "return 4" in (root / "src" / "app.py").read_text()
+    with pytest.raises(ToolError) as error:
+        write.invoke({"path": "tests/test_other.py", "content": "x\n"})
+    assert "red" in str(error.value)
+
+
+def test_run_tests_does_not_leave_a_refactor_start(root):
+    guard = SliceGuard(start="refactor")
+    write, _, run_tests = _tools(root, guard, GREEN_CMD)
+
+    run_tests.invoke({"paths": []})
+    write.invoke({"path": "src/app.py", "content": "X = 2\n"})
+    assert (root / "src" / "app.py").read_text() == "X = 2\n"
+
+    with pytest.raises(ToolError) as error:
+        write.invoke({"path": "tests/test_new.py", "content": "x\n"})
+    assert "refactor" in str(error.value)
+    assert not (root / "tests" / "test_new.py").exists()
 
 
 def test_a_red_run_tests_after_a_test_write_moves_to_red(root):
@@ -190,4 +238,121 @@ def test_a_run_tests_that_cannot_launch_still_counts_as_red(root):
     )
     write.invoke({"path": "tests/test_new.py", "content": "x\n"})
     run_tests.invoke({"paths": []})
+    assert guard.state == "red"
+
+
+def test_a_paused_test_write_cannot_straddle_a_red_verdict(root, monkeypatch):
+    """The tool node runs one turn's calls in parallel (ADR 0007), so a
+    write's check, mutation and note are one op under the guard's lock: a
+    red ``run_tests`` verdict cannot land between check and write."""
+    guard = SliceGuard()
+    write = make_write_file(root, guard)
+    edit = make_edit_file(root, guard)
+    run_tests = make_run_tests(root, {"test_cmd": "unused"}, guard)
+    write.invoke({"path": "tests/test_app.py", "content": "x = 1\n"})
+
+    checked = threading.Event()
+    release = threading.Event()
+    verdict = threading.Event()
+    monkeypatch.setattr(
+        "k0ntrol.tools.run_tests.run_command",
+        lambda *args, **kwargs: CommandResult(("unused",), 1, "failed"),
+    )
+
+    check = guard.check_write
+
+    def pausing_check(relative):
+        check(relative)
+        checked.set()
+        release.wait(5)
+
+    note = guard.note_test_result
+
+    def noting(ok):
+        note(ok)
+        verdict.set()
+
+    monkeypatch.setattr(guard, "check_write", pausing_check)
+    monkeypatch.setattr(guard, "note_test_result", noting)
+
+    writer = threading.Thread(
+        target=lambda: edit.invoke(
+            {"path": "tests/test_app.py", "old": "x = 1", "new": "x = 2"}
+        ),
+        daemon=True,
+    )
+    writer.start()
+    assert checked.wait(5)
+
+    runner = threading.Thread(
+        target=lambda: run_tests.invoke({"paths": []}), daemon=True
+    )
+    runner.start()
+    verdict_mid_write = verdict.wait(1)
+    release.set()
+    writer.join(5)
+    runner.join(5)
+
+    assert not verdict_mid_write
+    assert (root / "tests" / "test_app.py").read_text() == "x = 2\n"
+    assert verdict.wait(5)
+    assert guard.state == "red"
+
+
+def test_a_write_waits_for_an_in_flight_run_tests_and_sees_its_verdict(
+    root, monkeypatch
+):
+    """``run_tests`` holds the lock across the whole command and verdict, so
+    a batched write cannot change a test file mid-run: it waits, then meets
+    the state the verdict left."""
+    guard = SliceGuard()
+    write = make_write_file(root, guard)
+    run_tests = make_run_tests(root, {"test_cmd": "unused"}, guard)
+    write.invoke({"path": "tests/test_app.py", "content": "x\n"})
+
+    running = threading.Event()
+    finish = threading.Event()
+    write_checked = threading.Event()
+
+    def hanging_command(*args, **kwargs):
+        running.set()
+        finish.wait(5)
+        return CommandResult(("unused",), 1, "failed")
+
+    check = guard.check_write
+
+    def signaling_check(relative):
+        check(relative)
+        write_checked.set()
+
+    monkeypatch.setattr(
+        "k0ntrol.tools.run_tests.run_command", hanging_command
+    )
+    monkeypatch.setattr(guard, "check_write", signaling_check)
+
+    runner = threading.Thread(
+        target=lambda: run_tests.invoke({"paths": []}), daemon=True
+    )
+    runner.start()
+    assert running.wait(5)
+
+    errors = []
+
+    def writing():
+        try:
+            write.invoke({"path": "tests/test_new.py", "content": "x\n"})
+        except ToolError as error:
+            errors.append(error)
+
+    writer = threading.Thread(target=writing, daemon=True)
+    writer.start()
+    checked_mid_run = write_checked.wait(1)
+    finish.set()
+    writer.join(5)
+    runner.join(5)
+
+    assert not checked_mid_run
+    assert len(errors) == 1
+    assert "red" in str(errors[0])
+    assert not (root / "tests" / "test_new.py").exists()
     assert guard.state == "red"

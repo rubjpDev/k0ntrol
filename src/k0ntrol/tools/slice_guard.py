@@ -1,20 +1,25 @@
 """The slice guard: IMPLEMENTER's write tools hold red-before-green (ADR 0011).
 
 One ``SliceGuard`` is shared by an IMPLEMENTER run's ``write_file``,
-``edit_file`` and ``run_tests``. Every run starts **green**: test files may
-be written and code writes are refused. A red ``run_tests`` result after a
-test write moves to **red**: code may be written and test writes are
-refused, so a test cannot be weakened to go green. A green result moves
-back. Markdown under ``docs/`` and ``GLOSSARY.md`` pass in either state.
+``edit_file`` and ``run_tests``. Runs start **green**, or **refactor** for a
+review redo: test files may be written and code writes are refused in green;
+code may be written and test writes are refused in refactor. A red
+``run_tests`` result after a test write moves green to **red**: code may be
+written and test writes are refused, so a test cannot be weakened to go
+green. A green result moves back. ``run_tests`` verdicts do not leave
+refactor. The first test write attempted in refactor returns the guard to
+green. Markdown under ``docs/`` and ``GLOSSARY.md`` pass in any state.
 """
 
+import threading
 from pathlib import PurePosixPath
 from typing import Literal
 
 from k0ntrol.tools.errors import ToolError
 from k0ntrol.tools.path_guard import is_test_path
 
-SliceState = Literal["green", "red"]
+SliceState = Literal["green", "red", "refactor"]
+SliceStart = Literal["green", "refactor"]
 PathKind = Literal["test", "docs", "code"]
 
 
@@ -35,11 +40,19 @@ def _path_kind(relative: str) -> PathKind:
 
 
 class SliceGuard:
-    """The green/red state one IMPLEMENTER run's write tools share."""
+    """The green/red/refactor state one IMPLEMENTER run's write tools share.
 
-    def __init__(self) -> None:
-        self._state: SliceState = "green"
+    ``lock`` serializes those tools: a write holds it across its check,
+    filesystem mutation and note, and ``run_tests`` holds it across the
+    whole command and verdict. The tool node runs one model turn's tool
+    calls on a thread pool (ADR 0007) — without it a write's check could
+    pass green while a concurrent red verdict lands before its mutation.
+    """
+
+    def __init__(self, start: SliceStart = "green") -> None:
+        self._state: SliceState = start
         self._test_written = False
+        self.lock = threading.Lock()
 
     @property
     def state(self) -> SliceState:
@@ -50,6 +63,22 @@ class SliceGuard:
         kind = _path_kind(relative)
         if kind == "docs":
             return
+        if self._state == "refactor":
+            self._check_refactor_write(kind, relative)
+            return
+        self._check_cycle_write(kind, relative)
+
+    def _check_refactor_write(self, kind: PathKind, relative: str) -> None:
+        if kind != "test":
+            return
+        self._state = "green"
+        raise ToolError(
+            f"slice guard is refactor: {relative} is a test write — "
+            "the first test write attempt returns the guard to green",
+            denied="slice_guard",
+        )
+
+    def _check_cycle_write(self, kind: PathKind, relative: str) -> None:
         if self._state == "green" and kind == "code":
             raise ToolError(
                 f"slice guard is green: {relative} is a code write — "
@@ -69,7 +98,9 @@ class SliceGuard:
             self._test_written = True
 
     def note_test_result(self, ok: bool) -> None:
-        """Flip the state on a ``run_tests`` verdict, then re-arm."""
+        """Flip green/red on a ``run_tests`` verdict, then re-arm."""
+        if self._state == "refactor":
+            return
         if ok:
             self._state = "green"
         elif self._test_written:

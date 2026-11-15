@@ -15,3 +15,4 @@ From 0.1.0, one agent, IMPLEMENTER, builds a piece of work test-first, one slice
 - A run that starts from a review redo begins in a third state, **refactor**: code may change and test files may not, so review findings can be fixed without inventing a failing test. Its first test write returns it to the normal cycle.
 - "Red" is the test command's exit code after a test write, which works for any test runner. The guard does not prove the new test is the one failing; the Contract review and VALIDATOR still judge the result.
 - `/implement <task>` in the working tree runs under the same guard.
+- The tool node runs one model turn's tool calls on a thread pool (ADR 0007), so the guard also carries the lock that serializes it: a write's check, mutation and note are one op, and a `run_tests` command and verdict are one op. A write can no longer pass its check while green and land after a concurrent red verdict.
