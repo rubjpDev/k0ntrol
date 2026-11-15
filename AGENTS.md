@@ -10,11 +10,13 @@ k0ntrol (`k0`) is a local harness for coding agents (Python). The 0.1.0 pivot to
 - A task is done only when `uv run pytest -q` passes **in full** (whole suite, not just the new tests) and you have shown the output.
 - Reviewing uncommitted work: `git add -N` new files first — untracked files are invisible to `git diff`, so a review can silently miss them.
 - Stuck after 2 attempts on the same task: stop, write what failed and why, and hand back to the human. Do not improvise a workaround.
+- Design fork the ticket does not settle: stop and ask before writing code. Do not resolve it alone.
 
 ## Git safety and human approval
 
 - Work on your own feature branch, never directly on `main` or `develop`.
 - When a task is verified, commit it on your branch, push the branch, and open a PR to `develop`. That PR is the approval request: the human reviews and merges it.
+- The PR body lists every change to code outside the ticket's new files, including shared helpers.
 - Never merge, force-push, reset, rebase, or rewrite history. Never push to `main` or `develop`.
 - In an interactive local session, show the diff, test output and proposed commit message, and wait for approval before committing.
 - Never discard work. Prefer non-destructive operations that preserve the working tree.
