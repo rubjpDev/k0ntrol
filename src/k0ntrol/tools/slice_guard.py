@@ -11,6 +11,7 @@ refactor. The first test write attempted in refactor returns the guard to
 green. Markdown under ``docs/`` and ``GLOSSARY.md`` pass in any state.
 """
 
+import threading
 from pathlib import PurePosixPath
 from typing import Literal
 
@@ -39,11 +40,19 @@ def _path_kind(relative: str) -> PathKind:
 
 
 class SliceGuard:
-    """The green/red/refactor state one IMPLEMENTER run's write tools share."""
+    """The green/red/refactor state one IMPLEMENTER run's write tools share.
+
+    ``lock`` serializes those tools: a write holds it across its check,
+    filesystem mutation and note, and ``run_tests`` holds it across the
+    whole command and verdict. The tool node runs one model turn's tool
+    calls on a thread pool (ADR 0007) — without it a write's check could
+    pass green while a concurrent red verdict lands before its mutation.
+    """
 
     def __init__(self, start: SliceStart = "green") -> None:
         self._state: SliceState = start
         self._test_written = False
+        self.lock = threading.Lock()
 
     @property
     def state(self) -> SliceState:
