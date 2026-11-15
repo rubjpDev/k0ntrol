@@ -270,13 +270,13 @@ def builder_model(*extra):
     )
 
 
-def to_diff_gate(tmp_path, cfg=None):
+def to_diff_gate(tmp_path, cfg=None, builder=None):
     """``/implement <task>`` past the seam gate to the diff gate."""
     cfg = cfg or implement_cfg()
     tracker = FakeTracker()
     pending = run_implement(tmp_path, cfg, seams_model(), tracker=tracker)
     assert isinstance(pending, Pending) and pending.gate == "seam"
-    builder = builder_model()
+    builder = builder or builder_model()
     result = resume(
         pending.run,
         "ok",
@@ -327,10 +327,21 @@ def test_diff_gate_n_rejects_and_restores_the_working_tree(tmp_path):
     (tmp_path / "existing.py").write_text("HUMAN EDIT\n", encoding="utf-8")
     (tmp_path / "scratch.txt").write_text("keep me\n", encoding="utf-8")
 
-    tracker, builder, result = to_diff_gate(tmp_path)  # repo already made
+    # IMPLEMENTER also edits the tracked file — a code write while red
+    builder = FakeChatModel(
+        messages=[
+            write_call("tests/test_calc.py", TEST_SRC),
+            run_tests_call(),
+            write_call("calc.py", CALC_SRC, "w2"),
+            write_call("existing.py", "AGENT OVERWROTE\n", "w3"),
+            run_tests_call("r2"),
+            AIMessage(content="built calc"),
+        ]
+    )
+    tracker, builder, result = to_diff_gate(tmp_path, builder=builder)
     assert isinstance(result, Pending) and result.gate == "diff"
-    # IMPLEMENTER also edited the tracked file — the guard allows code writes
     assert builder.invocations, "the build never ran"
+    assert (tmp_path / "existing.py").read_text() == "AGENT OVERWROTE\n"
 
     outcome = resume(result.run, "n", root=tmp_path, cfg=implement_cfg(), init=models_init())
 
@@ -346,6 +357,62 @@ def test_diff_gate_n_rejects_and_restores_the_working_tree(tmp_path):
     assert (tmp_path / "dirlink").is_symlink()
     assert os.readlink(tmp_path / "dirlink") == "realdir"
     # a finished run drops its snapshot
+    assert not worktree_snapshot_dir(tmp_path, outcome.run).exists()
+
+
+def test_diff_gate_n_restores_a_root_manifest_json(tmp_path):
+    """A root ``manifest.json`` shares its name with the snapshot's own
+    metadata: ``n`` must return the human's bytes, not the snapshot
+    manifest — backed-up files live in a payload dir, not beside it."""
+    git_repo(tmp_path)
+    manifest = tmp_path / "manifest.json"  # the human's uncommitted settings
+    manifest.write_text('{"settings": "human"}\n', encoding="utf-8")
+
+    builder = FakeChatModel(
+        messages=[
+            write_call("tests/test_calc.py", TEST_SRC),
+            run_tests_call(),
+            write_call("calc.py", CALC_SRC, "w2"),
+            write_call("manifest.json", '{"files": "agent"}\n', "w3"),
+            run_tests_call("r2"),
+            AIMessage(content="built calc"),
+        ]
+    )
+    _, _, result = to_diff_gate(tmp_path, builder=builder)
+    assert isinstance(result, Pending) and result.gate == "diff"
+    assert manifest.read_text() == '{"files": "agent"}\n'
+
+    outcome = resume(result.run, "n", root=tmp_path, cfg=implement_cfg(), init=models_init())
+
+    assert outcome.outcome == "rejected"
+    assert manifest.read_text() == '{"settings": "human"}\n'
+
+
+def test_a_broken_event_log_keeps_the_resumable_runs_snapshot(tmp_path):
+    """An event-write failure ends the call stuck but leaves the
+    checkpoint resumable — the snapshot must stay so a later ``n`` can
+    still roll the run's changes back."""
+    git_repo(tmp_path)
+    (tmp_path / "existing.py").write_text("HUMAN EDIT\n", encoding="utf-8")
+    _, _, result = to_diff_gate(tmp_path)
+    assert isinstance(result, Pending) and result.gate == "diff"
+
+    # events.jsonl as a directory makes every write fail (EventWriteError)
+    log = tmp_path / ".k0-mem" / "events.jsonl"
+    log.unlink()
+    log.mkdir()
+    stuck = resume(result.run, "n", root=tmp_path, cfg=implement_cfg(), init=models_init())
+
+    assert isinstance(stuck, Outcome) and stuck.outcome == "stuck"
+    assert worktree_snapshot_dir(tmp_path, result.run).exists()
+
+    log.rmdir()  # log repaired: the next write recreates the file
+    outcome = resume(result.run, "n", root=tmp_path, cfg=implement_cfg(), init=models_init())
+
+    assert isinstance(outcome, Outcome)
+    assert outcome.outcome == "rejected"
+    assert (tmp_path / "existing.py").read_text() == "HUMAN EDIT\n"
+    assert not (tmp_path / "calc.py").exists()
     assert not worktree_snapshot_dir(tmp_path, outcome.run).exists()
 
 

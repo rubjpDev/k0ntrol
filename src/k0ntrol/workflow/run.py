@@ -444,7 +444,9 @@ def _log_failed(
     """A broken event log ends the run stuck (events contract, #16).
 
     ``/full`` still runs the stuck effects from where the run stood (#46);
-    there is no ``run_end`` — the log cannot take it.
+    there is no ``run_end`` — the log cannot take it. ``/implement``'s
+    checkpoint is left where the write failed: still resumable, so its
+    rollback snapshot stays until the graph actually ends.
     """
     state = graph.get_state(config)
     reason, node = None, None
@@ -452,7 +454,7 @@ def _log_failed(
         state = _stuck_by_log(graph, config, state)
         reason, node = "event_log", state.values.get("node")
     _trace_finish(ctx, "stuck", session_id, state.values)
-    if ctx.kind == "implement":
+    if ctx.kind == "implement" and not state.next:
         drop_worktree_snapshot(ctx.root, worktree_snapshot_dir(ctx.root, run_id))
     return Outcome(run=run_id, outcome="stuck", reason=reason, node=node)
 

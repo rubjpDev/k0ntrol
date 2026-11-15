@@ -223,6 +223,11 @@ def _git(root: Path, *args: str) -> subprocess.CompletedProcess:
 
 # --- working-tree snapshots (/implement's diff-gate ``n``, #116) ---------------
 
+# Backed-up repository files live under this payload subdirectory, apart
+# from the snapshot's own ``manifest.json`` at the root — a repo file of
+# the same name must never be clobbered by the metadata.
+_PAYLOAD = "tree"
+
 
 def worktree_snapshot_dir(root: Path, run_id: str) -> Path:
     """Where run ``run_id``'s pre-run working-tree snapshot lives."""
@@ -245,10 +250,13 @@ def snapshot_worktree(root: Path, dest: Path) -> None:
 
     The set is what git sees — tracked files plus untracked non-ignored
     ones — minus ``.k0-mem/``: agents cannot write protected paths, so
-    everything under it is harness bookkeeping, never the change.
+    everything under it is harness bookkeeping, never the change. Files
+    land under ``dest / _PAYLOAD`` so the snapshot's own ``manifest.json``
+    can never overwrite a backed-up repository file of the same name.
     """
     _ensure_snapshot_ignored(root)
     dest.mkdir(parents=True, exist_ok=True)
+    payload = dest / _PAYLOAD
     manifest: dict[str, str] = {}
     links: dict[str, str] = {}
     dirs: list[str] = []
@@ -257,7 +265,7 @@ def snapshot_worktree(root: Path, dest: Path) -> None:
         if source.is_symlink():
             links[relative] = os.readlink(source)
         elif source.is_file():
-            target = dest / relative
+            target = payload / relative
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(source, target)
             manifest[relative] = _sha256(source)
@@ -316,7 +324,7 @@ def _restore_file(root: Path, snapshot: Path, relative: str, digest: str) -> Non
         return
     target.parent.mkdir(parents=True, exist_ok=True)
     _remove(target)  # a symlink or dir here must go before copy2 writes
-    shutil.copy2(snapshot / relative, target)
+    shutil.copy2(snapshot / _PAYLOAD / relative, target)
 
 
 def drop_worktree_snapshot(root: Path, snapshot: Path) -> None:
