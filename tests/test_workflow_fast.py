@@ -104,6 +104,27 @@ def test_start_without_a_task_is_refused(tmp_path):
         start("fast", "   ", root=tmp_path, cfg=fast_cfg())
 
 
+def test_a_task_starting_with_a_hash_needs_no_tracker(tmp_path):
+    """``#1`` at the front is free text for ``/fast`` — never tracker work."""
+    git_repo(tmp_path)
+    tester = scripted_tester(
+        write_call("tests/test_calc.py", TEST_SRC), AIMessage(content="tests")
+    )
+    coder = scripted_tester(write_call("calc.py", CALC_SRC), AIMessage(content="code"))
+
+    result = start(
+        "fast",
+        "#1 is just part of the task here",
+        root=tmp_path,
+        cfg=fast_cfg(),  # no tracker configured, none needed
+        init=models_init(tester, coder),
+        check=lambda *a, **k: [],
+        scan=lambda r: "scanned",
+    )
+
+    assert isinstance(result, Pending) and result.gate == "diff"
+
+
 def test_unknown_run_kind_is_refused(tmp_path):
     with pytest.raises(RunRefused, match="unknown"):
         start("wat", "add a feature", root=tmp_path, cfg=fast_cfg())

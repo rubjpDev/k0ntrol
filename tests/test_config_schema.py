@@ -347,4 +347,4 @@ def test_full_refuses_a_host_or_tracker_other_than_github(tmp_path, cfg, name):
     from k0ntrol.workflow.run import _tracker_for
 
     with pytest.raises(RunRefused, match=f"only works with GitHub in 0.1.0, not {name}"):
-        _tracker_for("full", cfg, tmp_path, None)
+        _tracker_for("full", cfg, tmp_path, None, required=True)

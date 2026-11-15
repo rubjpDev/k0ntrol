@@ -62,7 +62,9 @@ class RunState(TypedDict, total=False):
     ci_rejections: list[str]  # earlier CI-gate feedback, for the comment
 
     # /implement <task> (#116): the working-tree path — seam gate, then
-    # IMPLEMENTER's red-to-green slices under the guard.
+    # IMPLEMENTER's red-to-green slices under the guard. /implement #<n>
+    # (#117) shares files and implementer_attempts and reuses the /full
+    # work-item, branch, change and ci fields above.
     files: list[str]  # paths IMPLEMENTER wrote (tests and code)
     seam_attempts: int  # IMPLEMENTER proposal runs so far
     seam_proposal: str  # the seams IMPLEMENTER proposed (gate detail, brief)

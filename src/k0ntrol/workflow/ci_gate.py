@@ -1,7 +1,8 @@
 """The CI gate: no push changes ``.github/`` without the human (#47).
 
 ADR 0006: ``.github/`` stays writable, so the risk is the push, not the
-write. Every ``/full`` push goes through this module: ``run_ci_gate`` is
+write. Every ``/full`` and ``/implement #<n>`` push goes through this
+module: ``run_ci_gate`` is
 the node body that decides, ``gated_push`` is the only place the harness
 calls ``tracker.push`` and it refuses to push a HEAD the gate has not
 cleared. The gate looks at the ``.github/`` diff since the last approved
@@ -29,14 +30,19 @@ def ci_diff(ctx: RunContext, state: dict) -> str:
     return diff_since(ctx.root, since, GITHUB_PATH)
 
 
-def run_ci_gate(ctx: RunContext, state: dict) -> dict:
+def run_ci_gate(
+    ctx: RunContext, state: dict, *, attempts_key: str = "coder_attempts"
+) -> dict:
     """Clear HEAD for a push: pass through, or interrupt on a ``.github/`` diff.
 
     ``ci_cleared_sha`` names the HEAD the push may use; ``None`` means the
-    human rejected and the feedback goes to CODER. ``ci_approved`` is True
-    only when the human approved on this pass (the gate comment is due).
-    A run stuck by its event log never interrupts — nobody can be asked
-    and the log cannot record the gate — so unapproved changes stay local.
+    human rejected and the feedback goes to the building agent, whose
+    ``attempts_key`` counter the reject resets (``coder_attempts`` on
+    ``/full``, ``implementer_attempts`` on ``/implement``). ``ci_approved``
+    is True only when the human approved on this pass (the gate comment is
+    due). A run stuck by its event log never interrupts — nobody can be
+    asked and the log cannot record the gate — so unapproved changes stay
+    local.
     """
     head = head_sha(ctx.root)
     diff = ci_diff(ctx, state)
@@ -63,17 +69,19 @@ def run_ci_gate(ctx: RunContext, state: dict) -> dict:
     return {
         "ci_cleared_sha": None,
         "ci_approved": False,
-        "coder_attempts": 0,
+        attempts_key: 0,
         "ci_feedback": feedback.strip(),
         "ci_rejections": [*state.get("ci_rejections", []), feedback.strip()],
     }
 
 
-def make_ci_gate(ctx: RunContext) -> Callable[[dict], dict]:
+def make_ci_gate(
+    ctx: RunContext, *, attempts_key: str = "coder_attempts"
+) -> Callable[[dict], dict]:
     """The ``ci_gate`` graph node."""
 
     def node(state: dict) -> dict:
-        return run_ci_gate(ctx, state)
+        return run_ci_gate(ctx, state, attempts_key=attempts_key)
 
     return node
 

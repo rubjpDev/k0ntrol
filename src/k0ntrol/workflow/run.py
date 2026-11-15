@@ -46,10 +46,15 @@ from k0ntrol.events import (  # noqa: E402
     new_run_id,
 )
 from k0ntrol.memory.refresh import refresh_memory  # noqa: E402
+from k0ntrol.tools.tracker import latest_agent_brief  # noqa: E402
 from k0ntrol.memory.scan import ScanError  # noqa: E402
 from k0ntrol.otel import build_run_trace, otel_callbacks  # noqa: E402
 from k0ntrol.providers import free_checks, has_errors, report_lines  # noqa: E402
-from k0ntrol.tracker import TRUSTED_ASSOCIATIONS, TrackerError  # noqa: E402
+from k0ntrol.tracker import (  # noqa: E402
+    TRUSTED_ASSOCIATIONS,
+    TrackerError,
+    is_k0_work_item,
+)
 from k0ntrol.tracker.github import GhTracker, subprocess_runner  # noqa: E402
 from k0ntrol.workflow.change import (  # noqa: E402
     current_branch,
@@ -155,18 +160,25 @@ def start(
     """Start a run of ``kind`` for ``input``.
 
     ``/full <text>`` drafts a brief; ``/full #<n>`` refines issue ``n``;
-    ``/implement <task>`` runs the working-tree path (#116).
+    ``/implement <task>`` runs the working-tree path (#116) and
+    ``/implement #<n>`` the tracker path on a ready work item (#117).
     Refuses — ``RunRefused`` — on bad usage, a missing tracker or work
-    item, an untrusted issue body, a dirty tree (``.k0-mem/`` ignored),
-    failed doctor checks, a failed rescan or (for ``/fast`` and
-    ``/implement``) another open run. ``/full #<n>`` answers an open run
-    for item ``n`` with ``Unfinished``.
+    item, an untrusted issue body, a work item not ready for an agent, a
+    dirty tree (``.k0-mem/`` ignored), failed doctor checks, a failed
+    rescan or (for ``/fast`` and ``/implement``) another open run.
+    ``#<n>`` answers an open run for item ``n`` with ``Unfinished``.
     """
     if kind not in _BUILDERS:
         raise RunRefused(f"unknown run: {kind}")
     kind = cast(Literal["full", "fast", "implement"], kind)  # _BUILDERS' keys
     input_text = _checked_input(kind, input)
-    tracker = _tracker_for(kind, cfg, root, tracker)
+    tracker = _tracker_for(
+        kind,
+        cfg,
+        root,
+        tracker,
+        required=kind == "full" or (kind == "implement" and input_text.startswith("#")),
+    )
     conn, saver = _open_checkpoints(root)
     try:
         ctx = RunContext(
@@ -178,11 +190,10 @@ def start(
             return busy
         _doctor_gate(check, cfg, kind, root)
         _rescan(scan, root)
-        item = _full_preflight(kind, input_text, tracker, root)
+        item = _item_preflight(kind, input_text, tracker, root)
         graph = _BUILDERS[kind](ctx, saver)
         run_id = new_run_id()
-        if kind == "implement":
-            _snapshot_worktree(root, run_id)
+        _implement_preflight(kind, item, root, run_id)
         _bind_events(ctx, root, run_id, write)
         ctx.trace = tracing(run_id)
         session_id = item.qualified_ref if item else _sitting_session(ctx)
@@ -234,7 +245,13 @@ def resume(
         kind = _run_kind(saver, run_id)
         if kind is None or kind not in _BUILDERS:
             raise RunRefused(f"no run {run_id} in this checkout")
-        tracker = _tracker_for(kind, cfg, root, tracker)
+        tracker = _tracker_for(
+            kind,
+            cfg,
+            root,
+            tracker,
+            required=kind == "full" or _run_item_ref(saver, run_id) is not None,
+        )
         ctx = RunContext(
             root=root, cfg=cfg, kind=kind, init=init, tracker=tracker, scan=scan,
             session=session,
@@ -265,16 +282,16 @@ def resume(
 def abandon(run_id: str, *, root: Path) -> None:
     """Drop run ``run_id``'s checkpoint thread: the run can no longer resume.
 
-    Refuses — ``RunRefused``, the ``/full`` dirty-tree refusal — and keeps
+    Refuses — ``RunRefused``, the dirty-tree refusal — and keeps
     the checkpoint while the tree is dirty: the fresh run that follows
     would be refused too, and a run paused at the test gate holds
     uncommitted files only its own checkpoint can finish. Files are never
     touched.
     """
-    _refuse_dirty(root)
     conn, saver = _open_checkpoints(root)
     try:
         kind = _run_kind(saver, run_id)
+        _refuse_dirty(root, f"/{kind}" if kind else "another run")
         saver.delete_thread(run_id)
         if kind == "implement":
             drop_worktree_snapshot(root, worktree_snapshot_dir(root, run_id))
@@ -312,9 +329,9 @@ def _open_checkpoints(root: Path) -> tuple[sqlite3.Connection, SqliteSaver]:
 def _busy_run(
     saver: SqliteSaver, ctx: RunContext, input_text: str, tracker, root: Path
 ) -> Unfinished | None:
-    """An open run answers ``/full #<n>`` for its own work item, and a run
-    of its own kind when it has no work item (``/fast``, or ``/full <text>``
-    before the spec gate published the issue).
+    """An open run answers ``/full #<n>`` or ``/implement #<n>`` for its own
+    work item, and a run of its own kind when it has no work item (``/fast``,
+    or ``/full <text>`` before the spec gate published the issue).
 
     Anything else is refused. The refusals for an ended work item (closed
     issue, merged or closed PR) come before the resume prompt.
@@ -322,10 +339,10 @@ def _busy_run(
     busy = open_runs(saver, ctx)
     if not busy:
         return None
-    if ctx.kind == "full":
+    if ctx.kind in ("full", "implement"):
         same = _same_item_run(busy, input_text)
         if same is not None:
-            _work_item(input_text, tracker, root)
+            _work_item(input_text, tracker, root, ctx.kind)
             return Unfinished(run=same[0], node=same[1])
     itemless = _itemless_run(busy, ctx.kind, input_text)
     if itemless is not None:
@@ -339,7 +356,7 @@ def _busy_run(
 
 
 def _same_item_run(busy: list[tuple[str, str, dict]], input_text: str):
-    """The open ``(run, node)`` whose work item is ``/full #<n>``'s, if any."""
+    """The open ``(run, node)`` whose work item is the ``#<n>`` asked for."""
     if not input_text.startswith("#"):
         return None
     ref = input_text[1:].strip()
@@ -363,7 +380,7 @@ def _itemless_run(busy: list[tuple[str, str, dict]], kind: str, input_text: str)
 def _resume_command(values: dict) -> str:
     """The REPL command that offers an open run back."""
     if values.get("item_ref"):
-        return f"/full #{values['item_ref']}"
+        return f"/{values.get('kind', 'full')} #{values['item_ref']}"
     return f"/{values.get('kind')} <task>"
 
 
@@ -381,9 +398,7 @@ def _rescan(scan: Callable, root: Path) -> None:
 
 
 def _snapshot_worktree(root: Path, run_id: str) -> None:
-    """``/implement``'s diff-gate ``n`` restores this pre-run snapshot."""
-    if not is_git_repo(root):
-        raise RunRefused("/implement needs a git repository")
+    """``/implement <task>``'s diff-gate ``n`` restores this pre-run snapshot."""
     try:
         snapshot_worktree(root, worktree_snapshot_dir(root, run_id))
     except OSError as error:
@@ -406,35 +421,46 @@ def _bind_events(
 def _checked_input(kind: str, input) -> str:
     """Non-empty input in the kind's accepted forms, or a usage refusal."""
     text = str(input).strip()
-    if not text or (kind == "full" and not _full_usage_ok(text)) or (
-        kind == "implement" and text.startswith("#")
-    ):
+    if not text or (kind in ("full", "implement") and not _usage_ok(text)):
         raise RunRefused(_usage(kind))
     return text
 
 
 def _usage(kind: str) -> str:
-    if kind == "full":
-        return "usage: /full <task> | /full #<issue>"
+    if kind in ("full", "implement"):
+        return f"usage: /{kind} <task> | /{kind} #<issue>"
     return f"usage: /{kind} <task>"
 
 
-def _full_usage_ok(input_text: str) -> bool:
-    """``/full``'s two forms: free text, or ``#`` plus an issue number."""
+def _usage_ok(input_text: str) -> bool:
+    """The work-item commands' two forms: free text, or ``#`` plus a number."""
     return not input_text.startswith("#") or input_text[1:].strip().isdigit()
 
 
-def _tracker_for(kind: str, cfg: dict, root: Path, tracker):
-    """``/full`` cannot run trackerless: build the configured adapter."""
-    if kind != "full" or tracker is not None:
+def _implement_preflight(kind: str, item, root: Path, run_id: str) -> None:
+    """The working-tree path snapshots the tree for its diff gate; the
+    tracker path works on a branch it cuts itself, so there is nothing to
+    restore to.
+    """
+    if kind != "implement":
+        return
+    if not is_git_repo(root):
+        raise RunRefused("/implement needs a git repository")
+    if item is None:
+        _snapshot_worktree(root, run_id)
+
+
+def _tracker_for(kind: str, cfg: dict, root: Path, tracker, *, required: bool):
+    """A work-item run cannot run trackerless: build the configured adapter."""
+    if tracker is not None or not required:
         return tracker
     unshipped = next(
         (cfg[key] for key in ("vcs", "tracker") if cfg.get(key, "github") != "github"), None
     )
     if unshipped:
-        raise RunRefused(f"/full only works with GitHub in 0.1.0, not {unshipped}")
+        raise RunRefused(f"/{kind} only works with GitHub in 0.1.0, not {unshipped}")
     if cfg.get("tracker") is None:
-        raise RunRefused("/full needs a tracker; run k0 init --tracker github")
+        raise RunRefused(f"/{kind} needs a tracker; run k0 init --tracker github")
     return GhTracker(subprocess_runner(root))
 
 
@@ -473,24 +499,41 @@ def _stuck_by_log(graph, config: RunnableConfig, state):
     return graph.get_state(config)
 
 
-def _full_preflight(kind: str, input_text: str, tracker, root: Path):
-    """``/full``'s last refusals: a dirty tree, then the work item read."""
-    if kind != "full":
+def _item_preflight(kind: str, input_text: str, tracker, root: Path):
+    """The work-item commands' last refusals: dirty tree, then the item read.
+
+    ``/full`` always goes through it; ``/implement`` only for ``#<n>``, whose
+    item must also be ready for an agent (#117).
+    """
+    if kind != "full" and not (kind == "implement" and input_text.startswith("#")):
         return None
-    _refuse_dirty(root)
-    return _work_item(input_text, tracker, root)
+    _refuse_dirty(root, f"/{kind}")
+    item = _work_item(input_text, tracker, root, kind)
+    if kind == "implement" and item is not None:
+        _refuse_not_ready(item, tracker)
+    return item
 
 
-def _refuse_dirty(root: Path) -> None:
+def _refuse_not_ready(item, tracker) -> None:
+    """``/implement #<n>`` runs ready work only: the label, or a ticket k0 created."""
+    if is_k0_work_item(item) or "ready-for-agent" in tracker.read_labels(item.ref):
+        return
+    raise RunRefused(
+        f"work item #{item.ref} is not ready for an agent "
+        f"(no ready-for-agent label) — run /triage #{item.ref} first"
+    )
+
+
+def _refuse_dirty(root: Path, what: str) -> None:
     dirty = dirty_paths(root)
     if dirty:
         raise RunRefused(
-            ["refusing to run /full on a dirty working tree:", *dirty]
+            [f"refusing to run {what} on a dirty working tree:", *dirty]
         )
 
 
-def _work_item(input_text: str, tracker, root: Path):
-    """``/full #<n>``'s issue: must exist and come from a trusted author."""
+def _work_item(input_text: str, tracker, root: Path, kind: str):
+    """The ``#<n>`` commands' issue: must exist and come from a trusted author."""
     if not input_text.startswith("#"):
         return None
     ref = input_text[1:].strip()
@@ -503,7 +546,7 @@ def _work_item(input_text: str, tracker, root: Path):
         raise RunRefused(
             f"work item #{ref} was written by {item.author} "
             f"({item.author_association}), not a trusted author — restate "
-            "the work yourself: /full <task>"
+            f"the work yourself: /{kind} <task>"
         )
     return item
 
@@ -537,13 +580,17 @@ def _initial_state(kind: str, input_text: str, cfg: dict, item=None) -> dict:
     if kind == "full":
         state.update(_full_state(state["task"], item))
     if kind == "implement":
-        state.update(_implement_state())
+        state.update(_implement_state(item))
     return state
 
 
-def _implement_state() -> dict:
-    """The ``/implement <task>`` fields layered over the shared run state."""
-    return {
+def _implement_state(item) -> dict:
+    """The ``/implement`` fields layered over the shared run state.
+
+    For ``/implement #<n>`` the run's task is the item's latest agent
+    brief, or its body when there is none (#117, ADR 0012).
+    """
+    state = {
         "files": [],
         "seam_attempts": 0,
         "seam_proposal": "",
@@ -551,6 +598,15 @@ def _implement_state() -> dict:
         "seam_feedback": None,
         "implementer_attempts": 0,
     }
+    if item is not None:
+        state.update(
+            {
+                "task": latest_agent_brief(item) or item.body,
+                "item_ref": item.ref,
+                "item_title": item.title,
+            }
+        )
+    return state
 
 
 def _full_state(task: str, item) -> dict:
@@ -657,6 +713,14 @@ def _run_kind(
     if tuple_ is None:
         return None
     return tuple_.checkpoint["channel_values"].get("kind")
+
+
+def _run_item_ref(saver: SqliteSaver, run_id: str) -> str | None:
+    """The checkpointed run's work item ref, if it carries one."""
+    tuple_ = saver.get_tuple(_thread(run_id))
+    if tuple_ is None:
+        return None
+    return tuple_.checkpoint["channel_values"].get("item_ref")
 
 
 def _refuse_finished(state, run_id: str) -> None:

@@ -6,10 +6,14 @@ There is no merge method: the human merges.
 """
 
 from dataclasses import dataclass, field
+import re
 from typing import Protocol, runtime_checkable
 
 #: Tracker authors whose content may reach an agent (ADR 0006).
 TRUSTED_ASSOCIATIONS = frozenset({"OWNER", "MEMBER", "COLLABORATOR"})
+
+#: The marker ``ensure_work_item`` appends to a work item k0 creates.
+_K0_ITEM_MARKER = re.compile(r"<!-- k0:run=\S+ node=\S+ -->\s*$")
 
 
 def comment_marker(run: str, node: str) -> str:
@@ -46,6 +50,13 @@ class WorkItem:
         if len(parts) >= 4 and parts[-2] == "issues":
             return f"{parts[-4]}/{parts[-3]}#{parts[-1]}"
         return self.ref
+
+
+def is_k0_work_item(item: WorkItem) -> bool:
+    """Whether k0 created this work item: its body ends with the run marker
+    ``ensure_work_item`` appends. A marker quoted mid-body doesn't count.
+    """
+    return bool(_K0_ITEM_MARKER.search(item.body))
 
 
 @dataclass(frozen=True)

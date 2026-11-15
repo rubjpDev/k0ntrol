@@ -133,7 +133,12 @@ def _route_ci(state: dict, *, prefix: str, skipped: str) -> str:
     return f"{prefix}ci_reject_comment"
 
 
-# --- /implement (#116): seam gate, then implementer → validator → diff ------
+# --- /implement (#116, #117): the working-tree and tracker paths --------------
+
+
+def route_implement_start(state: dict) -> str:
+    """``/implement #<n>`` takes the tracker path; ``<task>`` the seam gate."""
+    return "branch_setup" if state.get("item_ref") else "seam"
 
 
 def route_after_seam(state: dict) -> str:
@@ -155,12 +160,17 @@ def route_after_implementer(state: dict) -> str:
 
 
 def route_implement_validator(state: dict) -> str:
-    """Green → the diff gate; red → IMPLEMENTER while attempts remain."""
+    """Green → publish on the tracker path, the diff gate on the tree."""
     if state.get("validator_ok"):
-        return "diff_gate"
+        return "publish" if state.get("item_ref") else "diff_gate"
     if _exhausted(state, "implementer_attempts"):
         return "limit_hit"
     return "implementer"
+
+
+def route_implement_ci_gate(state: dict) -> str:
+    """Cleared → push (recording an approval); rejected → IMPLEMENTER."""
+    return _route_ci(state, prefix="", skipped="implementer")
 
 
 def _exhausted(state: dict, key: str) -> bool:
