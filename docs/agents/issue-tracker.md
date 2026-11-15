@@ -42,6 +42,15 @@ Use it for an experiment whose job is to learn whether an approach holds, before
 
 The title is done when the `gh issue create --title` value matches one of these shapes.
 
+## Ticket body
+
+The title says what kind of issue it is; the body settles what the implementer should not have to invent.
+
+- **Design decisions**: required on every ticket that adds or changes state, filesystem, or rollback behaviour. The section either names the mechanism, or lists each open question as a stop-and-ask point for the implementer to raise before writing code.
+- **Entry-point acceptance tests**: every ticket lists an acceptance test for each entry point it touches: `start`, `resume`, `abandon`, and, for working-tree paths, a dirty start.
+
+A ticket missing either is not `ready-for-agent`.
+
 ## Conventions
 
 - **Create an issue**: `gh issue create --title "..." --body "..."`. Set the title from [Issue titles](#issue-titles). Use a heredoc for multi-line bodies.
