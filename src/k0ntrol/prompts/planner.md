@@ -26,3 +26,7 @@ End every run by calling exactly one structured output tool:
 - `TicketList` for the ticket breakdown: each ticket's title, what it
   delivers, seams, acceptance criteria, and `blocked_by` indexes of
   earlier tickets it waits on.
+- `ChartedMap` for a research map: its title, destination, notes, one
+  decision ticket per open question — the question, a type of research,
+  Q&A or human, and the `blocked_by` indexes of earlier decisions it
+  waits on — plus what is not yet specified and what is out of scope.

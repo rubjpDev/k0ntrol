@@ -73,6 +73,7 @@ from k0ntrol.workflow.plan import (  # noqa: E402
     DEFAULT_MAX_ROUND_QUESTIONS,
     build_plan_graph,
 )
+from k0ntrol.workflow.research import build_research_graph  # noqa: E402
 from k0ntrol.workflow.stuck import stuck_update  # noqa: E402
 
 _BUILDERS = {
@@ -80,6 +81,7 @@ _BUILDERS = {
     "full": build_full_graph,
     "implement": build_implement_graph,
     "plan": build_plan_graph,
+    "research": build_research_graph,
 }
 
 # The roster each run kind uses; the free doctor checks gate start on it.
@@ -96,6 +98,7 @@ _ROSTER = {
     ),
     "implement": ("agents.implementer", "helpers.bulk_read"),
     "plan": ("agents.planner", "helpers.bulk_read"),
+    "research": ("agents.planner", "helpers.bulk_read"),
 }
 
 # Outer recursion limit: each loop iteration costs two super-steps at most.
@@ -168,7 +171,8 @@ def start(
     ``/full <text>`` drafts a brief; ``/full #<n>`` refines issue ``n``;
     ``/implement <task>`` runs the working-tree path (#116) and
     ``/implement #<n>`` the tracker path on a ready work item (#117);
-    ``/plan <idea>`` and ``/plan #<n>`` run the Q&A definition (#120).
+    ``/plan <idea>`` and ``/plan #<n>`` run the Q&A definition (#120);
+    ``/research <question>`` charts a Map of decision tickets (#124).
     Refuses — ``RunRefused`` — on bad usage, a missing tracker or work
     item, an untrusted issue body, a work item not ready for an agent, a
     dirty tree (``.k0-mem/`` ignored), failed doctor checks, a failed
@@ -177,14 +181,14 @@ def start(
     """
     if kind not in _BUILDERS:
         raise RunRefused(f"unknown run: {kind}")
-    kind = cast(Literal["full", "fast", "implement", "plan"], kind)  # _BUILDERS' keys
+    kind = cast(Literal["full", "fast", "implement", "plan", "research"], kind)  # _BUILDERS' keys
     input_text = _checked_input(kind, input)
     tracker = _tracker_for(
         kind,
         cfg,
         root,
         tracker,
-        required=kind == "full"
+        required=kind in ("full", "research")
         or (kind in ("implement", "plan") and input_text.startswith("#")),
     )
     conn, saver = _open_checkpoints(root)
@@ -258,7 +262,8 @@ def resume(
             cfg,
             root,
             tracker,
-            required=kind == "full" or _run_item_ref(saver, run_id) is not None,
+            required=kind in ("full", "research")
+            or _run_item_ref(saver, run_id) is not None,
         )
         ctx = RunContext(
             root=root, cfg=cfg, kind=kind, init=init, tracker=tracker, scan=scan,
@@ -299,7 +304,7 @@ def abandon(run_id: str, *, root: Path) -> None:
     conn, saver = _open_checkpoints(root)
     try:
         kind = _run_kind(saver, run_id)
-        if kind != "plan":  # a plan checkpoint holds no uncommitted work
+        if kind not in ("plan", "research"):  # these hold no uncommitted work
             _refuse_dirty(root, f"/{kind}" if kind else "another run")
         saver.delete_thread(run_id)
         if kind == "implement":
@@ -432,6 +437,8 @@ def _checked_input(kind: str, input) -> str:
     text = str(input).strip()
     if not text or (kind in ("full", "implement", "plan") and not _usage_ok(text)):
         raise RunRefused(_usage(kind))
+    if kind == "research" and text.startswith("#"):
+        raise RunRefused(_usage(kind))  # /research #<n> is #125
     return text
 
 
@@ -596,6 +603,10 @@ def _initial_state(kind: str, input_text: str, cfg: dict, item=None) -> dict:
         state.update(_implement_state(item))
     if kind == "plan":
         state.update(_plan_state(cfg, item))
+    if kind == "research":
+        state.update(
+            {"map": None, "decision_refs": [], "planner_attempts": 0}
+        )
     return state
 
 
@@ -708,10 +719,11 @@ def _session_id(ctx: RunContext, values: dict) -> str | None:
 
 
 def _sitting_session(ctx: RunContext) -> str | None:
-    """``/fast``, ``/implement <task>`` and ``/plan <idea>`` have no work
-    item: their session is the sitting. ``/full``'s is always the work
-    item, which outlives any one sitting."""
-    return ctx.session if ctx.kind in ("fast", "implement", "plan") else None
+    """``/fast``, ``/implement <task>``, ``/plan <idea>`` and
+    ``/research <question>`` have no work item: their session is the
+    sitting. ``/full``'s is always the work item, which outlives any one
+    sitting."""
+    return ctx.session if ctx.kind in ("fast", "implement", "plan", "research") else None
 
 
 def _trace_metadata(ctx: RunContext, values: dict) -> dict:
@@ -743,7 +755,7 @@ def _thread(run_id: str) -> RunnableConfig:
 
 def _run_kind(
     saver: SqliteSaver, run_id: str
-) -> Literal["full", "fast", "implement", "plan"] | None:
+) -> Literal["full", "fast", "implement", "plan", "research"] | None:
     """The run's kind, read from the checkpoint before a graph is built."""
     tuple_ = saver.get_tuple(_thread(run_id))
     if tuple_ is None:

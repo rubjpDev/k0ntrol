@@ -12,7 +12,7 @@ from typing import Any, TypedDict
 class RunState(TypedDict, total=False):
     """One run's state; every field is a plain msgpack-safe value."""
 
-    kind: str  # "fast" | "full" | "implement"
+    kind: str  # "fast" | "full" | "implement" | "plan" | "research"
     task: str  # the run's task text (issue body for /full #<n>)
     start_ms: int  # epoch ms when the run started (run_end.ms)
     max_attempts: int  # agent runs allowed per loop (default 2)
@@ -78,6 +78,10 @@ class RunState(TypedDict, total=False):
     questions: list[dict]  # the open round's questions (the gate's detail)
     planner_attempts: int  # PLANNER runs so far
     max_round_questions: int  # how many questions one round may hold
+
+    # /research (#124): PLANNER's charted map, then the published refs.
+    map: dict | None  # the ChartedMap as a plain dict
+    decision_refs: list[str]  # child work-item refs, one per decision
 
     limit: dict[str, Any] | None  # set when the last node can hit a limit
     retry_node: str | None  # the node a limit_hit retry sends back to

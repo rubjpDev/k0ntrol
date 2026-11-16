@@ -236,7 +236,7 @@ class EventWriter:
 
     def run_start(
         self,
-        run_kind: Literal["full", "fast", "implement", "plan"],
+        run_kind: Literal["full", "fast", "implement", "plan", "research"],
         *,
         work_item: str | None = None,
         branch: str | None = None,
