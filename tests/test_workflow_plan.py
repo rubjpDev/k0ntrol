@@ -100,6 +100,31 @@ def round_call(questions, call_id="q1"):
     )
 
 
+def spec_call(call_id="s1"):
+    """A PLANNER answer that jumps ahead: the Spec structured output."""
+    return AIMessage(
+        content="",
+        tool_calls=[
+            {
+                "name": "Spec",
+                "args": {
+                    "title": "Calc",
+                    "problem_statement": "need answers",
+                    "solution": "a calc module",
+                    "user_stories": ["as a user I get 42"],
+                    "implementation_decisions": ["pure functions"],
+                    "testing_decisions": ["pytest"],
+                    "seams": ["tests/test_calc.py"],
+                    "glossary_and_decisions": ["answer: 42"],
+                    "not_yet_decided": [],
+                    "out_of_scope": ["repl"],
+                },
+                "id": call_id,
+            }
+        ],
+    )
+
+
 def read_call(call_id):
     """A PLANNER tool call that burns a model call (for the limit tests)."""
     return AIMessage(
@@ -311,6 +336,17 @@ def test_an_immediately_empty_round_never_shows_a_gate(tmp_path):
     git_repo(tmp_path)
 
     outcome = run_plan(tmp_path, plan_cfg(), planner_model(round_call([])))
+
+    assert isinstance(outcome, Outcome) and outcome.outcome == "done"
+
+
+def test_a_spec_output_ends_the_qa(tmp_path):
+    """PLANNER answering early with a Spec instead of a QuestionRound still
+    ends the Q&A — a non-round output carries no questions. The spec gate
+    (#121) re-drafts under its own brief from the retained rounds."""
+    git_repo(tmp_path)
+
+    outcome = run_plan(tmp_path, plan_cfg(), planner_model(spec_call()))
 
     assert isinstance(outcome, Outcome) and outcome.outcome == "done"
 
