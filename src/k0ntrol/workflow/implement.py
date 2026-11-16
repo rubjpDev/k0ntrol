@@ -17,9 +17,7 @@ opens the draft change. Reviews are the next ticket.
 """
 
 from collections.abc import Callable
-from typing import Any
 
-from langchain_core.messages import HumanMessage
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
@@ -35,8 +33,7 @@ from k0ntrol.workflow.full import (
     make_publish,
 )
 from k0ntrol.workflow.nodes import (
-    _brief_with_retry,
-    _call_limit,
+    _invoke_counted,
     make_agent_node,
     make_diff_gate,
     make_limit_hit,
@@ -105,23 +102,17 @@ def make_seam_node(ctx: RunContext) -> Callable[[dict], dict]:
     """
 
     def node(state: dict) -> dict:
-        attempt = state.get("seam_attempts", 0) + 1
-        result = ctx.agent(
-            "implementer", slot="seam", read_only=True
-        ).invoke(
-            [HumanMessage(_brief_with_retry(seam_brief, state))],
-            config=ctx.agent_config(attempt),
+        result, updates = _invoke_counted(
+            ctx,
+            "implementer",
+            state,
+            seam_brief,
+            attempts_key="seam_attempts",
+            slot="seam",
+            read_only=True,
+            limit_node="seam",
         )
-        limited = result.limit_hit
-        updates: dict[str, Any] = {
-            "seam_attempts": state.get("seam_attempts", 0) + (0 if limited else 1),
-            "limit": None,
-            "retry_node": None,
-            "retry_context": None,
-        }
-        if limited:
-            updates["limit"] = _call_limit(ctx, "implementer", result, node="seam")
-        else:
+        if not result.limit_hit:
             updates["seam_proposal"] = result.text
         return updates
 

@@ -69,12 +69,17 @@ from k0ntrol.workflow.context import RunContext  # noqa: E402
 from k0ntrol.workflow.fast import build_fast_graph  # noqa: E402
 from k0ntrol.workflow.full import build_full_graph  # noqa: E402
 from k0ntrol.workflow.implement import build_implement_graph  # noqa: E402
+from k0ntrol.workflow.plan import (  # noqa: E402
+    DEFAULT_MAX_ROUND_QUESTIONS,
+    build_plan_graph,
+)
 from k0ntrol.workflow.stuck import stuck_update  # noqa: E402
 
 _BUILDERS = {
     "fast": build_fast_graph,
     "full": build_full_graph,
     "implement": build_implement_graph,
+    "plan": build_plan_graph,
 }
 
 # The roster each run kind uses; the free doctor checks gate start on it.
@@ -90,6 +95,7 @@ _ROSTER = {
         "helpers.bulk_read",
     ),
     "implement": ("agents.implementer", "helpers.bulk_read"),
+    "plan": ("agents.planner", "helpers.bulk_read"),
 }
 
 # Outer recursion limit: each loop iteration costs two super-steps at most.
@@ -161,7 +167,8 @@ def start(
 
     ``/full <text>`` drafts a brief; ``/full #<n>`` refines issue ``n``;
     ``/implement <task>`` runs the working-tree path (#116) and
-    ``/implement #<n>`` the tracker path on a ready work item (#117).
+    ``/implement #<n>`` the tracker path on a ready work item (#117);
+    ``/plan <idea>`` and ``/plan #<n>`` run the Q&A definition (#120).
     Refuses — ``RunRefused`` — on bad usage, a missing tracker or work
     item, an untrusted issue body, a work item not ready for an agent, a
     dirty tree (``.k0-mem/`` ignored), failed doctor checks, a failed
@@ -170,14 +177,15 @@ def start(
     """
     if kind not in _BUILDERS:
         raise RunRefused(f"unknown run: {kind}")
-    kind = cast(Literal["full", "fast", "implement"], kind)  # _BUILDERS' keys
+    kind = cast(Literal["full", "fast", "implement", "plan"], kind)  # _BUILDERS' keys
     input_text = _checked_input(kind, input)
     tracker = _tracker_for(
         kind,
         cfg,
         root,
         tracker,
-        required=kind == "full" or (kind == "implement" and input_text.startswith("#")),
+        required=kind == "full"
+        or (kind in ("implement", "plan") and input_text.startswith("#")),
     )
     conn, saver = _open_checkpoints(root)
     try:
@@ -291,7 +299,8 @@ def abandon(run_id: str, *, root: Path) -> None:
     conn, saver = _open_checkpoints(root)
     try:
         kind = _run_kind(saver, run_id)
-        _refuse_dirty(root, f"/{kind}" if kind else "another run")
+        if kind != "plan":  # a plan checkpoint holds no uncommitted work
+            _refuse_dirty(root, f"/{kind}" if kind else "another run")
         saver.delete_thread(run_id)
         if kind == "implement":
             drop_worktree_snapshot(root, worktree_snapshot_dir(root, run_id))
@@ -339,7 +348,7 @@ def _busy_run(
     busy = open_runs(saver, ctx)
     if not busy:
         return None
-    if ctx.kind in ("full", "implement"):
+    if ctx.kind in ("full", "implement", "plan"):
         same = _same_item_run(busy, input_text)
         if same is not None:
             _work_item(input_text, tracker, root, ctx.kind)
@@ -421,13 +430,13 @@ def _bind_events(
 def _checked_input(kind: str, input) -> str:
     """Non-empty input in the kind's accepted forms, or a usage refusal."""
     text = str(input).strip()
-    if not text or (kind in ("full", "implement") and not _usage_ok(text)):
+    if not text or (kind in ("full", "implement", "plan") and not _usage_ok(text)):
         raise RunRefused(_usage(kind))
     return text
 
 
 def _usage(kind: str) -> str:
-    if kind in ("full", "implement"):
+    if kind in ("full", "implement", "plan"):
         return f"usage: /{kind} <task> | /{kind} #<issue>"
     return f"usage: /{kind} <task>"
 
@@ -503,8 +512,12 @@ def _item_preflight(kind: str, input_text: str, tracker, root: Path):
     """The work-item commands' last refusals: dirty tree, then the item read.
 
     ``/full`` always goes through it; ``/implement`` only for ``#<n>``, whose
-    item must also be ready for an agent (#117).
+    item must also be ready for an agent (#117). ``/plan`` reads the
+    ``#<n>`` item but never touches the tree, so no dirt or label is
+    checked — planning is what readies work (#120).
     """
+    if kind == "plan":
+        return _work_item(input_text, tracker, root, kind)
     if kind != "full" and not (kind == "implement" and input_text.startswith("#")):
         return None
     _refuse_dirty(root, f"/{kind}")
@@ -581,6 +594,29 @@ def _initial_state(kind: str, input_text: str, cfg: dict, item=None) -> dict:
         state.update(_full_state(state["task"], item))
     if kind == "implement":
         state.update(_implement_state(item))
+    if kind == "plan":
+        state.update(_plan_state(cfg, item))
+    return state
+
+
+def _plan_state(cfg: dict, item) -> dict:
+    """The ``/plan`` fields layered over the shared run state (#120).
+
+    For ``/plan #<n>`` the idea is the work item's body; the title goes to
+    PLANNER's brief alongside it.
+    """
+    state = {
+        "rounds": [],
+        "questions": [],
+        "planner_attempts": 0,
+        "max_round_questions": cfg.get(
+            "max_round_questions", DEFAULT_MAX_ROUND_QUESTIONS
+        ),
+    }
+    if item is not None:
+        state.update(
+            {"task": item.body, "item_ref": item.ref, "item_title": item.title}
+        )
     return state
 
 
@@ -672,10 +708,10 @@ def _session_id(ctx: RunContext, values: dict) -> str | None:
 
 
 def _sitting_session(ctx: RunContext) -> str | None:
-    """``/fast`` and ``/implement <task>`` have no work item: their session
-    is the sitting. ``/full``'s is always the work item, which outlives any
-    one sitting."""
-    return ctx.session if ctx.kind in ("fast", "implement") else None
+    """``/fast``, ``/implement <task>`` and ``/plan <idea>`` have no work
+    item: their session is the sitting. ``/full``'s is always the work
+    item, which outlives any one sitting."""
+    return ctx.session if ctx.kind in ("fast", "implement", "plan") else None
 
 
 def _trace_metadata(ctx: RunContext, values: dict) -> dict:
@@ -707,7 +743,7 @@ def _thread(run_id: str) -> RunnableConfig:
 
 def _run_kind(
     saver: SqliteSaver, run_id: str
-) -> Literal["full", "fast", "implement"] | None:
+) -> Literal["full", "fast", "implement", "plan"] | None:
     """The run's kind, read from the checkpoint before a graph is built."""
     tuple_ = saver.get_tuple(_thread(run_id))
     if tuple_ is None:
@@ -733,13 +769,16 @@ def _refuse_finished(state, run_id: str) -> None:
 def _advance(
     ctx: RunContext, graph, state, decision: str | None, config: RunnableConfig
 ) -> None:
-    if state.interrupts and decision is None:
+    if state.interrupts and (decision is None or not str(decision).strip()):
         return  # nothing answered: _finish shows the gate again
     if state.interrupts:
         payload = state.interrupts[0].value
         assert decision is not None
         _check_decision(payload, decision)
-        ctx.writer.gate(payload["gate"], _gate_result(decision))
+        # A gate with no listed answers takes a free line (the Q&A round):
+        # the event records that it was answered, never the line itself.
+        result = _gate_result(decision) if payload.get("answers") else "answered"
+        ctx.writer.gate(payload["gate"], result)
         graph.invoke(Command(resume=decision), config=config, durability="sync")
         return
     # Paused between nodes (crash or kill): continue from the checkpoint.

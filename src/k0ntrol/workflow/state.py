@@ -72,6 +72,13 @@ class RunState(TypedDict, total=False):
     seam_feedback: str | None  # the feedback of the last seam-gate reject
     implementer_attempts: int  # IMPLEMENTER build runs so far (VALIDATOR loop)
 
+    # /plan (#120): the Q&A definition — PLANNER's rounds of numbered
+    # questions, each round answered by the human in one line.
+    rounds: list[dict]  # answered rounds: {"questions": [...], "answer": str}
+    questions: list[dict]  # the open round's questions (the gate's detail)
+    planner_attempts: int  # PLANNER runs so far
+    max_round_questions: int  # how many questions one round may hold
+
     limit: dict[str, Any] | None  # set when the last node can hit a limit
     retry_node: str | None  # the node a limit_hit retry sends back to
     retries_granted: int  # limit_hit retries the human granted (stuck comment)

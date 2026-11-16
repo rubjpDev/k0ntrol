@@ -63,5 +63,5 @@ ignore_missing_imports = true
 # langgraph's StateGraph generics reject dict-in/dict-out node callables;
 # only the graph-wiring modules are exempt, and only for call-overload.
 [[tool.mypy.overrides]]
-module = ["k0ntrol.workflow.fast", "k0ntrol.workflow.full", "k0ntrol.workflow.implement"]
+module = ["k0ntrol.workflow.fast", "k0ntrol.workflow.full", "k0ntrol.workflow.implement", "k0ntrol.workflow.plan"]
 disable_error_code = ["call-overload"]

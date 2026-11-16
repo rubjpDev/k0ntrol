@@ -175,3 +175,14 @@ def route_implement_ci_gate(state: dict) -> str:
 
 def _exhausted(state: dict, key: str) -> bool:
     return state.get(key, 0) >= state.get("max_attempts", DEFAULT_MAX_ATTEMPTS)
+
+
+# --- /plan (#120): the Q&A definition's rounds ------------------------------------
+
+
+def route_after_planner(state: dict) -> str:
+    """A limited round → the pause; questions → the round gate; a round
+    with no questions ends the Q&A."""
+    if state.get("limit"):
+        return "limit_hit"
+    return "round_gate" if state.get("questions") else END
