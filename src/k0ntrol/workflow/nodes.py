@@ -36,25 +36,49 @@ def make_agent_node(
     """
 
     def node(state: dict) -> dict:
-        attempts_key = f"{name}_attempts"
-        attempt = state.get(attempts_key, 0) + 1
-        result = ctx.agent(name).invoke(
-            [HumanMessage(_brief_with_retry(brief, state))],
-            config=ctx.agent_config(attempt),
-        )
-        updates: dict[str, Any] = {
-            attempts_key: attempt,
-            files_key: _merge(state.get(files_key), _written(result)),
-            "limit": None,
-            "retry_node": None,
-            "retry_context": None,
-        }
-        if result.limit_hit:
-            updates[attempts_key] = state.get(attempts_key, 0)
-            updates["limit"] = _call_limit(ctx, name, result)
+        result, updates = _invoke_counted(ctx, name, state, brief)
+        updates[files_key] = _merge(state.get(files_key), _written(result))
         return updates
 
     return node
+
+
+def _invoke_counted(
+    ctx: RunContext,
+    name: str,
+    state: dict,
+    brief: Callable[[dict], str],
+    *,
+    attempts_key: str | None = None,
+    slot: str | None = None,
+    read_only: bool = False,
+    limit_node: str | None = None,
+) -> tuple[Any, dict]:
+    """The scaffolding every fresh-context agent node shares: invoke the
+    brief, count the run under ``attempts_key`` (``<name>_attempts``),
+    clear the limit fields — and on a model-call limit keep the old count
+    and flag ``limit`` so routers send it to ``limit_hit``.
+
+    ``slot``/``read_only`` pick a secondary agent instance (``/implement``'s
+    seam proposal); ``limit_node`` names the node the pause shows and
+    ``retry`` reruns when it differs from the agent's name.
+    """
+    key = attempts_key or f"{name}_attempts"
+    attempt = state.get(key, 0) + 1
+    result = ctx.agent(name, slot=slot, read_only=read_only).invoke(
+        [HumanMessage(_brief_with_retry(brief, state))],
+        config=ctx.agent_config(attempt),
+    )
+    updates: dict[str, Any] = {
+        key: attempt,
+        "limit": None,
+        "retry_node": None,
+        "retry_context": None,
+    }
+    if result.limit_hit:
+        updates[key] = state.get(key, 0)
+        updates["limit"] = _call_limit(ctx, name, result, node=limit_node)
+    return result, updates
 
 
 def _brief_with_retry(brief: Callable[[dict], str], state: dict) -> str:
