@@ -101,6 +101,7 @@ class RunState(TypedDict, total=False):
     max_questions: int  # how many questions the whole Q&A may ask
     question_limit_route: str  # the limit gate's decision: spec | publish_map | round_gate
     spec: dict | None  # the Spec draft at the spec gate (plain dict)
+    decided_map: bool  # /plan #<n> on a decided Map (#126): no Q&A, straight to the draft
 
     # /plan #122: the approved spec cut into tickets — the first, made
     # in code, records the glossary and ADR changes and blocks the rest.

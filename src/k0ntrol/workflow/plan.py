@@ -64,6 +64,7 @@ from k0ntrol.workflow.routers import (
     route_after_tickets,
     route_limit_hit,
     route_plan_spec_gate,
+    route_plan_start,
     route_question_limit,
     route_ticket_gate,
 )
@@ -88,7 +89,7 @@ def build_plan_graph(
     graph.add_node("publish_map", make_publish_map(ctx))
     graph.add_node("publish_decisions", make_publish_decisions(ctx))
     graph.add_node("limit_hit", make_limit_hit(ctx))
-    graph.add_edge(START, "planner")
+    graph.add_conditional_edges(START, route_plan_start)
     graph.add_conditional_edges("planner", route_after_planner)
     graph.add_edge("round_gate", "planner")
     graph.add_conditional_edges("question_limit", route_question_limit)
@@ -237,9 +238,7 @@ def make_spec_node(ctx: RunContext) -> Callable[[dict], dict]:
             return updates
         draft = result.structured_response
         if isinstance(draft, Spec):
-            updates["spec"] = _with_open_questions(
-                draft.model_dump(), state.get("questions", [])
-            )
+            updates["spec"] = _drafted_spec(draft, state)
             return updates
         merged = {**state, **updates}
         if _exhausted(merged, "spec_attempts"):
@@ -285,6 +284,18 @@ def make_spec_gate(ctx: RunContext) -> Callable[[dict], dict]:
     return node
 
 
+def _drafted_spec(draft: Spec, state: dict) -> dict:
+    """The draft as a state dict: open questions folded in, and on a
+    decided Map the map's ref, so the spec it publishes links the map
+    it came from (#126)."""
+    spec = _with_open_questions(
+        draft.model_dump(), state.get("questions", [])
+    )
+    if state.get("decided_map"):
+        spec["map_ref"] = state["item_ref"]
+    return spec
+
+
 def _with_open_questions(spec: dict, questions: list[dict]) -> dict:
     """Fold the questions the limit left unasked into Not yet decided —
     in code, so ending as is never silently drops one (#127)."""
@@ -302,9 +313,12 @@ def render_spec(spec: dict | None) -> str:
     (#102); the same rendering becomes the published body in #123."""
     if not spec:
         return "(PLANNER produced no spec)"
+    sections = [f"**Title:** {spec.get('title', '')}"]
+    if spec.get("map_ref"):
+        sections.append(f"**Map:** #{spec['map_ref']}")
     return "\n\n".join(
         [
-            f"**Title:** {spec.get('title', '')}",
+            *sections,
             _prose("Problem Statement", spec.get("problem_statement", "")),
             _prose("Solution", spec.get("solution", "")),
             _bullets("User Stories", spec.get("user_stories", [])),
@@ -516,13 +530,26 @@ def planner_brief(state: dict) -> str:
     return "\n".join(lines)
 
 
+def _spec_lead(state: dict) -> str:
+    """The brief's lead: a decided Map drafts straight from its
+    destination and decisions, no Q&A having run (#126)."""
+    if state.get("decided_map"):
+        return (
+            "This map's decision tickets are all decided — draft the "
+            "spec from its destination and decisions"
+        )
+    return "The Q&A is over — draft the spec"
+
+
 def spec_brief(state: dict) -> str:
     """PLANNER's fresh context for the spec draft: the idea and every
-    answered round, and on a gate ``redo`` the human's feedback."""
+    answered round — or, on a decided Map, the map's destination and
+    decided tickets, no Q&A having run (#126) — and on a gate ``redo``
+    the human's feedback."""
     lines = [
         f"Idea: {_idea(state)}",
         "",
-        "The Q&A is over — draft the spec: answer with Spec — the title, "
+        f"{_spec_lead(state)}: answer with Spec — the title, "
         "problem statement, solution, user stories, implementation "
         "decisions, testing decisions with the seams, glossary and "
         "decisions, not yet decided, and out of scope.",

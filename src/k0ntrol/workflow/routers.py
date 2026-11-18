@@ -195,6 +195,12 @@ def _exhausted(state: dict, key: str) -> bool:
 # --- /plan (#120, #121): the Q&A's rounds, then the spec gate ---------------------
 
 
+def route_plan_start(state: dict) -> str:
+    """START's first hop: a decided Map skips the Q&A straight to the
+    spec draft (#126); every other idea opens a round."""
+    return "spec" if state.get("decided_map") else "planner"
+
+
 def route_after_planner(state: dict) -> str:
     """A limited round → the pause; a round with no questions ends the
     Q&A and drafts the spec (#121); a round that would pass
