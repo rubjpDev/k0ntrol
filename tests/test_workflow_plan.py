@@ -5,7 +5,9 @@ repo, scripted ``FakeChatModel``s behind the ``init`` seam and a
 ``FakeTracker`` for the ``#<n>`` form. ``/plan <idea>`` runs the Q&A
 definition — each round a fresh PLANNER run given the idea and the
 questions and answers so far, shown at a round gate — until PLANNER
-returns a round with no questions (spec #102, ticket #120).
+returns a round with no questions (spec #102, ticket #120); a fresh
+drafting run then writes the Spec and the spec gate takes ``ok`` or
+``redo <feedback>`` (ticket #121).
 """
 
 import json
@@ -100,28 +102,24 @@ def round_call(questions, call_id="q1"):
     )
 
 
-def spec_call(call_id="s1"):
+def spec_call(call_id="s1", **overrides):
     """A PLANNER answer that jumps ahead: the Spec structured output."""
+    args = {
+        "title": "Calc",
+        "problem_statement": "need answers",
+        "solution": "a calc module",
+        "user_stories": ["as a user I get 42"],
+        "implementation_decisions": ["pure functions"],
+        "testing_decisions": ["pytest"],
+        "seams": ["tests/test_calc.py"],
+        "glossary_and_decisions": ["answer: 42"],
+        "not_yet_decided": [],
+        "out_of_scope": ["repl"],
+    }
+    args.update(overrides)
     return AIMessage(
         content="",
-        tool_calls=[
-            {
-                "name": "Spec",
-                "args": {
-                    "title": "Calc",
-                    "problem_statement": "need answers",
-                    "solution": "a calc module",
-                    "user_stories": ["as a user I get 42"],
-                    "implementation_decisions": ["pure functions"],
-                    "testing_decisions": ["pytest"],
-                    "seams": ["tests/test_calc.py"],
-                    "glossary_and_decisions": ["answer: 42"],
-                    "not_yet_decided": [],
-                    "out_of_scope": ["repl"],
-                },
-                "id": call_id,
-            }
-        ],
+        tool_calls=[{"name": "Spec", "args": args, "id": call_id}],
     )
 
 
@@ -171,7 +169,12 @@ def test_the_planner_and_bulk_read_roster_gates_the_run(tmp_path):
         captured["names"] = tuple(names or ())
         return []
 
-    run_plan(tmp_path, plan_cfg(), planner_model(round_call([])), check=doctor)
+    run_plan(
+        tmp_path,
+        plan_cfg(),
+        planner_model(round_call([]), spec_call()),
+        check=doctor,
+    )
 
     assert "agents.planner" in captured["names"]
     assert "helpers.bulk_read" in captured["names"]
@@ -251,9 +254,9 @@ def test_every_answered_round_reaches_the_later_briefs(tmp_path):
         cfg=plan_cfg(),
         init=models_init(planner_model(round_call([Q2]))),
     )
-    third = planner_model(round_call([]))
+    third = planner_model(round_call([]), spec_call())
 
-    outcome = resume(
+    last = resume(
         gate.run,
         "2 no: bulk_read instead",
         root=tmp_path,
@@ -261,7 +264,7 @@ def test_every_answered_round_reaches_the_later_briefs(tmp_path):
         init=models_init(third),
     )
 
-    assert isinstance(outcome, Outcome) and outcome.outcome == "done"
+    assert isinstance(last, Pending) and last.gate == "spec"
     brief = third.invocations[0][-1].content
     assert "Which database?" in brief
     assert "1 yes" in brief
@@ -316,28 +319,30 @@ def test_the_gate_numbers_the_questions_in_code(tmp_path):
 
 
 def test_a_round_with_no_questions_ends_the_qa(tmp_path):
+    """The Q&A ends; the run goes on to the spec draft, not to done."""
     git_repo(tmp_path)
     pending = run_plan(tmp_path, plan_cfg(), planner_model(round_call([Q1])))
 
-    outcome = resume(
+    gate = resume(
         pending.run,
         "1 yes",
         root=tmp_path,
         cfg=plan_cfg(),
-        init=models_init(planner_model(round_call([]))),
+        init=models_init(planner_model(round_call([]), spec_call())),
     )
 
-    assert isinstance(outcome, Outcome)
-    assert outcome.outcome == "done"
+    assert isinstance(gate, Pending)
+    assert gate.gate == "spec"
 
 
-def test_an_immediately_empty_round_never_shows_a_gate(tmp_path):
-    """Nothing left to decide on the first round: no gate, run done."""
+def test_an_immediately_empty_round_never_shows_a_round_gate(tmp_path):
+    """Nothing left to decide on the first round: no round gate, the run
+    drafts the spec straight away."""
     git_repo(tmp_path)
 
-    outcome = run_plan(tmp_path, plan_cfg(), planner_model(round_call([])))
+    result = run_plan(tmp_path, plan_cfg(), planner_model(round_call([]), spec_call()))
 
-    assert isinstance(outcome, Outcome) and outcome.outcome == "done"
+    assert isinstance(result, Pending) and result.gate == "spec"
 
 
 def test_a_spec_output_ends_the_qa(tmp_path):
@@ -346,9 +351,179 @@ def test_a_spec_output_ends_the_qa(tmp_path):
     (#121) re-drafts under its own brief from the retained rounds."""
     git_repo(tmp_path)
 
-    outcome = run_plan(tmp_path, plan_cfg(), planner_model(spec_call()))
+    result = run_plan(
+        tmp_path, plan_cfg(), planner_model(spec_call(), spec_call())
+    )
+
+    assert isinstance(result, Pending) and result.gate == "spec"
+
+
+# --- the spec gate (#121) -------------------------------------------------------
+
+
+def test_an_empty_round_drafts_the_spec_and_shows_the_spec_gate(tmp_path):
+    """The spec gate shows the draft with every section of the spec
+    format, and takes ``ok`` or ``redo <feedback>``."""
+    git_repo(tmp_path)
+
+    result = run_plan(
+        tmp_path,
+        plan_cfg(),
+        planner_model(round_call([]), spec_call()),
+    )
+
+    assert isinstance(result, Pending)
+    assert result.gate == "spec"
+    assert result.answers == ("ok", "redo")
+    detail = result.detail
+    assert "Calc" in detail
+    assert "Problem Statement" in detail
+    assert "need answers" in detail
+    assert "Solution" in detail
+    assert "a calc module" in detail
+    assert "User Stories" in detail
+    assert "as a user I get 42" in detail
+    assert "Implementation Decisions" in detail
+    assert "pure functions" in detail
+    assert "Testing Decisions" in detail
+    assert "pytest" in detail
+    assert "tests/test_calc.py" in detail
+    assert "Glossary and decisions" in detail
+    assert "answer: 42" in detail
+    assert "Not yet decided" in detail
+    assert "Out of Scope" in detail
+    assert "repl" in detail
+
+
+def test_ok_moves_on_to_the_ticket_breakdown_without_publishing(tmp_path):
+    """``ok`` approves the spec and ends the run; nothing reaches the
+    tracker — publishing is #123, the breakdown's gate #122."""
+    git_repo(tmp_path)
+    tracker = FakeTracker()
+    item = tracker.create_work_item("Calc answers 42", "build the calc module")
+    tracker.calls.clear()
+    cfg = plan_cfg(tracker="github")
+    pending = run_plan(
+        tmp_path,
+        cfg,
+        planner_model(spec_call(), spec_call()),
+        tracker=tracker,
+        input=f"#{item.ref}",
+    )
+    assert isinstance(pending, Pending) and pending.gate == "spec"
+
+    outcome = resume(pending.run, "ok", root=tmp_path, cfg=cfg)
 
     assert isinstance(outcome, Outcome) and outcome.outcome == "done"
+    assert tracker.calls == [], tracker.calls
+
+
+def test_redo_redrafts_the_spec_with_the_feedback(tmp_path):
+    """``redo <feedback>`` runs a fresh drafting pass whose brief carries
+    the feedback, then shows the spec gate again with the new draft."""
+    git_repo(tmp_path)
+    cfg = plan_cfg()
+    pending = run_plan(
+        tmp_path, cfg, planner_model(round_call([]), spec_call())
+    )
+    assert isinstance(pending, Pending) and pending.gate == "spec"
+
+    redrafter = planner_model(spec_call(solution="a calc service"))
+    again = resume(
+        pending.run,
+        "redo more on risks",
+        root=tmp_path,
+        cfg=cfg,
+        init=models_init(redrafter),
+    )
+
+    assert isinstance(again, Pending) and again.gate == "spec"
+    assert "a calc service" in again.detail
+    assert "a calc module" not in again.detail
+    brief = redrafter.invocations[0][-1].content
+    assert "more on risks" in brief
+
+
+def test_the_spec_brief_carries_every_answered_round(tmp_path):
+    """The draft is written from the retained rounds: the idea and each
+    question-answer pair reach the drafting run's fresh context."""
+    git_repo(tmp_path)
+    cfg = plan_cfg()
+    pending = run_plan(tmp_path, cfg, planner_model(round_call([Q1])))
+    gate = resume(
+        pending.run,
+        "1 yes",
+        root=tmp_path,
+        cfg=cfg,
+        init=models_init(planner_model(round_call([Q2]))),
+    )
+    assert isinstance(gate, Pending) and gate.gate == "round"
+    drafter = planner_model(round_call([]), spec_call())
+
+    result = resume(
+        gate.run,
+        "2 no: pytest at the seam",
+        root=tmp_path,
+        cfg=cfg,
+        init=models_init(drafter),
+    )
+
+    assert isinstance(result, Pending) and result.gate == "spec"
+    brief = drafter.invocations[1][-1].content  # second call: the draft
+    assert IDEA in brief
+    assert "Which database?" in brief
+    assert "1 yes" in brief
+    assert "Where is it tested?" in brief
+    assert "2 no: pytest at the seam" in brief
+
+
+def test_resume_without_an_answer_reshows_the_spec_gate(tmp_path):
+    """``decision=None`` answers nothing: the same draft is shown again."""
+    git_repo(tmp_path)
+    cfg = plan_cfg()
+    pending = run_plan(tmp_path, cfg, planner_model(round_call([]), spec_call()))
+    assert isinstance(pending, Pending) and pending.gate == "spec"
+
+    again = resume(pending.run, None, root=tmp_path, cfg=cfg, init=models_init())
+
+    assert isinstance(again, Pending) and again.gate == "spec"
+    assert "a calc module" in again.detail
+
+
+def test_a_spec_draft_at_its_call_limit_pauses_and_retries(tmp_path):
+    """The drafting run's model-call limit pauses under the spec node's
+    name; ``retry`` reruns the draft with fresh context."""
+    git_repo(tmp_path)
+    cfg = plan_cfg()
+    cfg["agents"]["planner"]["model_calls"] = 1
+    paused = run_plan(tmp_path, cfg, planner_model(round_call([]), read_call("r1")))
+
+    assert isinstance(paused, Pending) and paused.gate == "limit_hit"
+    assert paused.answers == ("retry", "stop")
+    assert "spec" in paused.question
+
+    retried = resume(
+        paused.run,
+        "retry",
+        root=tmp_path,
+        cfg=cfg,
+        init=models_init(planner_model(spec_call())),
+    )
+
+    assert isinstance(retried, Pending) and retried.gate == "spec"
+
+
+def test_a_non_spec_answer_redrafts_then_pauses_at_the_attempt_limit(tmp_path):
+    """A drafting run answering with the wrong structured output drafts
+    again; out of ``max_attempts`` the run pauses under the spec node."""
+    git_repo(tmp_path)
+    drafter = planner_model(round_call([]), round_call([]), round_call([]))
+
+    paused = run_plan(tmp_path, plan_cfg(), drafter)
+
+    assert isinstance(paused, Pending) and paused.gate == "limit_hit"
+    assert "spec" in paused.question
+    assert "attempts 2/2" in paused.question
 
 
 # --- /plan #<n>: planning an existing work item -------------------------------------
@@ -408,12 +583,12 @@ def test_plan_item_needs_no_ready_label(tmp_path):
     pending = run_plan(
         tmp_path,
         plan_cfg(tracker="github"),
-        planner_model(round_call([])),
+        planner_model(round_call([]), spec_call()),
         tracker=tracker,
         input=f"#{item.ref}",
     )
 
-    assert isinstance(pending, Outcome) and pending.outcome == "done"
+    assert isinstance(pending, Pending) and pending.gate == "spec"
 
 
 def test_plan_runs_on_a_dirty_tree(tmp_path):
@@ -530,14 +705,17 @@ def test_limit_retry_reruns_the_planner_round(tmp_path):
 
 def test_events_record_the_plan_run(tmp_path):
     git_repo(tmp_path)
-    pending = run_plan(tmp_path, plan_cfg(), planner_model(round_call([Q1])))
-    outcome = resume(
+    cfg = plan_cfg()
+    pending = run_plan(tmp_path, cfg, planner_model(round_call([Q1])))
+    gate = resume(
         pending.run,
         "1 yes",
         root=tmp_path,
-        cfg=plan_cfg(),
-        init=models_init(planner_model(round_call([]))),
+        cfg=cfg,
+        init=models_init(planner_model(round_call([]), spec_call())),
     )
+    assert isinstance(gate, Pending) and gate.gate == "spec"
+    outcome = resume(gate.run, "ok", root=tmp_path, cfg=cfg)
     assert outcome.outcome == "done"
 
     log = events(tmp_path)
@@ -546,6 +724,8 @@ def test_events_record_the_plan_run(tmp_path):
     assert log[0]["run_kind"] == "plan"
     assert ("gate", "round", "waiting") in kinds
     assert ("gate", "round", "answered") in kinds
+    assert ("gate", "spec", "waiting") in kinds
+    assert ("gate", "spec", "approve") in kinds
     assert kinds[-1][0] == "run_end"
     assert log[-1]["outcome"] == "done"
 
