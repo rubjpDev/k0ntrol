@@ -236,6 +236,31 @@ class DecisionProposal(BaseModel):
     rationale: str = ""
 
 
+class TriageBrief(BaseModel):
+    """The agent brief a ``ready-for-*`` triage outcome posts (#128)."""
+
+    what_to_build: str
+    seams: list[str] = Field(default_factory=list)
+    acceptance_criteria: list[str] = Field(default_factory=list)
+    blocked_by: list[str] = Field(default_factory=list)
+    parent: str = ""
+
+
+class TriageOutcome(BaseModel):
+    """PLANNER's triage proposal: one category, one state, the comment."""
+
+    category: Literal["bug", "enhancement"]
+    state: Literal[
+        "needs-triage",
+        "needs-info",
+        "ready-for-agent",
+        "ready-for-human",
+        "wontfix",
+    ]
+    comment: str = ""
+    brief: TriageBrief | None = None
+
+
 class ResearchCitation(BaseModel):
     """A primary source RESEARCHER cites."""
 
@@ -252,7 +277,12 @@ class ResearchFinding(BaseModel):
 
 
 _PLANNER_OUTPUT = (
-    QuestionRound | Spec | TicketList | ChartedMap | DecisionProposal
+    QuestionRound
+    | Spec
+    | TicketList
+    | ChartedMap
+    | DecisionProposal
+    | TriageOutcome
 )
 
 # Agents whose ``create_agent`` gets a structured ``response_format`` (spec

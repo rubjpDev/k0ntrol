@@ -107,6 +107,13 @@ class RunState(TypedDict, total=False):
     decided: str  # the confirmed decision the ticket closes with
     researcher_attempts: int  # RESEARCHER runs so far
 
+    # /triage (#128): the outcome proposal, its gate and the applied result.
+    triage_outcome: dict | None  # the TriageOutcome proposal as a plain dict
+    outcome_attempts: int  # outcome-drafting PLANNER runs so far
+    triage_approved: bool  # the human ok'd the outcome at its gate
+    triage_feedback: str | None  # the feedback of the last outcome-gate redo
+    triage_rejections: list[str]  # earlier outcome-gate feedback
+
     limit: dict[str, Any] | None  # set when the last node can hit a limit
     retry_node: str | None  # the node a limit_hit retry sends back to
     retries_granted: int  # limit_hit retries the human granted (stuck comment)
