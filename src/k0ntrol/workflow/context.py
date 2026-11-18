@@ -21,6 +21,7 @@ from k0ntrol.langfuse import RunTrace
 from k0ntrol.memory.scan import run_scan
 from k0ntrol.otel import otel_callbacks
 from k0ntrol.tools.run_tests import DEFAULT_TEST_TIMEOUT
+from k0ntrol.tools.slice_guard import SliceStart
 from k0ntrol.workflow.change import default_base_branch
 
 
@@ -68,7 +69,12 @@ class RunContext:
         return self.cfg.get("base_branch") or default_base_branch(self.root)
 
     def agent(
-        self, name: str, *, slot: str | None = None, read_only: bool = False
+        self,
+        name: str,
+        *,
+        slot: str | None = None,
+        read_only: bool = False,
+        slice_start: SliceStart = "green",
     ) -> K0Agent:
         """The named agent, built once per run on first use.
 
@@ -76,7 +82,8 @@ class RunContext:
         tools and slice guard — for a phase that must not share mutable
         tool state with the agent's main instance (``/implement``'s seam
         proposal vs its build). ``read_only`` strips the mutating tools
-        for proposal phases.
+        for proposal phases. ``slice_start`` is the new instance's guard
+        start state — a review redo builds IMPLEMENTER in refactor (#119).
         """
         key = name if slot is None else f"{name}:{slot}"
         if key not in self._agents:
@@ -90,6 +97,7 @@ class RunContext:
                 tracker=self.tracker,
                 init=self.init,
                 read_only=read_only,
+                slice_start=slice_start,
             )
             self._agents[key] = build_agent(
                 name,

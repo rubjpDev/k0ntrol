@@ -60,6 +60,7 @@ GATE_OPTIONS: dict[str, list[tuple[str, str]]] = {
 FEEDBACK_LABELS = {
     "redo": "feedback",
     "spec": "feedback for SPEC",
+    "plan": "feedback for the work item",
     "retry": "feedback (enter to skip)",
 }
 

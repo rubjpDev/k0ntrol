@@ -82,6 +82,12 @@ class RunState(TypedDict, total=False):
     conventions_review_round: int  # Conventions reviews produced (marker suffix)
     contract_review_round: int  # Contract reviews produced (marker suffix)
 
+    # /implement #<n> (#119): the review gate over both posted reviews —
+    # ``ok`` marks the change ready, ``redo`` reruns IMPLEMENTER in the
+    # guard's refactor state, ``plan`` returns the item to planning.
+    refactor: bool  # IMPLEMENTER's guard starts in refactor (a review redo)
+    plan_feedback: str | None  # the human's `plan` feedback, commented on the item
+
     # /plan (#120): the Q&A definition — PLANNER's rounds of numbered
     # questions, each round answered by the human in one line. #121:
     # once a round holds no questions PLANNER drafts the Spec under its
