@@ -219,9 +219,44 @@ def route_plan_spec_gate(state: dict) -> str:
 # --- /research (#124): chart the map, then publish ---------------------------------
 
 
+def route_research_start(state: dict) -> str:
+    """``/research #<n>`` works the map's next decision; ``<question>`` charts."""
+    return "pick_decision" if state.get("item_ref") else "planner"
+
+
 def route_after_chart(state: dict) -> str:
     """A limited or attempts-exhausted chart → the pause; a charted map →
     publish; anything else → PLANNER charts again."""
     if state.get("limit"):
         return "limit_hit"
     return "publish_map" if state.get("map") else "planner"
+
+
+# --- /research #<n> (#125): work the map's next decision ticket --------------------
+
+#: A decision ticket's type names the node that answers it; anything else
+#: (``human``, a child with no ``## Type``) goes straight to the human.
+_ANSWERERS = {"research": "researcher", "Q&A": "decision_planner"}
+
+
+def route_after_pick(state: dict) -> str:
+    """Nothing workable → the run ends done; else the type's answerer."""
+    decision = state.get("decision")
+    if not decision:
+        return END
+    return _ANSWERERS.get(decision["type"], "decision_gate")
+
+
+def route_after_researcher(state: dict) -> str:
+    """A limited RESEARCHER run never comments nor reaches the gate."""
+    if state.get("limit"):
+        return "limit_hit"
+    return "comment_findings"
+
+
+def route_after_decision_planner(state: dict) -> str:
+    """A limited round → the pause; questions → the round gate; a
+    proposal or an empty round → the decision gate."""
+    if state.get("limit"):
+        return "limit_hit"
+    return "round_gate" if state.get("questions") else "decision_gate"

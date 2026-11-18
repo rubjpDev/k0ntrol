@@ -353,6 +353,22 @@ class FakeTracker:
         self._item(blocker)
         blocked.setdefault("blocked_by", set()).add(str(blocker))
 
+    def list_blockers(self, ref: str) -> tuple[ChildWorkItem, ...]:
+        item = self._item(ref)
+        return tuple(
+            ChildWorkItem(
+                ref=blocker,
+                title=self._item(blocker)["title"],
+                state=self._item(blocker)["state"],
+                labels=tuple(sorted(self._item_labels[blocker])),
+            )
+            for blocker in sorted(item.get("blocked_by", ()), key=int)
+        )
+
+    def edit_work_item_body(self, ref: str, body: str) -> None:
+        self.calls.append(("edit_work_item_body", ref))
+        self._item(ref)["body"] = body
+
     def close_work_item(
         self, ref: str, body: str, *, run: str, node: str
     ) -> None:
