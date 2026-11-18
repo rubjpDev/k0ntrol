@@ -107,6 +107,7 @@ class RunState(TypedDict, total=False):
     # in code, records the glossary and ADR changes and blocks the rest.
     ticket_size: str  # small | medium | large — a ticket's criteria cap
     tickets: list[dict] | None  # the breakdown at the ticket gate
+    ticket_refs: list[str]  # the published child refs, ticket order (#123)
     tickets_approved: bool  # the ticket gate's ok
     tickets_attempts: int  # breakdown runs so far
     ticket_rejections: list[str]  # the feedback of each redo so far

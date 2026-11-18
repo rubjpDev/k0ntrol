@@ -88,6 +88,8 @@ def build_plan_graph(
     graph.add_node("ticket_gate", make_ticket_gate(ctx))
     graph.add_node("publish_map", make_publish_map(ctx))
     graph.add_node("publish_decisions", make_publish_decisions(ctx))
+    graph.add_node("publish_spec", make_publish_spec(ctx))
+    graph.add_node("publish_tickets", make_publish_tickets(ctx))
     graph.add_node("limit_hit", make_limit_hit(ctx))
     graph.add_conditional_edges(START, route_plan_start)
     graph.add_conditional_edges("planner", route_after_planner)
@@ -99,6 +101,8 @@ def build_plan_graph(
     graph.add_conditional_edges("ticket_gate", route_ticket_gate)
     graph.add_edge("publish_map", "publish_decisions")
     graph.add_edge("publish_decisions", END)
+    graph.add_edge("publish_spec", "publish_tickets")
+    graph.add_edge("publish_tickets", END)
     graph.add_conditional_edges("limit_hit", route_limit_hit)
     return graph.compile(checkpointer=checkpointer)
 
@@ -431,8 +435,8 @@ def _glossary_ticket(spec: dict) -> dict:
 def make_ticket_gate(ctx: RunContext) -> Callable[[dict], dict]:
     """The ticket gate: every ticket's title, blockers, deliverable and
     criteria count — a ticket over its ``ticket_size`` count flagged —
-    then ``ok`` or ``redo <feedback>``. ``ok`` ends the run done
-    (publishing is #123); ``redo`` recuts with the feedback."""
+    then ``ok`` or ``redo <feedback>``. ``ok`` publishes the spec and
+    its tickets (#123); ``redo`` recuts with the feedback."""
 
     def node(state: dict) -> dict:
         decision = interrupt(
@@ -451,7 +455,6 @@ def make_ticket_gate(ctx: RunContext) -> Callable[[dict], dict]:
             return {
                 "tickets_approved": True,
                 "ticket_feedback": None,
-                "outcome": "done",
             }
         return {
             "tickets": None,
@@ -464,6 +467,96 @@ def make_ticket_gate(ctx: RunContext) -> Callable[[dict], dict]:
         }
 
     return node
+
+
+# --- publishing (#123) ---------------------------------------------------------------
+
+READY_LABEL = "ready-for-agent"
+
+
+def make_publish_spec(ctx: RunContext) -> Callable[[dict], dict]:
+    """The Spec work item, marker-idempotent (carrier contract, #13):
+    ``/plan <idea>`` opens it; ``/plan #<n>`` updates the item's plan —
+    the spec posted on it — instead (#123). A trackerless run has
+    nothing to publish on and ends done."""
+
+    def node(state: dict) -> dict:
+        if ctx.tracker is None:
+            return {"outcome": "done"}
+        if state.get("item_ref"):
+            ctx.tracker.comment_work_item(
+                state["item_ref"],
+                render_spec(state["spec"]),
+                run=ctx.run_id,
+                node="publish_spec",
+            )
+            return {}
+        item = ctx.tracker.ensure_work_item(
+            state["spec"]["title"],
+            render_spec(state["spec"]),
+            run=ctx.run_id,
+            node="publish_spec",
+        )
+        return {"item_ref": item.ref, "item_title": item.title}
+
+    return node
+
+
+def make_publish_tickets(ctx: RunContext) -> Callable[[dict], dict]:
+    """Each ticket as a marked child of the spec item, blockers first,
+    then its native blocker links and the ready-for-agent label — one
+    node marker per ticket so a resume recovers each on its own (#123)."""
+
+    def node(state: dict) -> dict:
+        if ctx.tracker is None:
+            return {"outcome": "done"}
+        ctx.tracker.ensure_label(READY_LABEL)
+        refs: list[str] = []
+        for index, ticket in enumerate(state["tickets"]):
+            refs.append(
+                _publish_ticket(ctx, state["item_ref"], ticket, index, refs)
+            )
+        return {"ticket_refs": refs, "outcome": "done"}
+
+    return node
+
+
+def _publish_ticket(
+    ctx: RunContext, item_ref: str, ticket: dict, index: int, refs: list[str]
+) -> str:
+    """One ticket as a marked child of the spec item — blockers first —
+    then its native blocker links and the ready-for-agent label."""
+    child = ctx.tracker.create_child_work_item(
+        item_ref,
+        ticket["title"],
+        ticket_body(ticket, item_ref, refs),
+        run=ctx.run_id,
+        node=f"publish_ticket_{index}",
+    )
+    for blocker in ticket.get("blocked_by", []):
+        ctx.tracker.link_blocked_by(child.ref, refs[blocker])
+    ctx.tracker.add_label(child.ref, READY_LABEL)
+    return child.ref
+
+
+def ticket_body(ticket: dict, item_ref: str, refs: list[str]) -> str:
+    """A ticket's body — the one format tickets and agent briefs share:
+    what to build, seams, acceptance criteria, blocked by, and the
+    parent (ADR 0012, #123)."""
+    return "\n\n".join(
+        [
+            _prose("What to build", ticket["what_to_build"]),
+            _bullets("Seams", ticket.get("seams", [])),
+            _bullets(
+                "Acceptance criteria", ticket.get("acceptance_criteria", [])
+            ),
+            _bullets(
+                "Blocked by",
+                [f"#{refs[i]}" for i in ticket.get("blocked_by", [])],
+            ),
+            f"Parent: #{item_ref}",
+        ]
+    )
 
 
 def render_tickets(tickets: list[dict], ticket_size: str) -> str:
