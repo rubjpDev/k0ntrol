@@ -593,11 +593,27 @@ def _item_preflight(kind: str, input_text: str, tracker, root: Path):
 
 def _read_only_item(kind: str, input_text: str, tracker, root: Path):
     """The ``#<n>`` read for the planning kinds — no tree, no label; but
-    a ``/research #<n>`` carrier must be a Map."""
+    a ``/research #<n>`` carrier must be a Map, and ``/plan #<n>`` on
+    a Map waits for its decision tickets to be all decided (#126)."""
     item = _work_item(input_text, tracker, root, kind)
     if kind == "research" and item is not None:
         _refuse_not_map(item)
+    if kind == "plan" and item is not None and is_map(item):
+        _refuse_open_decisions(item, tracker)
     return item
+
+
+def _refuse_open_decisions(item, tracker) -> None:
+    """``/plan #<n>`` on a Map drafts the spec from its decisions —
+    only once they are all decided; a map with decision tickets still
+    open is refused, naming how many (#126)."""
+    open_ = sum(1 for c in tracker.list_children(item.ref) if c.state == "open")
+    if open_:
+        raise RunRefused(
+            f"map #{item.ref} still has {open_} open decision "
+            f"ticket{'s' if open_ != 1 else ''} — work them "
+            f"with /research #{item.ref} first"
+        )
 
 
 def _refuse_not_map(item) -> None:
@@ -777,11 +793,13 @@ def _plan_state(cfg: dict, item) -> dict:
         "tickets_attempts": 0,
         "ticket_rejections": [],
         "ticket_feedback": None,
+        "decided_map": False,
     }
     if item is not None:
         state.update(
             {"task": item.body, "item_ref": item.ref, "item_title": item.title}
         )
+        state["decided_map"] = is_map(item)
     return state
 
 

@@ -1153,6 +1153,113 @@ def fat_slice():
     return {**SLICE, "acceptance_criteria": ["a", "b", "c", "d"]}
 
 
+# --- /plan #<map>: the spec drafted from a decided map (#126) --------------------
+
+MAP_BODY = """## Destination
+
+decide the calc design
+
+## Notes
+
+charted from research
+
+## Decisions so far
+
+- [Which database?](https://github.com/o/r/issues/2): SQLite
+
+## Not yet specified
+
+- nothing
+
+## Out of scope
+
+- a REPL
+"""
+
+
+def decided_map(tracker):
+    """A map whose one decision ticket is closed — ready to plan."""
+    item = tracker.create_work_item("Calc map", MAP_BODY)
+    child = tracker.create_child_work_item(
+        item.ref,
+        "Which database?",
+        "## Question\n\nWhich database?\n\n## Type\n\nresearch",
+        run="r0",
+        node="publish_decisions",
+    )
+    tracker.close_work_item(
+        child.ref, "## Decision\n\nSQLite", run="r0", node="record_decision"
+    )
+    return item
+
+
+def test_plan_on_a_decided_map_goes_straight_to_the_spec_gate(tmp_path):
+    """A map with no open decision tickets skips the Q&A: PLANNER's
+    first run drafts the Spec from the map's destination and
+    decisions, and lands at the spec gate (#126)."""
+    git_repo(tmp_path)
+    tracker = FakeTracker()
+    item = decided_map(tracker)
+    drafter = planner_model(spec_call())
+
+    pending = run_plan(
+        tmp_path,
+        plan_cfg(tracker="github"),
+        drafter,
+        tracker=tracker,
+        input=f"#{item.ref}",
+    )
+
+    assert isinstance(pending, Pending) and pending.gate == "spec"
+    brief = drafter.invocations[0][-1].content
+    assert "decide the calc design" in brief  # the map's destination
+    assert "Which database?" in brief  # a decided decision
+
+
+def test_plan_on_a_map_with_open_decisions_is_refused_with_the_count(tmp_path):
+    """A map whose decision tickets are still open is refused, naming
+    how many are open (#126)."""
+    git_repo(tmp_path)
+    tracker = FakeTracker()
+    item = decided_map(tracker)
+    for i in (1, 2):
+        tracker.create_child_work_item(
+            item.ref,
+            f"open {i}",
+            f"## Question\n\nopen {i}",
+            run=f"r{i}",
+            node="n",
+        )
+
+    with pytest.raises(RunRefused, match="2 open"):
+        run_plan(
+            tmp_path,
+            plan_cfg(tracker="github"),
+            planner_model(spec_call()),
+            tracker=tracker,
+            input=f"#{item.ref}",
+        )
+
+
+def test_the_spec_drafted_from_a_map_links_the_map(tmp_path):
+    """The drafted spec carries the map's ref, so the spec it publishes
+    links the map it came from (#126)."""
+    git_repo(tmp_path)
+    tracker = FakeTracker()
+    item = decided_map(tracker)
+
+    pending = run_plan(
+        tmp_path,
+        plan_cfg(tracker="github"),
+        planner_model(spec_call()),
+        tracker=tracker,
+        input=f"#{item.ref}",
+    )
+
+    assert isinstance(pending, Pending)
+    assert f"#{item.ref}" in pending.detail
+
+
 def test_plan_public_functions_have_complete_annotations():
     import inspect
 
