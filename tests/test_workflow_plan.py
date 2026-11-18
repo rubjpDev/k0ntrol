@@ -1390,6 +1390,29 @@ def test_plan_on_an_item_posts_the_spec_on_it_and_parents_the_tickets(tmp_path):
     assert tracker._next_item == 5  # item + 3 children; no spec item
 
 
+def test_plan_on_a_map_publishes_the_spec_as_its_own_item(tmp_path):
+    """A decided Map is never the spec's parent — its children are
+    decision tickets, so the spec gets its own item that links the map,
+    and the build tickets are children of the spec, not the map."""
+    tracker = FakeTracker()
+    map_item = decided_map(tracker)
+
+    outcome, tracker = to_published(
+        tmp_path, input=f"#{map_item.ref}", tracker=tracker
+    )
+
+    assert isinstance(outcome, Outcome) and outcome.outcome == "done"
+    spec_ref = next(
+        ref
+        for ref, item in tracker._items.items()
+        if "Problem Statement" in item["body"]
+    )
+    spec_item = tracker.read_work_item(spec_ref)
+    assert f"**Map:** #{map_item.ref}" in spec_item.body
+    assert len(tracker.list_children(spec_item.ref)) == 3  # the tickets
+    assert len(tracker.list_children(map_item.ref)) == 1  # its decision only
+
+
 def test_resuming_mid_publish_duplicates_no_work_items(tmp_path):
     """A run that dies between children publishes the rest on resume —
     the earlier children are recovered by their markers, not recreated

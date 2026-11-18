@@ -476,14 +476,16 @@ READY_LABEL = "ready-for-agent"
 
 def make_publish_spec(ctx: RunContext) -> Callable[[dict], dict]:
     """The Spec work item, marker-idempotent (carrier contract, #13):
-    ``/plan <idea>`` opens it; ``/plan #<n>`` updates the item's plan —
-    the spec posted on it — instead (#123). A trackerless run has
-    nothing to publish on and ends done."""
+    ``/plan <idea>`` opens it; ``/plan #<n>`` on a plain item updates
+    its plan — the spec posted on it — instead. A decided Map is never
+    the spec's parent: its children are decision tickets, so the spec
+    gets its own item that links the map (#126, #123). A trackerless
+    run has nothing to publish on and ends done."""
 
     def node(state: dict) -> dict:
         if ctx.tracker is None:
             return {"outcome": "done"}
-        if state.get("item_ref"):
+        if state.get("item_ref") and not state.get("decided_map"):
             ctx.tracker.comment_work_item(
                 state["item_ref"],
                 render_spec(state["spec"]),
