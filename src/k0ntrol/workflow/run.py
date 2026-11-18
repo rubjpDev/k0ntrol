@@ -607,13 +607,28 @@ def _refuse_open_decisions(item, tracker) -> None:
     """``/plan #<n>`` on a Map drafts the spec from its decisions —
     only once they are all decided; a map with decision tickets still
     open is refused, naming how many (#126)."""
-    open_ = sum(1 for c in tracker.list_children(item.ref) if c.state == "open")
-    if open_:
+    try:
+        children = tracker.list_children(item.ref)
+        pending = sum(
+            1 for child in children if _undecided(child, item, tracker)
+        )
+    except TrackerError as error:
+        raise RunRefused(str(error)) from error
+    if pending:
         raise RunRefused(
-            f"map #{item.ref} still has {open_} open decision "
-            f"ticket{'s' if open_ != 1 else ''} — work them "
+            f"map #{item.ref} still has {pending} open decision "
+            f"ticket{'s' if pending != 1 else ''} — work them "
             f"with /research #{item.ref} first"
         )
+
+
+def _undecided(child, item, tracker) -> bool:
+    """A decision ticket that still counts: open, or closed before its
+    decision was indexed on the map — a run that died between closing
+    the ticket and writing the map line must not be planned over (#126)."""
+    if child.state == "open":
+        return True
+    return tracker.read_work_item(child.ref).url not in item.body
 
 
 def _refuse_not_map(item) -> None:

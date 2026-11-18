@@ -1165,8 +1165,6 @@ charted from research
 
 ## Decisions so far
 
-- [Which database?](https://github.com/o/r/issues/2): SQLite
-
 ## Not yet specified
 
 - nothing
@@ -1178,7 +1176,8 @@ charted from research
 
 
 def decided_map(tracker):
-    """A map whose one decision ticket is closed — ready to plan."""
+    """A map whose one decision ticket is closed and indexed under
+    Decisions so far — ready to plan."""
     item = tracker.create_work_item("Calc map", MAP_BODY)
     child = tracker.create_child_work_item(
         item.ref,
@@ -1189,6 +1188,13 @@ def decided_map(tracker):
     )
     tracker.close_work_item(
         child.ref, "## Decision\n\nSQLite", run="r0", node="record_decision"
+    )
+    tracker.edit_work_item_body(
+        item.ref,
+        MAP_BODY.replace(
+            "## Decisions so far",
+            f"## Decisions so far\n\n- [Which database?]({child.url}): SQLite",
+        ),
     )
     return item
 
@@ -1232,6 +1238,33 @@ def test_plan_on_a_map_with_open_decisions_is_refused_with_the_count(tmp_path):
         )
 
     with pytest.raises(RunRefused, match="2 open"):
+        run_plan(
+            tmp_path,
+            plan_cfg(tracker="github"),
+            planner_model(spec_call()),
+            tracker=tracker,
+            input=f"#{item.ref}",
+        )
+
+
+def test_plan_on_a_map_with_an_unindexed_decision_is_refused(tmp_path):
+    """A decision ticket closed before its line reached the map still
+    counts as open — its decision is not on the map to draft from."""
+    git_repo(tmp_path)
+    tracker = FakeTracker()
+    item = tracker.create_work_item("Calc map", MAP_BODY)
+    child = tracker.create_child_work_item(
+        item.ref,
+        "Which database?",
+        "## Question\n\nWhich database?",
+        run="r0",
+        node="publish_decisions",
+    )
+    tracker.close_work_item(
+        child.ref, "## Decision\n\nSQLite", run="r0", node="record_decision"
+    )
+
+    with pytest.raises(RunRefused, match="1 open"):
         run_plan(
             tmp_path,
             plan_cfg(tracker="github"),
