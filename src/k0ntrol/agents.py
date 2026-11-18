@@ -57,7 +57,7 @@ from k0ntrol.tools.net import Resolver, Transport
 from k0ntrol.tools.read import make_grep, make_list_files, make_read_file
 from k0ntrol.tools.run_tests import make_run_tests
 from k0ntrol.tools.search_memory import make_search_memory
-from k0ntrol.tools.slice_guard import SliceGuard
+from k0ntrol.tools.slice_guard import SliceGuard, SliceStart
 from k0ntrol.tools.tracker import tracker_read_tools
 from k0ntrol.tools.web_search import Fetch, make_web_search
 from k0ntrol.tools.write import WritePolicy, WriteScope, make_edit_file, make_write_file
@@ -349,6 +349,7 @@ def agent_tools(
     environ: Mapping[str, str] | None = None,
     fetch: Fetch | None = None,
     read_only: bool = False,
+    slice_start: SliceStart = "green",
 ) -> list[BaseTool]:
     """The tools on agent ``name``'s allowlist, bound to the run context.
 
@@ -360,7 +361,9 @@ def agent_tools(
     it, and only when the tool runs. With ``tracker=None`` the tracker
     reads are left off entirely (``/fast``), matching
     ``allowlist_for(name, tracker=False)``. ``read_only`` matches
-    ``allowlist_for(..., read_only=True)`` the same way.
+    ``allowlist_for(..., read_only=True)`` the same way. ``slice_start``
+    is IMPLEMENTER's guard's start state — ``refactor`` for a run started
+    from a review redo (#110).
     """
     try:
         names = allowlist_for(
@@ -378,6 +381,7 @@ def agent_tools(
         transport=transport,
         environ=environ,
         fetch=fetch,
+        slice_start=slice_start,
     )
     return [factories[tool_name]() for tool_name in names]
 
@@ -585,8 +589,9 @@ def _tool_factories(
     transport: Transport | None,
     environ: Mapping[str, str] | None,
     fetch: Fetch | None,
+    slice_start: SliceStart = "green",
 ) -> dict[str, Callable[[], BaseTool]]:
-    guard = SliceGuard() if agent == "implementer" else None
+    guard = SliceGuard(start=slice_start) if agent == "implementer" else None
     factories: dict[str, Callable[[], BaseTool]] = {
         "read_file": lambda: make_read_file(root),
         "list_files": lambda: make_list_files(root),

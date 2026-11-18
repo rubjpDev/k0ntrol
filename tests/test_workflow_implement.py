@@ -733,8 +733,9 @@ def test_a_ready_item_is_pushed_and_opened_as_a_draft_change(tmp_path):
 
     result = run_item(tmp_path, item_cfg(), tracker, builder, passing_reviewer())
 
-    assert isinstance(result, Outcome)
-    assert result.outcome == "done"
+    # the run's work ends at the review gate over both posted reviews (#119)
+    assert isinstance(result, Pending)
+    assert result.gate == "review"
     branch = "k0/1-calc-answers-42"
     assert ("create_branch", branch) in tracker.calls
     assert ("commit", "#1: Calc answers 42") in tracker.calls
@@ -808,7 +809,7 @@ def test_a_k0_created_item_runs_without_the_label(tmp_path):
 
     result = run_item(tmp_path, item_cfg(), tracker, builder_model(), passing_reviewer())
 
-    assert isinstance(result, Outcome) and result.outcome == "done"
+    assert isinstance(result, Pending) and result.gate == "review"
     assert tracker.read_change("k0/1-calc-answers-42").is_draft
 
 
@@ -899,7 +900,7 @@ def test_github_changes_wait_at_the_ci_gate(tmp_path):
     assert pushes(tracker) == []
     assert not [c for c in tracker.calls if c[0] == "open_change"]
 
-    done = resume(
+    gate = resume(
         gate.run,
         "ok",
         root=tmp_path,
@@ -908,7 +909,8 @@ def test_github_changes_wait_at_the_ci_gate(tmp_path):
         tracker=tracker,
     )
 
-    assert isinstance(done, Outcome) and done.outcome == "done"
+    # the run then pauses at the review gate over both reviews (#119)
+    assert isinstance(gate, Pending) and gate.gate == "review"
     assert pushes(tracker) == [("push", "k0/1-calc-answers-42")]
     assert tracker.read_change("k0/1-calc-answers-42").is_draft
     # no change existed when the gate passed: the record is on the issue
@@ -944,7 +946,7 @@ def test_a_rejected_ci_gate_sends_the_feedback_to_implementer(tmp_path):
     )
     assert pushes(tracker) == []
 
-    done = resume(
+    gate = resume(
         again.run,
         "ok",
         root=tmp_path,
@@ -952,7 +954,7 @@ def test_a_rejected_ci_gate_sends_the_feedback_to_implementer(tmp_path):
         init=models_init(passing_reviewer()),
         tracker=tracker,
     )
-    assert done.outcome == "done"
+    assert isinstance(gate, Pending) and gate.gate == "review"
     assert pushes(tracker) == [("push", "k0/1-calc-answers-42")]
 
 
@@ -1016,7 +1018,7 @@ def test_validator_red_retries_implementer_on_the_item_path(tmp_path):
 
     result = run_item(tmp_path, item_cfg(), tracker, builder, passing_reviewer())
 
-    assert isinstance(result, Outcome) and result.outcome == "done"
+    assert isinstance(result, Pending) and result.gate == "review"
     retry_brief = builder.invocations[5][-1].content
     assert "Work item #1: Calc answers 42" in retry_brief
     assert "VALIDATOR is still red" in retry_brief
@@ -1039,7 +1041,7 @@ def test_the_draft_change_gets_conventions_and_contract_reviews(tmp_path):
 
     result = run_item(tmp_path, item_cfg(), tracker, builder_model(), reviewer)
 
-    assert isinstance(result, Outcome) and result.outcome == "done"
+    assert isinstance(result, Pending) and result.gate == "review"
     change = tracker.read_change("k0/1-calc-answers-42")
     reviews = tracker.reviews_on(change.ref)
     assert len(reviews) == 2
@@ -1111,7 +1113,7 @@ def test_a_rerun_post_node_never_posts_a_review_twice(tmp_path):
         tracker=tracker,
     )
 
-    assert isinstance(result, Outcome) and result.outcome == "done"
+    assert isinstance(result, Pending) and result.gate == "review"
     change = tracker.read_change("k0/1-calc-answers-42")
     reviews = tracker.reviews_on(change.ref)
     assert len(reviews) == 2  # conventions posted once, contract once
@@ -1152,7 +1154,7 @@ def test_a_review_hitting_its_call_limit_pauses_mid_reviews(tmp_path):
     change = tracker.read_change("k0/1-calc-answers-42")
     assert len(tracker.reviews_on(change.ref)) == 1  # conventions posted
 
-    done = resume(
+    gate = resume(
         pending.run,
         "retry",
         root=tmp_path,
@@ -1161,7 +1163,7 @@ def test_a_review_hitting_its_call_limit_pauses_mid_reviews(tmp_path):
         tracker=tracker,
     )
 
-    assert isinstance(done, Outcome) and done.outcome == "done"
+    assert isinstance(gate, Pending) and gate.gate == "review"
     assert len(tracker.reviews_on(change.ref)) == 2
 
 
@@ -1202,6 +1204,121 @@ def test_the_task_run_does_not_gate_on_the_reviewer_provider(tmp_path):
     run_implement(tmp_path, implement_cfg(), seams_model(), check=record)
 
     assert "agents.reviewer" not in captured["names"]
+
+
+# --- /implement #<n>: the review gate over both reviews (ticket #119) ----------
+
+
+def to_review_gate(tmp_path, cfg=None):
+    """``/implement #<n>`` paused at the review gate: both reviews posted."""
+    item_repo(tmp_path)
+    tracker = FakeTracker(git_runner=git_runner_for(tmp_path))
+    ready_item(tracker)
+    reviewer = reviewer_model(
+        review_call("conventions pass", ["a smell"], "c1"),
+        review_call("contract pass", ["a gap"], "c2"),
+    )
+    cfg = cfg or item_cfg()
+    pending = run_item(tmp_path, cfg, tracker, builder_model(), reviewer)
+    assert isinstance(pending, Pending) and pending.gate == "review"
+    return tracker, pending
+
+
+def test_the_review_gate_shows_both_reviews_unmerged(tmp_path):
+    """After both reviews post, the run pauses at a review gate that shows
+    them — as two reviews, not one — and waits for ok, redo or plan (#119)."""
+    tracker, pending = to_review_gate(tmp_path)
+
+    assert pending.answers == ("ok", "redo", "plan")
+    assert "## Conventions review" in pending.detail
+    assert "## Contract review" in pending.detail
+    assert "a smell" in pending.detail and "a gap" in pending.detail
+    change = tracker.read_change("k0/1-calc-answers-42")
+    assert change.is_draft  # nothing decided yet
+
+
+def test_review_gate_ok_marks_the_change_ready_and_ends_done(tmp_path):
+    """``ok`` posts the gate comment on the change, takes it out of draft
+    and the run ends done (#119)."""
+    tracker, pending = to_review_gate(tmp_path)
+
+    outcome = resume(
+        pending.run, "ok", root=tmp_path, cfg=item_cfg(),
+        init=models_init(), tracker=tracker,
+    )
+
+    assert isinstance(outcome, Outcome) and outcome.outcome == "done"
+    change = tracker.read_change("k0/1-calc-answers-42")
+    assert not change.is_draft
+    comments = tracker.change_comments_on(change.ref)
+    assert any("Gate passed: review" in c for c in comments)
+
+
+def test_review_gate_redo_reruns_implementer_in_refactor_then_reviews(tmp_path):
+    """``redo`` reruns IMPLEMENTER with the reviews and the feedback, its
+    guard starting in refactor — a code write comes first, no failing test
+    needed — then VALIDATOR, the push and both reviews run again (#119)."""
+    tracker, pending = to_review_gate(tmp_path)
+
+    # refactor: the first write may be code — green would refuse it
+    refactor = FakeChatModel(
+        messages=[
+            write_call("calc.py", "def answer():\n    return 42  # renamed\n", "w9"),
+            run_tests_call("r9"),
+            AIMessage(content="addressed the findings"),
+        ]
+    )
+    second_reviewer = reviewer_model(
+        review_call("conventions again", [], "c3"),
+        review_call("contract again", [], "c4"),
+    )
+    again = resume(
+        pending.run,
+        "redo rename the public name",
+        root=tmp_path,
+        cfg=item_cfg(),
+        init=models_init(refactor, second_reviewer),
+        tracker=tracker,
+    )
+
+    assert isinstance(again, Pending) and again.gate == "review"
+    # the code write landed: only a refactor-started guard allows it first
+    assert "renamed" in (tmp_path / "calc.py").read_text()
+    # IMPLEMENTER's fresh context carried both reviews and the feedback
+    brief = refactor.invocations[0][-1].content
+    assert "## Conventions review" in brief and "## Contract review" in brief
+    assert "rename the public name" in brief
+    # VALIDATOR and push ran again, then both reviews posted a second time
+    assert ("commit", "#1: address review") in tracker.calls
+    assert pushes(tracker) == [("push", "k0/1-calc-answers-42")] * 2
+    change = tracker.read_change("k0/1-calc-answers-42")
+    reviews = tracker.reviews_on(change.ref)
+    assert len(reviews) == 4
+    assert any("node=post_conventions_2" in r for r in reviews)
+    assert any("node=post_contract_2" in r for r in reviews)
+
+
+def test_review_gate_plan_returns_the_item_to_planning(tmp_path):
+    """``plan`` comments the feedback on the work item, lifts
+    ``ready-for-agent`` and ends the run — the change stays a draft (#119)."""
+    tracker, pending = to_review_gate(tmp_path)
+
+    outcome = resume(
+        pending.run,
+        "plan the contract needs a spec first",
+        root=tmp_path,
+        cfg=item_cfg(),
+        init=models_init(),
+        tracker=tracker,
+    )
+
+    assert isinstance(outcome, Outcome) and outcome.outcome == "rejected"
+    item = tracker.read_work_item("1")
+    assert "ready-for-agent" not in tracker.labels_on("1")
+    assert any(
+        "the contract needs a spec first" in c.body for c in item.comments
+    )
+    assert tracker.read_change("k0/1-calc-answers-42").is_draft
 
 
 def test_implement_public_functions_have_complete_annotations():

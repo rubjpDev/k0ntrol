@@ -16,6 +16,13 @@ harness commits, passes the CI gate when ``.github/`` changes, pushes and
 opens the draft change. REVIEWER then runs twice with fresh context — a
 Conventions review, then a Contract review (#118) — each posted on the
 change as its own labelled review, marker-idempotent on its pass's round.
+
+The review gate (#119) shows both reviews unmerged: ``ok`` posts the gate
+comment and marks the change ready, ``redo <feedback>`` reruns IMPLEMENTER
+with the reviews and the feedback — its guard starting in refactor
+(#110) — through VALIDATOR, the push and both reviews again, and
+``plan <feedback>`` comments the feedback on the work item, lifts
+``ready-for-agent`` and ends the run.
 """
 
 from collections.abc import Callable
@@ -26,16 +33,25 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 from langgraph.types import interrupt
 
-from k0ntrol.workflow.change import restore_worktree, worktree_snapshot_dir
+from k0ntrol.tools.slice_guard import SliceStart
+from k0ntrol.workflow.change import (
+    decider,
+    restore_worktree,
+    worktree_snapshot_dir,
+)
 from k0ntrol.workflow.ci_gate import gated_push, make_ci_gate
 from k0ntrol.workflow.context import RunContext
 from k0ntrol.workflow.full import (
     brief_dict,
+    code_diff,
     contract_brief,
+    gate_comment,
     make_branch_setup,
     make_ci_comment,
     make_ci_reject_comment,
+    make_mark_ready,
     make_publish,
+    reject_comment,
     render_review,
     round_suffix,
     with_change,
@@ -43,7 +59,8 @@ from k0ntrol.workflow.full import (
 )
 from k0ntrol.workflow.nodes import (
     _invoke_counted,
-    make_agent_node,
+    _merge,
+    _written,
     make_diff_gate,
     make_limit_hit,
     make_validator,
@@ -57,6 +74,7 @@ from k0ntrol.workflow.routers import (
     route_implement_start,
     route_implement_validator,
     route_limit_hit,
+    route_review_gate,
     route_seam_gate,
 )
 from k0ntrol.workflow.state import RunState
@@ -70,10 +88,7 @@ def build_implement_graph(
     graph.add_node("seam", make_seam_node(ctx))
     graph.add_node("seam_gate", make_seam_gate(ctx))
     graph.add_node("branch_setup", make_branch_setup(ctx))
-    graph.add_node(
-        "implementer",
-        make_agent_node(ctx, "implementer", "files", implementer_brief),
-    )
+    graph.add_node("implementer", make_implementer_node(ctx))
     graph.add_node("validator", make_validator(ctx, retry_node="implementer"))
     graph.add_node("publish", make_publish(ctx))
     graph.add_node(
@@ -101,9 +116,11 @@ def build_implement_graph(
             with_work_item(ctx, with_change(ctx, contract_brief)),
         ),
     )
-    graph.add_node(
-        "post_contract", make_post_axis_review(ctx, "contract", done=True)
-    )
+    graph.add_node("post_contract", make_post_axis_review(ctx, "contract"))
+    graph.add_node("review_gate", make_review_gate(ctx))
+    graph.add_node("review_comment", make_review_comment(ctx))
+    graph.add_node("mark_ready", make_mark_ready(ctx))
+    graph.add_node("plan_feedback", make_plan_feedback(ctx))
     graph.add_node("diff_gate", make_diff_gate(ctx, on_reject=_revert(ctx)))
     graph.add_node("limit_hit", make_limit_hit(ctx))
     graph.add_conditional_edges(START, route_implement_start)
@@ -122,7 +139,11 @@ def build_implement_graph(
     )
     graph.add_edge("post_conventions", "contract_review")
     graph.add_conditional_edges("contract_review", route_after_contract_review)
-    graph.add_edge("post_contract", END)
+    graph.add_edge("post_contract", "review_gate")
+    graph.add_conditional_edges("review_gate", route_review_gate)
+    graph.add_edge("review_comment", "mark_ready")
+    graph.add_edge("mark_ready", END)
+    graph.add_edge("plan_feedback", END)
     graph.add_edge("diff_gate", END)
     graph.add_conditional_edges("limit_hit", route_limit_hit)
     return graph.compile(checkpointer=checkpointer)
@@ -194,6 +215,31 @@ def _revert(ctx: RunContext) -> Callable[[], None]:
 # --- the tracker path (#117) ----------------------------------------------------
 
 
+def make_implementer_node(ctx: RunContext) -> Callable[[dict], dict]:
+    """IMPLEMENTER's build node; a review redo starts the guard in refactor.
+
+    The redo runs on a second IMPLEMENTER instance (``slot="refactor"``):
+    its slice guard starts in refactor — code may change before any test
+    write, and the first test write attempted returns the guard to the
+    green/red cycle (#110).
+    """
+
+    def node(state: dict) -> dict:
+        start: SliceStart = "refactor" if state.get("refactor") else "green"
+        result, updates = _invoke_counted(
+            ctx,
+            "implementer",
+            state,
+            implementer_brief,
+            slot="refactor" if state.get("refactor") else None,
+            slice_start=start,
+        )
+        updates["files"] = _merge(state.get("files"), _written(result))
+        return updates
+
+    return node
+
+
 def make_push(ctx: RunContext) -> Callable[[dict], dict]:
     """Push through the CI gate's clearance; open the draft change once.
 
@@ -261,8 +307,6 @@ def make_axis_review_node(
 def make_post_axis_review(
     ctx: RunContext,
     axis: Literal["conventions", "contract"],
-    *,
-    done: bool = False,
 ) -> Callable[[dict], dict]:
     """Post the ``axis`` review on the change, labelled — its own COMMENT
     review, marker-idempotent on the pass's round, so re-running the node
@@ -277,7 +321,110 @@ def make_post_axis_review(
             run=ctx.run_id,
             node=f"post_{axis}{round_suffix(state, f'{axis}_review_round')}",
         )
-        return {"outcome": "done"} if done else {}
+        return {}
+
+    return node
+
+
+# --- the review gate (#119) -----------------------------------------------------
+
+
+def make_review_gate(ctx: RunContext) -> Callable[[dict], dict]:
+    """The review gate: both posted reviews, unmerged; ``ok`` marks the
+    change ready, ``redo`` reruns IMPLEMENTER in refactor, ``plan`` sends
+    the work item back to planning."""
+
+    def node(state: dict) -> dict:
+        decision = interrupt(
+            {
+                "gate": "review",
+                "question": "approve the change?",
+                "answers": ["ok", "redo", "plan"],
+                "detail": _reviews_detail(state),
+                "diff": code_diff(
+                    ctx.tracker.read_change_diff(state["change_ref"])
+                ),
+            }
+        )
+        word, _, feedback = str(decision).strip().partition(" ")
+        word = word.lower()
+        if word == "ok":
+            return {"review_approved": True, "review_route": "review_comment"}
+        rejections = [*state.get("review_rejections", []), feedback.strip()]
+        if word == "redo":
+            return {
+                "review_approved": False,
+                "review_route": "implementer",
+                "implementer_attempts": 0,
+                "refactor": True,
+                "review_feedback": _reviews_feedback(state, feedback),
+                "review_rejections": rejections,
+            }
+        return {
+            "review_approved": False,
+            "review_route": "plan_feedback",
+            "plan_feedback": feedback.strip(),
+            "review_rejections": rejections,
+        }
+
+    return node
+
+
+def _reviews_detail(state: dict) -> str:
+    """The gate's detail: the change's ref and both reviews, unmerged."""
+    return (
+        f"PR {state.get('change_ref')}\n\n"
+        + render_review(state.get("conventions_review"), "Conventions review")
+        + "\n\n"
+        + render_review(state.get("contract_review"), "Contract review")
+    )
+
+
+def _reviews_feedback(state: dict, extra: str) -> str:
+    """Both reviews sent back to IMPLEMENTER, plus the human's words."""
+    text = (
+        render_review(state.get("conventions_review"), "Conventions review")
+        + "\n\n"
+        + render_review(state.get("contract_review"), "Contract review")
+    )
+    if extra.strip():
+        text += f"\nHuman feedback: {extra.strip()}"
+    return text
+
+
+def make_review_comment(ctx: RunContext) -> Callable[[dict], dict]:
+    """The review gate's pass record on the change, marker-idempotent on
+    the round: after a redo the pass comments again."""
+
+    def node(state: dict) -> dict:
+        ctx.tracker.comment_change(
+            state["change_ref"],
+            gate_comment(
+                "review", decider(ctx.root), state.get("review_rejections", [])
+            ),
+            run=ctx.run_id,
+            node=f"review_gate{round_suffix(state, 'contract_review_round')}",
+        )
+        return {}
+
+    return node
+
+
+def make_plan_feedback(ctx: RunContext) -> Callable[[dict], dict]:
+    """``plan``'s effects: the feedback on the work item, the
+    ``ready-for-agent`` label off — the run ends with the change unmerged."""
+
+    def node(state: dict) -> dict:
+        ctx.tracker.comment_work_item(
+            state["item_ref"],
+            reject_comment(
+                "review", decider(ctx.root), state.get("plan_feedback") or ""
+            ),
+            run=ctx.run_id,
+            node="plan_feedback",
+        )
+        ctx.tracker.remove_label(state["item_ref"], "ready-for-agent")
+        return {"outcome": "rejected"}
 
     return node
 
@@ -354,8 +501,14 @@ def seam_brief(state: dict) -> str:
 
 
 def implementer_brief(state: dict) -> str:
-    """The build's fresh context: the contract, then VALIDATOR's red output."""
+    """The build's fresh context: the contract, the reviews on a redo,
+    then VALIDATOR's red output."""
     text = _task_brief(state)
+    if state.get("review_feedback"):
+        text += (
+            "\n\nThe human sent the change back after review:\n"
+            f"{state['review_feedback']}"
+        )
     if state.get("ci_feedback"):
         text += (
             "\n\nThe human rejected your .github/ changes at the CI gate:\n"

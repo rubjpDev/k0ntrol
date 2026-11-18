@@ -14,6 +14,7 @@ from langchain_core.messages import AIMessage, HumanMessage, ToolCall, ToolMessa
 from langgraph.types import interrupt
 
 from k0ntrol.tools.path_guard import is_test_path
+from k0ntrol.tools.slice_guard import SliceStart
 from k0ntrol.tools.runner import run_command
 from k0ntrol.workflow.change import changed_paths, diff_stat, worktree_summary
 from k0ntrol.workflow.context import RunContext
@@ -53,6 +54,7 @@ def _invoke_counted(
     slot: str | None = None,
     read_only: bool = False,
     limit_node: str | None = None,
+    slice_start: SliceStart = "green",
 ) -> tuple[Any, dict]:
     """The scaffolding every fresh-context agent node shares: invoke the
     brief, count the run under ``attempts_key`` (``<name>_attempts``),
@@ -61,11 +63,14 @@ def _invoke_counted(
 
     ``slot``/``read_only`` pick a secondary agent instance (``/implement``'s
     seam proposal); ``limit_node`` names the node the pause shows and
-    ``retry`` reruns when it differs from the agent's name.
+    ``retry`` reruns when it differs from the agent's name. ``slice_start``
+    is the new instance's guard start state (a review redo's refactor).
     """
     key = attempts_key or f"{name}_attempts"
     attempt = state.get(key, 0) + 1
-    result = ctx.agent(name, slot=slot, read_only=read_only).invoke(
+    result = ctx.agent(
+        name, slot=slot, read_only=read_only, slice_start=slice_start
+    ).invoke(
         [HumanMessage(_brief_with_retry(brief, state))],
         config=ctx.agent_config(attempt),
     )
