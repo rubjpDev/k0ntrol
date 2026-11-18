@@ -74,6 +74,7 @@ from k0ntrol.workflow.plan import (  # noqa: E402
     build_plan_graph,
 )
 from k0ntrol.workflow.research import build_research_graph  # noqa: E402
+from k0ntrol.workflow.routers import DEFAULT_MAX_QUESTIONS  # noqa: E402
 from k0ntrol.workflow.stuck import stuck_update  # noqa: E402
 
 _BUILDERS = {
@@ -478,9 +479,17 @@ def _implement_preflight(kind: str, item, root: Path, run_id: str) -> None:
 
 
 def _tracker_for(kind: str, cfg: dict, root: Path, tracker, *, required: bool):
-    """A work-item run cannot run trackerless: build the configured adapter."""
-    if tracker is not None or not required:
+    """A work-item run cannot run trackerless: build the configured adapter.
+
+    ``/plan <idea>`` never requires one, but the question-limit hand off
+    publishes a Map (#127), so a configured tracker joins a plan run too.
+    """
+    if tracker is not None:
         return tracker
+    if not required:
+        if kind == "plan" and cfg.get("tracker") == "github":
+            return GhTracker(subprocess_runner(root))
+        return None
     unshipped = next(
         (cfg[key] for key in ("vcs", "tracker") if cfg.get(key, "github") != "github"), None
     )
@@ -634,6 +643,7 @@ def _plan_state(cfg: dict, item) -> dict:
         "max_round_questions": cfg.get(
             "max_round_questions", DEFAULT_MAX_ROUND_QUESTIONS
         ),
+        "max_questions": cfg.get("max_questions", DEFAULT_MAX_QUESTIONS),
         "spec": None,
         "spec_attempts": 0,
         "spec_approved": False,

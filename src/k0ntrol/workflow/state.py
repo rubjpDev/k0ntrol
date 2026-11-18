@@ -85,11 +85,15 @@ class RunState(TypedDict, total=False):
     # /plan (#120): the Q&A definition — PLANNER's rounds of numbered
     # questions, each round answered by the human in one line. #121:
     # once a round holds no questions PLANNER drafts the Spec under its
-    # own brief, and the spec gate decides ok / redo.
+    # own brief, and the spec gate decides ok / redo. #127: the
+    # question-limit gate at max_questions — end as is, hand off to
+    # /research, or continue for 10 more.
     rounds: list[dict]  # answered rounds: {"questions": [...], "answer": str}
     questions: list[dict]  # the open round's questions (the gate's detail)
     planner_attempts: int  # PLANNER runs so far
     max_round_questions: int  # how many questions one round may hold
+    max_questions: int  # how many questions the whole Q&A may ask
+    question_limit_route: str  # the limit gate's decision: spec | publish_map | round_gate
     spec: dict | None  # the Spec draft at the spec gate (plain dict)
 
     # /research (#124): PLANNER's charted map, then the published refs.
