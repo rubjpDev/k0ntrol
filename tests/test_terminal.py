@@ -256,7 +256,7 @@ def test_status_rows_show_the_effort_of_each_model():
 
 
 def test_welcome_draws_the_project_service_badges_at_the_terminal_width():
-    console = Console(file=io.StringIO(), record=True, width=120, color_system="truecolor", force_terminal=True)
+    console = Console(file=io.StringIO(), record=True, width=120, height=30, color_system="truecolor", force_terminal=True)
     prompt = Prompt(console, commands=COMMANDS, tty=False, read_input=lambda _: "")
     ui = Terminal(console, prompt, LiveRenderer(console, spinner=False))
 

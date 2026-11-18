@@ -53,12 +53,16 @@ def render_banner(
         expand=width is not None,
     )
     output = io.StringIO()
+    # Both dimensions pinned: `Console.size` then returns them instead of
+    # probing the ambient terminal (a fixed 80x25 under TERM=dumb). The
+    # height value is inert — only the width constrains the render.
     console = Console(
         file=output,
         no_color=not color,
         force_terminal=color,
         color_system="truecolor" if color else None,
         width=width or max(80, natural + 4),
+        height=25,
     )
     console.print(panel)
     return output.getvalue()

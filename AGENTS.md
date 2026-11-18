@@ -7,7 +7,7 @@ k0ntrol (`k0`) is a local harness for coding agents (Python). The 0.1.0 pivot to
 - Work from a GitHub issue on `rubjpDev/k0ntrol`. Use one issue per branch and PR, and commit with `#<issue>: <what>`.
 - TDD, always: write the failing test, run it and see it fail (RED), minimal code to pass (GREEN), then refactor. No production code without a failing test first.
 - During red/green, run only the tests in play: the test file or node id you are changing (`uv run pytest -q tests/test_x.py::test_y`), or `uv run pytest -q --lf -x` to re-run what last failed. Run the full suite once, at the end, as the done gate below.
-- A task is done only when `uv run pytest -q` passes **in full** (whole suite, not just the new tests) and you have shown the output.
+- A task is done only when `./scripts/check` — the full CI gate: typecheck, tests with coverage, complexity — passes and you have shown the output.
 - Reviewing uncommitted work: `git add -N` new files first — untracked files are invisible to `git diff`, so a review can silently miss them.
 - Stuck after 2 attempts on the same task: stop, write what failed and why, and hand back to the human. Do not improvise a workaround.
 - Design fork the ticket does not settle: stop and ask before writing code. Do not resolve it alone.
@@ -20,6 +20,7 @@ k0ntrol (`k0`) is a local harness for coding agents (Python). The 0.1.0 pivot to
 - Never merge, force-push, reset, rebase, or rewrite history. Never push to `main` or `develop`.
 - In an interactive local session, show the diff, test output and proposed commit message, and wait for approval before committing.
 - Never discard work. Prefer non-destructive operations that preserve the working tree.
+- Never `git stash`: the stash stack is shared across worktrees and may hold `.k0-mem` run state. To check old states, use `git worktree add <tmp> <base>` or `git show <base>:<file>`.
 
 ### Exception: `/implement-spec` (2026-10-08)
 
@@ -29,6 +30,7 @@ A `/implement-spec` run works from one spec issue and replaces "one issue per br
 - Build only the tickets the spec issue lists as in scope. Do not start any other ticket, even if it becomes unblocked.
 - Give each ticket its own worktree and branch, `ticket/<issue>-<slug>`, based on the integration branch. Run `uv sync` in the worktree before running tests. Commit with `#<ticket>: <what>`.
 - An implementer may reset its fresh worktree onto the integration branch before it starts work, and may merge the integration branch tip into its own ticket branch. The merger subagent may merge ticket branches into the integration branch only.
+- When parallel tickets touched shared files, the merger prompt states what each side changed and why, so conflict resolution keeps both intents.
 - Everything else in this file still applies: never touch `main` or `develop`, never force-push or rebase, and the human merges the PR.
 
 ## Invariants (never break these)
@@ -53,6 +55,7 @@ From the charting decision [rubjpDev/k0ntrol#3](https://github.com/rubjpDev/k0nt
 Run from the repo root:
 
 - Setup: `uv sync`
+- Check (the CI gate): `./scripts/check`
 - Tests: `uv run pytest -q`
 - Tests (while iterating): `uv run pytest -q <file or node id>`
 - Complexity: `uv run complexipy src --max-complexity-allowed 6`
@@ -76,7 +79,7 @@ In Devin, use the profiles in `.devin/agents/`; in Claude Code, the same-named p
 
 A custom Devin profile without `model` uses the subagent router, not the parent's model, so every profile in `.devin/agents/` pins an explicit model: `swe-2-flash-medium` for mechanical work and standards review (`merger`, `standards-reviewer`), `swe-2-flash-high` for implementation and spec review (`swe-worker`, `spec-reviewer`), and `gpt-6.1-sol-high` for research and interface design (`researcher`, `design-variant`). The `.claude/agents/` profiles mirror those tiers on `sonnet` with matching `effort`; the parent session is the Opus orchestrator.
 
-When a run explicitly requires a different model, launch a clean Devin session with `devin --model`, or use a dedicated profile that existed before the orchestrator session starts (`swe-worker-flash-max`, `spec-reviewer-max`); do not edit a shared profile mid-run. If an embedded parent session's inherited environment hides CLI auth, retry `devin` with a minimal environment before treating child sessions as unavailable. After spawning a model-sensitive subagent, verify the server-reported model (`/session-stats` or runtime response metadata) before letting it do real work.
+When a run explicitly requires a different model, launch a clean Devin session with `devin --model`, or use a dedicated profile that existed before the orchestrator session starts (`swe-worker-flash-max`, `spec-reviewer-max`); do not edit a shared profile mid-run. If an embedded parent session's inherited environment hides CLI auth, retry `devin` with a minimal environment before treating child sessions as unavailable. After spawning a model-sensitive subagent, verify the server-reported model (`/session-stats` or runtime response metadata) before letting it do real work. The headless child-session recipe, the `resolved_model_uid` log check and the `--sandbox` trade-off live in `docs/agents/child-sessions.md`.
 
 Never let a reviewer, merger, implementer or exploration subagent run on the orchestrator's model. This holds in Devin cloud too, where a step may run as a child session instead of a profile subagent: name the model explicitly, the profile's model or `swe-2-flash-high` when unsure. If no profile or explicit model is available, run the step inline in the parent instead of spawning a copy of it; for `/code-review`, that means one inline pass per axis, not two spawned sessions.
 

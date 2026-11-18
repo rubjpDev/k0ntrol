@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+# The CI gate as one command, so every done gate and merge gate runs the
+# same checks CI does. Keep in sync with .github/workflows/test.yml.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+uv run mypy src
+uv run pytest -q --cov=k0ntrol --cov-fail-under=90
+uv run complexipy src --max-complexity-allowed 6
