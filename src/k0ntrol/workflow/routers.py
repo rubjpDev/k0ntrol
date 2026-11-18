@@ -225,3 +225,26 @@ def route_after_chart(state: dict) -> str:
     if state.get("limit"):
         return "limit_hit"
     return "publish_map" if state.get("map") else "planner"
+
+
+# --- /triage (#128): the Q&A's rounds, the outcome gate, then apply ------------
+
+
+def route_after_triage_planner(state: dict) -> str:
+    """Same shape as ``/plan``'s rounds; an empty round drafts the outcome."""
+    if state.get("limit"):
+        return "limit_hit"
+    return "round_gate" if state.get("questions") else "outcome"
+
+
+def route_after_outcome(state: dict) -> str:
+    """A limited draft → the pause; a proposal → its gate; anything else
+    → PLANNER drafts again while attempts remain."""
+    if state.get("limit"):
+        return "limit_hit"
+    return "outcome_gate" if state.get("triage_outcome") else "outcome"
+
+
+def route_outcome_gate(state: dict) -> str:
+    """``ok`` applies the labels and comment; ``redo`` drafts again."""
+    return "apply" if state.get("triage_approved") else "outcome"

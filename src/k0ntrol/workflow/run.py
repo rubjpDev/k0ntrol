@@ -75,6 +75,7 @@ from k0ntrol.workflow.plan import (  # noqa: E402
 )
 from k0ntrol.workflow.research import build_research_graph  # noqa: E402
 from k0ntrol.workflow.stuck import stuck_update  # noqa: E402
+from k0ntrol.workflow.triage import build_triage_graph  # noqa: E402
 
 _BUILDERS = {
     "fast": build_fast_graph,
@@ -82,6 +83,7 @@ _BUILDERS = {
     "implement": build_implement_graph,
     "plan": build_plan_graph,
     "research": build_research_graph,
+    "triage": build_triage_graph,
 }
 
 # The roster each run kind uses; the free doctor checks gate start on it.
@@ -99,6 +101,7 @@ _ROSTER = {
     "implement": ("agents.implementer", "helpers.bulk_read"),
     "plan": ("agents.planner", "helpers.bulk_read"),
     "research": ("agents.planner", "helpers.bulk_read"),
+    "triage": ("agents.planner", "helpers.bulk_read"),
 }
 
 # Outer recursion limit: each loop iteration costs two super-steps at most.
@@ -172,7 +175,8 @@ def start(
     ``/implement <task>`` runs the working-tree path (#116) and
     ``/implement #<n>`` the tracker path on a ready work item (#117);
     ``/plan <idea>`` and ``/plan #<n>`` run the Q&A definition (#120);
-    ``/research <question>`` charts a Map of decision tickets (#124).
+    ``/research <question>`` charts a Map of decision tickets (#124);
+    ``/triage #<n>`` runs the Q&A and the outcome gate (#128).
     Refuses — ``RunRefused`` — on bad usage, a missing tracker or work
     item, an untrusted issue body, a work item not ready for an agent, a
     dirty tree (``.k0-mem/`` ignored), failed doctor checks, a failed
@@ -181,14 +185,14 @@ def start(
     """
     if kind not in _BUILDERS:
         raise RunRefused(f"unknown run: {kind}")
-    kind = cast(Literal["full", "fast", "implement", "plan", "research"], kind)  # _BUILDERS' keys
+    kind = cast(Literal["full", "fast", "implement", "plan", "research", "triage"], kind)  # _BUILDERS' keys
     input_text = _checked_input(kind, input)
     tracker = _tracker_for(
         kind,
         cfg,
         root,
         tracker,
-        required=kind in ("full", "research")
+        required=kind in ("full", "research", "triage")
         or (kind in ("implement", "plan") and input_text.startswith("#")),
     )
     conn, saver = _open_checkpoints(root)
@@ -262,7 +266,7 @@ def resume(
             cfg,
             root,
             tracker,
-            required=kind in ("full", "research")
+            required=kind in ("full", "research", "triage")
             or _run_item_ref(saver, run_id) is not None,
         )
         ctx = RunContext(
@@ -304,7 +308,7 @@ def abandon(run_id: str, *, root: Path) -> None:
     conn, saver = _open_checkpoints(root)
     try:
         kind = _run_kind(saver, run_id)
-        if kind not in ("plan", "research"):  # these hold no uncommitted work
+        if kind not in ("plan", "research", "triage"):  # no uncommitted work
             _refuse_dirty(root, f"/{kind}" if kind else "another run")
         saver.delete_thread(run_id)
         if kind == "implement":
@@ -353,7 +357,7 @@ def _busy_run(
     busy = open_runs(saver, ctx)
     if not busy:
         return None
-    if ctx.kind in ("full", "implement", "plan"):
+    if ctx.kind in ("full", "implement", "plan", "triage"):
         same = _same_item_run(busy, input_text)
         if same is not None:
             _work_item(input_text, tracker, root, ctx.kind)
@@ -448,6 +452,8 @@ def _checked_input(kind: str, input) -> str:
     text = str(input).strip()
     if not text or (kind in ("full", "implement", "plan") and not _usage_ok(text)):
         raise RunRefused(_usage(kind))
+    if kind == "triage" and not (text.startswith("#") and _usage_ok(text)):
+        raise RunRefused(_usage(kind))  # triage always names an item
     if kind == "research" and text.startswith("#"):
         raise RunRefused(_usage(kind))  # /research #<n> is #125
     return text
@@ -456,6 +462,8 @@ def _checked_input(kind: str, input) -> str:
 def _usage(kind: str) -> str:
     if kind in ("full", "implement", "plan"):
         return f"usage: /{kind} <task> | /{kind} #<issue>"
+    if kind == "triage":
+        return "usage: /triage #<issue>"
     return f"usage: /{kind} <task>"
 
 
@@ -532,9 +540,10 @@ def _item_preflight(kind: str, input_text: str, tracker, root: Path):
     ``/full`` always goes through it; ``/implement`` only for ``#<n>``, whose
     item must also be ready for an agent (#117). ``/plan`` reads the
     ``#<n>`` item but never touches the tree, so no dirt or label is
-    checked — planning is what readies work (#120).
+    checked — planning is what readies work (#120). ``/triage`` reads it
+    the same way (#128).
     """
-    if kind == "plan":
+    if kind in ("plan", "triage"):
         return _work_item(input_text, tracker, root, kind)
     if kind != "full" and not (kind == "implement" and input_text.startswith("#")):
         return None
@@ -617,6 +626,34 @@ def _initial_state(kind: str, input_text: str, cfg: dict, item=None) -> dict:
     if kind == "research":
         state.update(
             {"map": None, "decision_refs": [], "planner_attempts": 0}
+        )
+    if kind == "triage":
+        state.update(_triage_state(cfg, item))
+    return state
+
+
+def _triage_state(cfg: dict, item) -> dict:
+    """The ``/triage`` fields layered over the shared run state (#128).
+
+    Triage always names a work item: its body is what PLANNER reads and
+    its title joins the briefs.
+    """
+    state = {
+        "rounds": [],
+        "questions": [],
+        "planner_attempts": 0,
+        "max_round_questions": cfg.get(
+            "max_round_questions", DEFAULT_MAX_ROUND_QUESTIONS
+        ),
+        "triage_outcome": None,
+        "outcome_attempts": 0,
+        "triage_approved": False,
+        "triage_rejections": [],
+        "triage_feedback": None,
+    }
+    if item is not None:
+        state.update(
+            {"task": item.body, "item_ref": item.ref, "item_title": item.title}
         )
     return state
 
@@ -775,7 +812,7 @@ def _thread(run_id: str) -> RunnableConfig:
 
 def _run_kind(
     saver: SqliteSaver, run_id: str
-) -> Literal["full", "fast", "implement", "plan", "research"] | None:
+) -> Literal["full", "fast", "implement", "plan", "research", "triage"] | None:
     """The run's kind, read from the checkpoint before a graph is built."""
     tuple_ = saver.get_tuple(_thread(run_id))
     if tuple_ is None:

@@ -228,6 +228,31 @@ class ChartedMap(BaseModel):
         return self
 
 
+class TriageBrief(BaseModel):
+    """The agent brief a ``ready-for-*`` triage outcome posts (#128)."""
+
+    what_to_build: str
+    seams: list[str] = Field(default_factory=list)
+    acceptance_criteria: list[str] = Field(default_factory=list)
+    blocked_by: list[str] = Field(default_factory=list)
+    parent: str = ""
+
+
+class TriageOutcome(BaseModel):
+    """PLANNER's triage proposal: one category, one state, the comment."""
+
+    category: Literal["bug", "enhancement"]
+    state: Literal[
+        "needs-triage",
+        "needs-info",
+        "ready-for-agent",
+        "ready-for-human",
+        "wontfix",
+    ]
+    comment: str = ""
+    brief: TriageBrief | None = None
+
+
 class ResearchCitation(BaseModel):
     """A primary source RESEARCHER cites."""
 
@@ -243,7 +268,7 @@ class ResearchFinding(BaseModel):
     citations: list[ResearchCitation] = Field(min_length=1)
 
 
-_PLANNER_OUTPUT = QuestionRound | Spec | TicketList | ChartedMap
+_PLANNER_OUTPUT = QuestionRound | Spec | TicketList | ChartedMap | TriageOutcome
 
 # Agents whose ``create_agent`` gets a structured ``response_format`` (spec
 # #33): the schema becomes a tool the model calls; the validated value lands

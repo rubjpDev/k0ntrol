@@ -58,15 +58,21 @@ def build_plan_graph(
     return graph.compile(checkpointer=checkpointer)
 
 
-def make_planner_node(ctx: RunContext) -> Callable[[dict], dict]:
+def make_planner_node(
+    ctx: RunContext, brief: Callable[[dict], str] | None = None
+) -> Callable[[dict], dict]:
     """One round of the Q&A: a fresh PLANNER run for the next questions.
 
-    A limited run never reaches the gate and never uses up an attempt;
-    a round with no questions ends the Q&A — the spec draft follows.
+    ``brief`` is the run kind's round brief — ``planner_brief`` for
+    ``/plan``; ``/triage`` passes its own (#128). A limited run never
+    reaches the gate and never uses up an attempt; a round with no
+    questions ends the Q&A — the spec draft follows.
     """
 
     def node(state: dict) -> dict:
-        result, updates = _invoke_counted(ctx, "planner", state, planner_brief)
+        result, updates = _invoke_counted(
+            ctx, "planner", state, brief or planner_brief
+        )
         if result.limit_hit:
             return updates
         updates["questions"] = _questions(result, _cap(state))
