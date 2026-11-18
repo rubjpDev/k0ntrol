@@ -8,6 +8,7 @@ through ``retry_node`` (#42).
 from langgraph.graph import END
 
 DEFAULT_MAX_ATTEMPTS = 2
+DEFAULT_MAX_QUESTIONS = 25
 
 
 def route_after_tester(state: dict) -> str:
@@ -195,11 +196,34 @@ def _exhausted(state: dict, key: str) -> bool:
 
 
 def route_after_planner(state: dict) -> str:
-    """A limited round → the pause; questions → the round gate; a round
-    with no questions ends the Q&A and drafts the spec (#121)."""
+    """A limited round → the pause; a round with no questions ends the
+    Q&A and drafts the spec (#121); a round that would pass
+    ``max_questions`` stops at the question-limit gate (#127); else the
+    round gate asks it."""
     if state.get("limit"):
         return "limit_hit"
-    return "round_gate" if state.get("questions") else "spec"
+    questions = state.get("questions") or []
+    if not questions:
+        return "spec"
+    if _questions_asked(state) + len(questions) > _max_questions(state):
+        return "question_limit"
+    return "round_gate"
+
+
+def route_question_limit(state: dict) -> str:
+    """The limit gate's decision names the next node: end → the spec
+    draft, handoff → publish the Map, continue → the pending round."""
+    return state.get("question_limit_route") or "spec"
+
+
+def _questions_asked(state: dict) -> int:
+    """Questions shown at round gates so far — the pending round is
+    unasked and never counts."""
+    return sum(len(round_.get("questions", [])) for round_ in state.get("rounds", []))
+
+
+def _max_questions(state: dict) -> int:
+    return int(state.get("max_questions", DEFAULT_MAX_QUESTIONS))
 
 
 def route_after_plan_spec(state: dict) -> str:
@@ -219,9 +243,80 @@ def route_plan_spec_gate(state: dict) -> str:
 # --- /research (#124): chart the map, then publish ---------------------------------
 
 
+def route_research_start(state: dict) -> str:
+    """``/research #<n>`` works the map's next decision; ``<question>`` charts."""
+    return "pick_decision" if state.get("item_ref") else "planner"
+
+
 def route_after_chart(state: dict) -> str:
     """A limited or attempts-exhausted chart → the pause; a charted map →
     publish; anything else → PLANNER charts again."""
     if state.get("limit"):
         return "limit_hit"
     return "publish_map" if state.get("map") else "planner"
+
+
+# --- /research #<n> (#125): work the map's next decision ticket --------------------
+
+#: A decision ticket's type names the node that answers it; anything else
+#: (``human``, a child with no ``## Type``) goes straight to the human.
+_ANSWERERS = {"research": "researcher", "Q&A": "decision_planner"}
+
+
+def route_after_pick(state: dict) -> str:
+    """Nothing workable → the run ends done; else the type's answerer."""
+    decision = state.get("decision")
+    if not decision:
+        return END
+    return _ANSWERERS.get(decision["type"], "decision_gate")
+
+
+def route_after_researcher(state: dict) -> str:
+    """A limited RESEARCHER run never comments nor reaches the gate."""
+    if state.get("limit"):
+        return "limit_hit"
+    return "comment_findings"
+
+
+def route_after_decision_planner(state: dict) -> str:
+    """A limited round → the pause; a round that would pass
+    ``max_questions`` is never asked — the gate decides with what's
+    known; questions → the round gate; a proposal or an empty round →
+    the decision gate."""
+    if state.get("limit"):
+        return "limit_hit"
+    questions = state.get("questions") or []
+    if not questions:
+        return "decision_gate"
+    if _questions_asked(state) + len(questions) > _max_questions(state):
+        return "decision_gate"
+    return "round_gate"
+
+
+# --- /triage (#128): the Q&A's rounds, the outcome gate, then apply ------------
+
+
+def route_after_triage_planner(state: dict) -> str:
+    """Same shape as ``/plan``'s rounds; an empty round — or one that
+    would pass ``max_questions`` — drafts the outcome."""
+    if state.get("limit"):
+        return "limit_hit"
+    questions = state.get("questions") or []
+    if not questions:
+        return "outcome"
+    if _questions_asked(state) + len(questions) > _max_questions(state):
+        return "outcome"
+    return "round_gate"
+
+
+def route_after_outcome(state: dict) -> str:
+    """A limited draft → the pause; a proposal → its gate; anything else
+    → PLANNER drafts again while attempts remain."""
+    if state.get("limit"):
+        return "limit_hit"
+    return "outcome_gate" if state.get("triage_outcome") else "outcome"
+
+
+def route_outcome_gate(state: dict) -> str:
+    """``ok`` applies the labels and comment; ``redo`` drafts again."""
+    return "apply" if state.get("triage_approved") else "outcome"

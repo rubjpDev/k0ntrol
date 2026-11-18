@@ -12,7 +12,7 @@ From 0.1.0, k0 splits planning from building. `/plan` runs a **Q&A definition**:
 ## Consequences
 
 - This replaces ADR 0003's SPEC brief comment and spec gate. The rest of 0003 stands: the tracker carries the work, TESTER's and CODER's successor works on a branch, the review is posted on the pull request, and k0 never merges.
-- The tracker interface gains five operations: create a child work item, link a blocker, close a work item, list a work item's children and their state, and read its labels. GitHub implements them in 0.1.0; GitLab, Linear and Jira stay later work behind the same interface.
+- The tracker interface gains five operations: create a child work item, link a blocker, close a work item, list a work item's children and their state, and read its labels — #125 later adds two more, list a work item's blockers and edit its body. GitHub implements them in 0.1.0; GitLab, Linear and Jira stay later work behind the same interface.
 - Only work labelled `ready-for-agent`, or created by k0 as a ticket, is runnable by `/implement #N`.
 - A ticket and an agent brief share one format: what to build, seams, acceptance criteria, blocked by, and the parent. IMPLEMENTER reads the body, or the latest agent brief.
 - Building a whole spec in parallel across worktrees is 0.2.0 work. ADR 0007's one run per checkout still holds.

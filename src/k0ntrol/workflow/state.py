@@ -85,16 +85,34 @@ class RunState(TypedDict, total=False):
     # /plan (#120): the Q&A definition — PLANNER's rounds of numbered
     # questions, each round answered by the human in one line. #121:
     # once a round holds no questions PLANNER drafts the Spec under its
-    # own brief, and the spec gate decides ok / redo.
+    # own brief, and the spec gate decides ok / redo. #127: the
+    # question-limit gate at max_questions — end as is, hand off to
+    # /research, or continue for 10 more.
     rounds: list[dict]  # answered rounds: {"questions": [...], "answer": str}
     questions: list[dict]  # the open round's questions (the gate's detail)
     planner_attempts: int  # PLANNER runs so far
     max_round_questions: int  # how many questions one round may hold
+    max_questions: int  # how many questions the whole Q&A may ask
+    question_limit_route: str  # the limit gate's decision: spec | publish_map | round_gate
     spec: dict | None  # the Spec draft at the spec gate (plain dict)
 
     # /research (#124): PLANNER's charted map, then the published refs.
     map: dict | None  # the ChartedMap as a plain dict
     decision_refs: list[str]  # child work-item refs, one per decision
+
+    # /research #<n> (#125): the map's next unblocked decision ticket.
+    decision: dict | None  # the picked child: ref, question, type, url
+    finding: dict | None  # RESEARCHER's ResearchFinding as a plain dict
+    proposal: str  # the proposed decision an ``ok`` at the gate takes
+    decided: str  # the confirmed decision the ticket closes with
+    researcher_attempts: int  # RESEARCHER runs so far
+
+    # /triage (#128): the outcome proposal, its gate and the applied result.
+    triage_outcome: dict | None  # the TriageOutcome proposal as a plain dict
+    outcome_attempts: int  # outcome-drafting PLANNER runs so far
+    triage_approved: bool  # the human ok'd the outcome at its gate
+    triage_feedback: str | None  # the feedback of the last outcome-gate redo
+    triage_rejections: list[str]  # earlier outcome-gate feedback
 
     limit: dict[str, Any] | None  # set when the last node can hit a limit
     retry_node: str | None  # the node a limit_hit retry sends back to

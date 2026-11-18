@@ -57,6 +57,35 @@ def test_labels_add_ensure_and_remove():
     tracker.remove_label(item.ref, "k0:stuck")  # absent: no error
 
 
+def test_list_blockers_returns_the_linked_blockers():
+    tracker = FakeTracker()
+    parent = tracker.create_work_item("Map", "the map")
+    blocker = tracker.create_work_item("Blocker", "waits on this")
+    child = tracker.create_child_work_item(
+        parent.ref, "Q?", "the question", run="r", node="n"
+    )
+    tracker.link_blocked_by(child.ref, blocker.ref)
+
+    blockers = tracker.list_blockers(child.ref)
+
+    assert [b.ref for b in blockers] == [blocker.ref]
+    assert blockers[0].title == "Blocker"
+    assert blockers[0].state == "open"
+
+    tracker.set_work_item_closed(blocker.ref)
+    assert tracker.list_blockers(child.ref)[0].state == "closed"
+    assert tracker.list_blockers(parent.ref) == ()
+
+
+def test_edit_work_item_body_replaces_the_body():
+    tracker = FakeTracker()
+    item = tracker.create_work_item("T", "the old body")
+
+    tracker.edit_work_item_body(item.ref, "the new body")
+
+    assert tracker.read_work_item(item.ref).body == "the new body"
+
+
 def test_change_lifecycle_draft_then_ready():
     tracker = FakeTracker()
     tracker.create_branch("k0/1-add-login", "main")

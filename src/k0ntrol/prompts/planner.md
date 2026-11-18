@@ -30,3 +30,10 @@ End every run by calling exactly one structured output tool:
   decision ticket per open question — the question, a type of research,
   Q&A or human, and the `blocked_by` indexes of earlier decisions it
   waits on — plus what is not yet specified and what is out of scope.
+- `DecisionProposal` for the answer to a Q&A decision ticket: the
+  proposed decision and its rationale.
+- `TriageOutcome` for a triage proposal: one category (`bug` or
+  `enhancement`), one state (`needs-triage`, `needs-info`,
+  `ready-for-agent`, `ready-for-human` or `wontfix`), the comment to
+  post, and for a ready state the brief — what to build, seams,
+  acceptance criteria, blocked by and parent.
