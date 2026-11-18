@@ -123,6 +123,32 @@ def spec_call(call_id="s1", **overrides):
     )
 
 
+SLICE = {
+    "title": "Build the calc slice",
+    "what_to_build": "the calc module end to end",
+    "seams": ["tests/test_calc.py"],
+    "acceptance_criteria": ["answers 42"],
+    "blocked_by": [],
+}
+WIRED = {
+    "title": "Wire the gate",
+    "what_to_build": "the CLI gate around it",
+    "seams": ["tests/test_gate.py"],
+    "acceptance_criteria": ["gate takes ok", "redo recuts"],
+    "blocked_by": [0],
+}
+
+
+def ticket_call(tickets, call_id="t1"):
+    """A PLANNER answer: the TicketList structured output."""
+    return AIMessage(
+        content="",
+        tool_calls=[
+            {"name": "TicketList", "args": {"tickets": tickets}, "id": call_id}
+        ],
+    )
+
+
 def read_call(call_id):
     """A PLANNER tool call that burns a model call (for the limit tests)."""
     return AIMessage(
@@ -407,8 +433,8 @@ def test_an_empty_round_drafts_the_spec_and_shows_the_spec_gate(tmp_path):
 
 
 def test_ok_moves_on_to_the_ticket_breakdown_without_publishing(tmp_path):
-    """``ok`` approves the spec and ends the run; nothing reaches the
-    tracker — publishing is #123, the breakdown's gate #122."""
+    """``ok`` approves the spec and moves to the ticket breakdown —
+    nothing reaches the tracker: publishing is #123."""
     git_repo(tmp_path)
     tracker = FakeTracker()
     item = tracker.create_work_item("Calc answers 42", "build the calc module")
@@ -423,9 +449,15 @@ def test_ok_moves_on_to_the_ticket_breakdown_without_publishing(tmp_path):
     )
     assert isinstance(pending, Pending) and pending.gate == "spec"
 
-    outcome = resume(pending.run, "ok", root=tmp_path, cfg=cfg)
+    gate = resume(
+        pending.run,
+        "ok",
+        root=tmp_path,
+        cfg=cfg,
+        init=models_init(planner_model(ticket_call([SLICE]))),
+    )
 
-    assert isinstance(outcome, Outcome) and outcome.outcome == "done"
+    assert isinstance(gate, Pending) and gate.gate == "ticket"
     assert tracker.calls == [], tracker.calls
 
 
@@ -726,7 +758,15 @@ def test_events_record_the_plan_run(tmp_path):
         init=models_init(planner_model(round_call([]), spec_call())),
     )
     assert isinstance(gate, Pending) and gate.gate == "spec"
-    outcome = resume(gate.run, "ok", root=tmp_path, cfg=cfg)
+    tickets = resume(
+        gate.run,
+        "ok",
+        root=tmp_path,
+        cfg=cfg,
+        init=models_init(planner_model(ticket_call([SLICE]))),
+    )
+    assert isinstance(tickets, Pending) and tickets.gate == "ticket"
+    outcome = resume(tickets.run, "ok", root=tmp_path, cfg=cfg)
     assert outcome.outcome == "done"
 
     log = events(tmp_path)
@@ -737,6 +777,8 @@ def test_events_record_the_plan_run(tmp_path):
     assert ("gate", "round", "answered") in kinds
     assert ("gate", "spec", "waiting") in kinds
     assert ("gate", "spec", "approve") in kinds
+    assert ("gate", "ticket", "waiting") in kinds
+    assert ("gate", "ticket", "approve") in kinds
     assert kinds[-1][0] == "run_end"
     assert log[-1]["outcome"] == "done"
 
@@ -966,7 +1008,14 @@ def test_the_limit_gate_is_recorded_in_the_events(tmp_path):
         cfg=cfg,
         init=models_init(planner_model(spec_call())),
     )
-    outcome = resume(spec.run, "ok", root=tmp_path, cfg=cfg)
+    tickets = resume(
+        spec.run,
+        "ok",
+        root=tmp_path,
+        cfg=cfg,
+        init=models_init(planner_model(ticket_call([SLICE]))),
+    )
+    outcome = resume(tickets.run, "ok", root=tmp_path, cfg=cfg)
     assert outcome.outcome == "done"
 
     kinds = [
@@ -974,6 +1023,106 @@ def test_the_limit_gate_is_recorded_in_the_events(tmp_path):
     ]
     assert ("gate", "question_limit", "waiting") in kinds
     assert ("gate", "question_limit", "end") in kinds
+
+
+# --- the ticket gate (#122) ------------------------------------------------------
+
+
+def to_ticket_gate(tmp_path, cfg=None, tickets=None, planner=None):
+    """``/plan`` through an approved spec, paused at the ticket gate."""
+    git_repo(tmp_path)
+    cfg = cfg or plan_cfg()
+    pending = run_plan(
+        tmp_path,
+        cfg,
+        planner or planner_model(round_call([]), spec_call()),
+    )
+    assert isinstance(pending, Pending) and pending.gate == "spec"
+    cutter = planner_model(ticket_call(tickets if tickets is not None else [SLICE, WIRED]))
+    gate = resume(
+        pending.run, "ok", root=tmp_path, cfg=cfg, init=models_init(cutter)
+    )
+    assert isinstance(gate, Pending) and gate.gate == "ticket"
+    return gate, cutter
+
+
+def test_the_ticket_gate_lists_each_ticket_blockers_deliverable_and_count(tmp_path):
+    """The gate lists every ticket — title, what it delivers, what blocks
+    it and how many acceptance criteria — and takes ``ok`` or
+    ``redo <feedback>`` (#122)."""
+    gate, _ = to_ticket_gate(tmp_path)
+
+    assert gate.answers == ("ok", "redo")
+    detail = gate.detail
+    assert "Record the spec's glossary" in detail  # ticket 1, added in code
+    assert "Build the calc slice" in detail
+    assert "Wire the gate" in detail
+    assert "the calc module end to end" in detail  # what each delivers
+    assert "the CLI gate around it" in detail
+    assert "Blocked by: —" in detail  # ticket 1 blocks nothing
+    assert "Acceptance criteria: 1" in detail
+    assert "Acceptance criteria: 2" in detail
+    # ticket 3 (PLANNER's second) is blocked by the glossary ticket and
+    # by PLANNER's own first ticket
+    assert "Blocked by: 1, 2" in detail
+
+
+def test_the_first_ticket_records_the_glossary_and_blocks_every_other(tmp_path):
+    """The first ticket is made in code — PLANNER has no write tools: it
+    records the spec's glossary and ADR changes, and every other ticket
+    is blocked by it (#122)."""
+    gate, _ = to_ticket_gate(tmp_path)
+
+    first = section(gate.detail, "1 · Record the spec's glossary and ADR changes")
+    assert "answer: 42" in first  # the spec's glossary_and_decisions
+    # both PLANNER tickets carry blocker 1 — the glossary ticket
+    second = section(gate.detail, "2 · Build the calc slice")
+    assert "Blocked by: 1" in second
+    third = section(gate.detail, "3 · Wire the gate")
+    assert "Blocked by: 1, 2" in third
+
+
+def test_a_ticket_over_the_ticket_size_count_is_flagged(tmp_path):
+    """A ticket with more acceptance criteria than ``ticket_size`` allows
+    is flagged at the gate; one within the limit is not (#122)."""
+    fat = {**SLICE, "acceptance_criteria": ["a", "b", "c", "d"]}  # 4 > small's 3
+    gate, _ = to_ticket_gate(tmp_path, tickets=[fat])
+
+    assert "over" in gate.detail
+    assert "small" in gate.detail
+
+
+def test_ticket_gate_redo_recuts_with_the_feedback(tmp_path):
+    """``redo <feedback>`` reruns the breakdown on fresh context with the
+    spec and the feedback, then gates again on the new list (#122)."""
+    gate, _ = to_ticket_gate(tmp_path, tickets=[fat_slice()])
+
+    recutter = planner_model(
+        ticket_call([{**SLICE, "title": "A thinner slice"}], call_id="t2")
+    )
+    cfg = plan_cfg()
+    again = resume(
+        gate.run,
+        "redo split the slices further",
+        root=tmp_path,
+        cfg=cfg,
+        init=models_init(recutter),
+    )
+
+    assert isinstance(again, Pending) and again.gate == "ticket"
+    assert "A thinner slice" in again.detail
+    assert "Build the calc slice" not in again.detail
+    brief = recutter.invocations[0][-1].content
+    assert "a calc module" in brief  # the approved spec rides along
+    assert "split the slices further" in brief
+
+    outcome = resume(again.run, "ok", root=tmp_path, cfg=cfg)
+    assert isinstance(outcome, Outcome) and outcome.outcome == "done"
+
+
+def fat_slice():
+    """A PLANNER ticket over `small`'s acceptance-criteria count."""
+    return {**SLICE, "acceptance_criteria": ["a", "b", "c", "d"]}
 
 
 def test_plan_public_functions_have_complete_annotations():

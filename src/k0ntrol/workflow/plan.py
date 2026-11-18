@@ -1,5 +1,6 @@
 """The ``/plan`` graph: the Q&A definition's rounds (#120), the
-question-limit gate (#127), then the spec gate (#121).
+question-limit gate (#127), the spec gate (#121), then the ticket
+gate (#122).
 
 Each round is a fresh PLANNER run given the idea and the questions and
 answers so far. It returns at most ``max_round_questions`` numbered
@@ -13,8 +14,15 @@ A round that would pass ``max_questions`` is never asked: the run pauses
 at the question-limit gate with the open questions shown — ``end``
 drafts the spec now (they land under Not yet decided), ``handoff``
 charts them to a Map for ``/research``, ``continue`` grants ten more
-questions. The ticket breakdown, its gate and publishing are later
-tickets (#122, #123).
+questions.
+
+An approved spec is cut into tickets by one more fresh PLANNER run,
+sized by ``ticket_size``. The harness prepends the first ticket in
+code — it records the spec's glossary and ADR changes and blocks every
+other ticket (PLANNER has no write tools) — and the ticket gate lists
+each ticket's title, blockers, deliverable and criteria count, flagging
+any over its size's count; it takes ``ok`` or ``redo <feedback>``.
+Publishing the spec and its tickets is #123.
 """
 
 from collections.abc import Callable
@@ -24,7 +32,7 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 from langgraph.types import interrupt
 
-from k0ntrol.agents import Spec
+from k0ntrol.agents import Spec, TicketList
 from k0ntrol.workflow.context import RunContext
 from k0ntrol.workflow.nodes import (
     _attempt_limit,
@@ -53,9 +61,11 @@ from k0ntrol.workflow.routers import (
     _questions_asked,
     route_after_plan_spec,
     route_after_planner,
+    route_after_tickets,
     route_limit_hit,
     route_plan_spec_gate,
     route_question_limit,
+    route_ticket_gate,
 )
 from k0ntrol.workflow.state import RunState
 
@@ -73,6 +83,8 @@ def build_plan_graph(
     graph.add_node("question_limit", make_question_limit(ctx))
     graph.add_node("spec", make_spec_node(ctx))
     graph.add_node("spec_gate", make_spec_gate(ctx))
+    graph.add_node("tickets", make_tickets_node(ctx))
+    graph.add_node("ticket_gate", make_ticket_gate(ctx))
     graph.add_node("publish_map", make_publish_map(ctx))
     graph.add_node("publish_decisions", make_publish_decisions(ctx))
     graph.add_node("limit_hit", make_limit_hit(ctx))
@@ -82,6 +94,8 @@ def build_plan_graph(
     graph.add_conditional_edges("question_limit", route_question_limit)
     graph.add_conditional_edges("spec", route_after_plan_spec)
     graph.add_conditional_edges("spec_gate", route_plan_spec_gate)
+    graph.add_conditional_edges("tickets", route_after_tickets)
+    graph.add_conditional_edges("ticket_gate", route_ticket_gate)
     graph.add_edge("publish_map", "publish_decisions")
     graph.add_edge("publish_decisions", END)
     graph.add_conditional_edges("limit_hit", route_limit_hit)
@@ -239,9 +253,9 @@ def make_spec_node(ctx: RunContext) -> Callable[[dict], dict]:
 
 def make_spec_gate(ctx: RunContext) -> Callable[[dict], dict]:
     """The spec gate: the draft in its format, ``ok`` or ``redo
-    <feedback>``. ``ok`` moves on to the ticket breakdown (#122) — the
-    run ends ``done`` until it lands, nothing published. ``redo``
-    rejects the draft: the next PLANNER run gets the feedback."""
+    <feedback>``. ``ok`` moves on to the ticket breakdown (#122).
+    ``redo`` rejects the draft: the next PLANNER run gets the
+    feedback."""
 
     def node(state: dict) -> dict:
         decision = interrupt(
@@ -257,7 +271,6 @@ def make_spec_gate(ctx: RunContext) -> Callable[[dict], dict]:
             return {
                 "spec_approved": True,
                 "spec_feedback": None,
-                "outcome": "done",
             }
         return {
             "spec": None,
@@ -311,6 +324,182 @@ def _testing(spec: dict) -> str:
     decisions = "\n".join(f"- {item}" for item in spec.get("testing_decisions", []))
     seams = "\n".join(f"- {item}" for item in spec.get("seams", []))
     return f"## Testing Decisions\n\n{decisions or _BLANK}\n\nSeams:\n{seams or _BLANK}"
+
+
+# --- the ticket gate (#122) -------------------------------------------------------
+
+
+#: A ``ticket_size``'s acceptance-criteria cap — small also means one
+#: seam; the gate flags a ticket over its size's count (#122).
+_TICKET_SIZE_CRITERIA = {"small": 3, "medium": 5, "large": 8}
+_TICKET_SIZE_RULE = {
+    "small": "one seam and at most 3 acceptance criteria",
+    "medium": "at most 5 acceptance criteria",
+    "large": "at most 8 acceptance criteria",
+}
+
+
+def make_tickets_node(ctx: RunContext) -> Callable[[dict], dict]:
+    """The ticket breakdown: a fresh PLANNER run cuts the approved spec,
+    sized by ``ticket_size``. The first ticket is prepended in code —
+    the glossary-and-ADR ticket, blocking every other.
+
+    A run that answers with another structured output cuts again while
+    attempts remain, then the limit pause — the same resumable path the
+    spec draft takes (``limit_node="tickets"`` names this node).
+    """
+
+    def node(state: dict) -> dict:
+        result, updates = _invoke_counted(
+            ctx,
+            "planner",
+            state,
+            tickets_brief,
+            attempts_key="ticket_attempts",
+            limit_node="tickets",
+        )
+        if result.limit_hit:
+            return updates
+        cut = result.structured_response
+        if isinstance(cut, TicketList):
+            updates["tickets"] = _with_glossary_ticket(
+                cut, state.get("spec") or {}
+            )
+            return updates
+        return _uncut(result, updates, state)
+
+    return node
+
+
+def _uncut(result: object, updates: dict, state: dict) -> dict:
+    """No TicketList this run: cut again while attempts remain, then
+    the attempts pause."""
+    merged = {**state, **updates}
+    if _exhausted(merged, "ticket_attempts"):
+        updates["limit"] = _attempt_limit(
+            merged, "tickets", "tickets", _last_output(result)
+        )
+    return updates
+
+
+def _with_glossary_ticket(cut: TicketList, spec: dict) -> list[dict]:
+    """PLANNER's tickets after the code-made first ticket: its indexes
+    shift one and the glossary ticket blocks each of them — blockers
+    still only point backwards (#122)."""
+    tickets = [ticket.model_dump() for ticket in cut.tickets]
+    for ticket in tickets:
+        ticket["blocked_by"] = sorted(
+            {0, *(blocker + 1 for blocker in ticket["blocked_by"])}
+        )
+    return [_glossary_ticket(spec), *tickets]
+
+
+def _glossary_ticket(spec: dict) -> dict:
+    """The spec's first ticket, made in code: record the plan's glossary
+    and ADR changes (PLANNER has no write tools) (#122)."""
+    entries = spec.get("glossary_and_decisions") or []
+    lines = "\n".join(f"- {entry}" for entry in entries) or "- none"
+    return {
+        "title": "Record the spec's glossary and ADR changes",
+        "what_to_build": (
+            "record the plan's glossary entries in GLOSSARY.md and its "
+            "decisions as ADRs under docs/adr/:\n" + lines
+        ),
+        "seams": ["GLOSSARY.md", "docs/adr/"],
+        "acceptance_criteria": [
+            "GLOSSARY.md and the ADRs record the spec's glossary and "
+            "decisions"
+        ],
+        "blocked_by": [],
+    }
+
+
+def make_ticket_gate(ctx: RunContext) -> Callable[[dict], dict]:
+    """The ticket gate: every ticket's title, blockers, deliverable and
+    criteria count — a ticket over its ``ticket_size`` count flagged —
+    then ``ok`` or ``redo <feedback>``. ``ok`` ends the run done
+    (publishing is #123); ``redo`` recuts with the feedback."""
+
+    def node(state: dict) -> dict:
+        decision = interrupt(
+            {
+                "gate": "ticket",
+                "question": "approve these tickets?",
+                "answers": ["ok", "redo"],
+                "detail": render_tickets(
+                    state.get("tickets") or [],
+                    state.get("ticket_size", "small"),
+                ),
+            }
+        )
+        word, _, feedback = str(decision).strip().partition(" ")
+        if word.lower() == "ok":
+            return {
+                "tickets_approved": True,
+                "ticket_feedback": None,
+                "outcome": "done",
+            }
+        return {
+            "tickets": None,
+            "tickets_approved": False,
+            "ticket_attempts": 0,
+            "ticket_feedback": feedback.strip(),
+            "ticket_rejections": [
+                *state.get("ticket_rejections", []), feedback.strip()
+            ],
+        }
+
+    return node
+
+
+def render_tickets(tickets: list[dict], ticket_size: str) -> str:
+    """The breakdown as the gate shows it: title, deliverable, blockers
+    and criteria count per ticket, oversized ones flagged (#122)."""
+    cap = _TICKET_SIZE_CRITERIA.get(ticket_size, _TICKET_SIZE_CRITERIA["small"])
+    lines = [f"{len(tickets)} tickets (ticket_size: {ticket_size})"]
+    for index, ticket in enumerate(tickets):
+        count = len(ticket.get("acceptance_criteria", []))
+        flag = f" — over {ticket_size} ({cap} max)" if count > cap else ""
+        blockers = ", ".join(
+            str(blocker + 1) for blocker in ticket.get("blocked_by", [])
+        ) or "—"
+        lines.append("")
+        lines.append(f"## {index + 1} · {ticket.get('title', '')}")
+        lines.append(f"Delivers: {ticket.get('what_to_build', '')}")
+        lines.append(f"Blocked by: {blockers}")
+        lines.append(f"Acceptance criteria: {count}{flag}")
+    return "\n".join(lines)
+
+
+def tickets_brief(state: dict) -> str:
+    """PLANNER's fresh context for the breakdown: the approved spec, the
+    ``ticket_size`` rule, and on a gate ``redo`` the human's feedback.
+
+    The first ticket is not PLANNER's to write — the harness prepends
+    the glossary-and-ADR ticket, so a ``blocked_by`` index only ever
+    names an earlier ticket in PLANNER's own list.
+    """
+    size = state.get("ticket_size", "small")
+    lines = [
+        f"Idea: {_idea(state)}",
+        "",
+        "The spec below is approved — cut it into tickets: answer with "
+        f"TicketList, blockers first. Size each ticket {size}: "
+        f"{_TICKET_SIZE_RULE[size]}.",
+        "",
+        "The first ticket is not yours to write: the harness adds the "
+        "glossary-and-ADR ticket itself and makes it block every ticket "
+        "you cut — a blocked_by index only names an earlier ticket in "
+        "your own list.",
+        "",
+        render_spec(state.get("spec")),
+    ]
+    if state.get("ticket_feedback"):
+        lines.append(
+            "\nYour last breakdown was rejected with this feedback: "
+            f"{state['ticket_feedback']}"
+        )
+    return "\n".join(lines)
 
 
 def planner_brief(state: dict) -> str:
