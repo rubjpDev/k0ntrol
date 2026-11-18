@@ -169,8 +169,8 @@ DECISION_3 = {"question": "budget cap?", "type": "human", "blocked_by": []}
 
 # A published Map body: ``map_body`` leaves Decisions so far empty (#124).
 MAP_BODY = (
-    "## Destination\n\ndecide the auth library\n\n## Decisions so far\n\n"
-    "## Not yet specified\n\n—\n\n## Out of scope\n\n—"
+    "## Destination\n\ndecide the auth library\n\n## Notes\n\n—\n\n"
+    "## Decisions so far\n\n## Not yet specified\n\n—\n\n## Out of scope\n\n—"
 )
 
 
@@ -519,6 +519,25 @@ def test_an_untrusted_map_item_is_refused(tmp_path):
         )
 
 
+def test_a_non_map_item_is_refused(tmp_path):
+    """``/research #<n>`` works a Map's decision tickets: a work item that
+    is no Map — a spec parent, a raw bug report — has none to pick."""
+    git_repo(tmp_path)
+    tracker = FakeTracker()
+    item = tracker.create_work_item(
+        "Add --json output",
+        "## Problem Statement\n\nstatus should print JSON\n\n"
+        "## User Stories\n\n- as a scripter I want JSON",
+    )
+    with pytest.raises(RunRefused, match="not a Map"):
+        run_research(
+            tmp_path,
+            research_cfg(tracker="github"),
+            tracker=tracker,
+            input=f"#{item.ref}",
+        )
+
+
 def test_a_closed_map_item_is_refused(tmp_path):
     git_repo(tmp_path)
     tracker = FakeTracker()
@@ -625,6 +644,33 @@ def test_the_humans_own_answer_closes_the_ticket_and_indexes_the_map(tmp_path):
     line = section(tracker.read_work_item("1").body, "Decisions so far")
     assert "cap it at 40 calls" in line
     assert f"issues/{pick.ref}" in line
+
+
+def test_a_bare_ok_on_a_human_ticket_reshows_the_gate(tmp_path):
+    """A human ticket has no proposal to confirm: ``ok`` is not a
+    decision, the gate asks again — the human's own line is."""
+    git_repo(tmp_path)
+    tracker = FakeTracker()
+    map_item = seed_map(tracker)
+    pick = seed_decision(tracker, map_item.ref, "budget cap?", index=0)
+    cfg = research_cfg(tracker="github")
+    pending = run_research(tmp_path, cfg, tracker=tracker, input="#1")
+    assert isinstance(pending, Pending) and pending.gate == "decision"
+
+    again = resume(
+        pending.run, "ok", root=tmp_path, cfg=cfg, tracker=tracker
+    )
+
+    assert isinstance(again, Pending) and again.gate == "decision"
+    assert tracker.read_work_item(pick.ref).state == "open"
+
+    outcome = resume(
+        again.run, "cap it at 40", root=tmp_path, cfg=cfg, tracker=tracker
+    )
+    assert isinstance(outcome, Outcome) and outcome.outcome == "done"
+    closed = tracker.read_work_item(pick.ref)
+    assert closed.state == "closed"
+    assert "cap it at 40" in closed.comments[-1].body
 
 
 # --- research tickets: RESEARCHER answers, the gate confirms --------------------------
@@ -841,6 +887,30 @@ def test_a_qa_round_with_no_questions_goes_to_the_gate(tmp_path):
 
     assert isinstance(pending, Pending) and pending.gate == "decision"
     assert "session store?" in pending.question
+
+
+def test_a_qa_ticket_stops_asking_at_max_questions(tmp_path):
+    """The decision Q&A is bounded like /plan's: a round that would pass
+    ``max_questions`` is never asked — the gate decides with what's
+    known."""
+    git_repo(tmp_path)
+    tracker = FakeTracker()
+    map_item = seed_map(tracker)
+    seed_decision(tracker, map_item.ref, "session store?", "Q&A", index=0)
+    cfg = map_cfg(max_questions=1)
+    pending = run_research(
+        tmp_path, cfg, planner_model(round_call([Q1])), tracker=tracker,
+        input="#1",
+    )
+    assert isinstance(pending, Pending) and pending.gate == "round"
+
+    gate = resume(
+        pending.run, "1 yes", root=tmp_path, cfg=cfg,
+        init=models_init(planner_model(round_call([Q1]))), tracker=tracker,
+    )
+
+    assert isinstance(gate, Pending) and gate.gate == "decision"
+    assert "session store?" in gate.question
 
 
 def test_a_decision_planner_run_at_its_call_limit_pauses(tmp_path):

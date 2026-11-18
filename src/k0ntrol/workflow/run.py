@@ -73,7 +73,10 @@ from k0ntrol.workflow.plan import (  # noqa: E402
     DEFAULT_MAX_ROUND_QUESTIONS,
     build_plan_graph,
 )
-from k0ntrol.workflow.research import build_research_graph  # noqa: E402
+from k0ntrol.workflow.research import (  # noqa: E402
+    build_research_graph,
+    is_map,
+)
 from k0ntrol.workflow.routers import DEFAULT_MAX_QUESTIONS  # noqa: E402
 from k0ntrol.workflow.stuck import stuck_update  # noqa: E402
 from k0ntrol.workflow.triage import build_triage_graph  # noqa: E402
@@ -455,14 +458,19 @@ def _bind_events(
 def _checked_input(kind: str, input) -> str:
     """Non-empty input in the kind's accepted forms, or a usage refusal."""
     text = str(input).strip()
-    if not text or (
-        kind in ("full", "implement", "plan", "research")
-        and not _usage_ok(text)
-    ):
+    if not text or not _form_ok(kind, text):
         raise RunRefused(_usage(kind))
-    if kind == "triage" and not (text.startswith("#") and _usage_ok(text)):
-        raise RunRefused(_usage(kind))  # triage always names an item
     return text
+
+
+def _form_ok(kind: str, text: str) -> bool:
+    """The input shape a kind takes: ``/triage`` always names a work item,
+    the work-item commands take text or ``#<n>``, the rest take anything."""
+    if kind == "triage":
+        return text.startswith("#") and _usage_ok(text)
+    if kind in ("full", "implement", "plan", "research"):
+        return _usage_ok(text)
+    return True
 
 
 def _usage(kind: str) -> str:
@@ -502,9 +510,20 @@ def _tracker_for(kind: str, cfg: dict, root: Path, tracker, *, required: bool):
     if tracker is not None:
         return tracker
     if not required:
-        if kind == "plan" and cfg.get("tracker") == "github":
-            return GhTracker(subprocess_runner(root))
-        return None
+        return _optional_tracker(kind, cfg, root)
+    return _required_tracker(kind, cfg, root)
+
+
+def _optional_tracker(kind: str, cfg: dict, root: Path):
+    """The tracker a run may use but needn't: a configured GitHub tracker
+    joins ``/plan`` runs so the hand off can publish (#127)."""
+    if kind == "plan" and cfg.get("tracker") == "github":
+        return GhTracker(subprocess_runner(root))
+    return None
+
+
+def _required_tracker(kind: str, cfg: dict, root: Path):
+    """The configured adapter or the refusal: only GitHub ships in 0.1.0."""
     unshipped = next(
         (cfg[key] for key in ("vcs", "tracker") if cfg.get(key, "github") != "github"), None
     )
@@ -558,10 +577,11 @@ def _item_preflight(kind: str, input_text: str, tracker, root: Path):
     read the ``#<n>`` item but never touch the tree, so no dirt or label is
     checked — planning is what readies work (#120), and the map a research
     run works is the carrier it indexes onto (#125). ``/triage`` reads it
-    the same way (#128).
+    the same way (#128). A ``/research #<n>`` carrier must be a Map —
+    another parent's children are no decision tickets.
     """
     if kind in ("plan", "research", "triage"):
-        return _work_item(input_text, tracker, root, kind)
+        return _read_only_item(kind, input_text, tracker, root)
     if kind != "full" and not (kind == "implement" and input_text.startswith("#")):
         return None
     _refuse_dirty(root, f"/{kind}")
@@ -569,6 +589,26 @@ def _item_preflight(kind: str, input_text: str, tracker, root: Path):
     if kind == "implement" and item is not None:
         _refuse_not_ready(item, tracker)
     return item
+
+
+def _read_only_item(kind: str, input_text: str, tracker, root: Path):
+    """The ``#<n>`` read for the planning kinds — no tree, no label; but
+    a ``/research #<n>`` carrier must be a Map."""
+    item = _work_item(input_text, tracker, root, kind)
+    if kind == "research" and item is not None:
+        _refuse_not_map(item)
+    return item
+
+
+def _refuse_not_map(item) -> None:
+    """``/research #<n>`` works a Map's decision tickets — a work item
+    whose body carries no Map sections has none to pick."""
+    if is_map(item):
+        return
+    raise RunRefused(
+        f"work item #{item.ref} is not a Map — /research #<n> works a "
+        "Map's decision tickets; chart one with /research <question>"
+    )
 
 
 def _refuse_not_ready(item, tracker) -> None:
@@ -634,20 +674,31 @@ def _initial_state(kind: str, input_text: str, cfg: dict, item=None) -> dict:
         "validator_ok": False,
         "limit": None,
     }
+    state.update(_kind_state(kind, state["task"], cfg, item))
+    return state
+
+
+def _kind_state(kind: str, task: str, cfg: dict, item) -> dict:
+    """The per-kind fields layered over the shared run state."""
     if kind == "full":
-        state.update(_full_state(state["task"], item))
+        return _full_state(task, item)
     if kind == "implement":
-        state.update(_implement_state(item))
+        return _implement_state(item)
     if kind == "plan":
-        state.update(_plan_state(cfg, item))
+        return _plan_state(cfg, item)
     if kind == "research":
-        state.update(
-            {"map": None, "decision_refs": [], "planner_attempts": 0}
-        )
-        if item is not None:
-            state.update(_research_item_state(cfg, item))
+        return _research_state(cfg, item)
     if kind == "triage":
-        state.update(_triage_state(cfg, item))
+        return _triage_state(cfg, item)
+    return {}
+
+
+def _research_state(cfg: dict, item) -> dict:
+    """``/research``'s fields: the charted map's own, plus — for
+    ``/research #<n>`` — the decision-ticket path layered on top (#125)."""
+    state: dict = {"map": None, "decision_refs": [], "planner_attempts": 0}
+    if item is not None:
+        state.update(_research_item_state(cfg, item))
     return state
 
 
@@ -664,6 +715,7 @@ def _triage_state(cfg: dict, item) -> dict:
         "max_round_questions": cfg.get(
             "max_round_questions", DEFAULT_MAX_ROUND_QUESTIONS
         ),
+        "max_questions": cfg.get("max_questions", DEFAULT_MAX_QUESTIONS),
         "triage_outcome": None,
         "outcome_attempts": 0,
         "triage_approved": False,
@@ -696,6 +748,7 @@ def _research_item_state(cfg: dict, item) -> dict:
         "max_round_questions": cfg.get(
             "max_round_questions", DEFAULT_MAX_ROUND_QUESTIONS
         ),
+        "max_questions": cfg.get("max_questions", DEFAULT_MAX_QUESTIONS),
     }
 
 

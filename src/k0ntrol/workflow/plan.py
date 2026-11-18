@@ -34,7 +34,7 @@ from k0ntrol.workflow.nodes import (
 )
 from k0ntrol.workflow.qa import (
     DEFAULT_MAX_ROUND_QUESTIONS,
-    _answered_lines,
+    _answered_rounds,
     _cap,
     _questions,
     _round_detail,
@@ -123,13 +123,7 @@ def make_question_limit(ctx: RunContext) -> Callable[[dict], dict]:
     """
 
     def node(state: dict) -> dict:
-        decision = interrupt(_limit_payload(ctx, state))
-        verb = str(decision).strip().partition(" ")[0].lower()
-        while verb == "handoff" and ctx.tracker is None:
-            # The answered gate offered the hand off but this resume has
-            # no tracker to publish the Map — ask again without it.
-            decision = interrupt(_limit_payload(ctx, state))
-            verb = str(decision).strip().partition(" ")[0].lower()
+        verb = _limit_decision(ctx, state)
         if verb == "handoff":
             return {
                 "question_limit_route": "publish_map",
@@ -147,6 +141,17 @@ def make_question_limit(ctx: RunContext) -> Callable[[dict], dict]:
     return node
 
 
+def _limit_decision(ctx: RunContext, state: dict) -> str:
+    """The gate's verb, re-asking when a trackerless resume cannot publish
+    the Map a ``handoff`` answer would need."""
+    decision = interrupt(_limit_payload(ctx, state))
+    verb = str(decision).strip().partition(" ")[0].lower()
+    while verb == "handoff" and ctx.tracker is None:
+        decision = interrupt(_limit_payload(ctx, state))
+        verb = str(decision).strip().partition(" ")[0].lower()
+    return verb
+
+
 def _limit_payload(ctx: RunContext, state: dict) -> dict:
     """The gate's interrupt payload: the open questions, and the choices
     the run can take — the hand off needs a tracker to publish the Map."""
@@ -158,14 +163,14 @@ def _limit_payload(ctx: RunContext, state: dict) -> dict:
         "question": (
             f"the Q&A reached the question limit "
             f"({_questions_asked(state)}/{_max_questions(state)}) — "
-            f"{_either([label for _, label in options])}?"
+            f"{_either_line([label for _, label in options])}?"
         ),
         "answers": [verb for verb, _ in options],
         "detail": _round_detail(state.get("questions", [])),
     }
 
 
-def _either(options: list[str]) -> str:
+def _either_line(options: list[str]) -> str:
     if len(options) == 2:
         return " or ".join(options)
     return f"{options[0]}, {options[1]} or {options[2]}"
@@ -318,9 +323,7 @@ def planner_brief(state: dict) -> str:
         "numbered with your recommended answer — or an empty QuestionRound "
         "when nothing is left to decide.",
     ]
-    for index, round_ in enumerate(state.get("rounds", []), 1):
-        lines.append(f"\nRound {index}:")
-        lines.extend(_answered_lines(round_))
+    lines.extend(_answered_rounds(state))
     return "\n".join(lines)
 
 
@@ -335,9 +338,7 @@ def spec_brief(state: dict) -> str:
         "decisions, testing decisions with the seams, glossary and "
         "decisions, not yet decided, and out of scope.",
     ]
-    for index, round_ in enumerate(state.get("rounds", []), 1):
-        lines.append(f"\nRound {index}:")
-        lines.extend(_answered_lines(round_))
+    lines.extend(_answered_rounds(state))
     open_ = state.get("questions") or []
     if open_:
         lines.append(

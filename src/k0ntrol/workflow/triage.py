@@ -10,8 +10,9 @@ then proposes the triage outcome: one category (``bug`` or
 to post. The outcome gate shows all three before anything is written;
 ``ok`` applies exactly one category and one state label and posts the
 comment — the agent brief for ``ready-for-agent``, the triage notes for
-``needs-info``, a closing reason for ``wontfix`` — and ``redo`` sends the
-feedback back for a new proposal. The REPL command is #129.
+``needs-info``, a reason for ``wontfix``, the item left open — and
+``redo`` sends the feedback back for a new proposal. The REPL command is
+#129.
 """
 
 from collections.abc import Callable
@@ -23,7 +24,7 @@ from langgraph.types import interrupt
 
 from k0ntrol.agents import TriageOutcome
 from k0ntrol.workflow.context import RunContext
-from k0ntrol.workflow.full import _BULLET
+from k0ntrol.workflow.full import _BULLET as _LEADING_BULLET
 from k0ntrol.workflow.nodes import (
     _attempt_limit,
     _invoke_counted,
@@ -31,7 +32,7 @@ from k0ntrol.workflow.nodes import (
     make_limit_hit,
 )
 from k0ntrol.workflow.plan import make_planner_node
-from k0ntrol.workflow.qa import _answered_lines, _cap, make_round_gate
+from k0ntrol.workflow.qa import _answered_rounds, _cap, make_round_gate
 from k0ntrol.workflow.research import _BLANK, _bullets, _prose
 from k0ntrol.workflow.routers import (
     _exhausted,
@@ -151,8 +152,8 @@ def make_outcome_gate(ctx: RunContext) -> Callable[[dict], dict]:
 def make_apply(ctx: RunContext) -> Callable[[dict], dict]:
     """Apply the approved outcome: exactly one category and one state
     label — any earlier triage labels drop off — then the comment,
-    marker-idempotent like every tracker write. ``wontfix`` closes the
-    item on its reason."""
+    marker-idempotent like every tracker write. Nothing closes the item:
+    a ``wontfix`` ends labelled with its reason posted, still open."""
 
     def node(state: dict) -> dict:
         ref = state["item_ref"]
@@ -172,14 +173,10 @@ def make_apply(ctx: RunContext) -> Callable[[dict], dict]:
 
 
 def _post(ctx: RunContext, ref: str, outcome: dict) -> None:
-    """The outcome's comment: a ``wontfix`` closes on its reason; any
-    other state posts the body when there is one to post."""
+    """The outcome's comment, posted when there is one to post — a
+    ``wontfix`` included: its reason is a comment like any other."""
     body = outcome_comment(outcome)
-    if outcome["state"] == "wontfix":
-        ctx.tracker.close_work_item(
-            ref, body or "wontfix", run=ctx.run_id, node="apply"
-        )
-    elif body:
+    if body:
         ctx.tracker.comment_work_item(ref, body, run=ctx.run_id, node="apply")
 
 
@@ -198,10 +195,11 @@ def render_outcome(outcome: dict | None) -> str:
 
 
 def outcome_comment(outcome: dict) -> str:
-    """The comment the apply node posts: the rendered agent brief when
-    the proposal carries one, then the notes or reason text."""
+    """The comment the apply node posts: the rendered agent brief —
+    ``ready-for-agent`` only, whatever the proposal carries — then the
+    notes or reason text."""
     parts = []
-    if outcome.get("brief"):
+    if outcome["state"] == "ready-for-agent" and outcome.get("brief"):
         parts.append(render_agent_brief(outcome["brief"]))
     if outcome.get("comment"):
         parts.append(outcome["comment"])
@@ -212,7 +210,7 @@ def render_agent_brief(brief: dict) -> str:
     """The ``## Agent Brief`` comment in the work-item format: what to
     build, seams, acceptance criteria, blocked by and parent (#102)."""
     criteria = "\n".join(
-        f"- [ ] {_BULLET.sub('', item)}"
+        f"- [ ] {_LEADING_BULLET.sub('', item)}"
         for item in brief.get("acceptance_criteria", [])
     )
     return "\n\n".join(
@@ -238,7 +236,7 @@ def triage_brief(state: dict) -> str:
         f"most {_cap(state)}, each numbered with your recommended answer "
         "— or an empty QuestionRound when nothing is left to decide.",
     ]
-    return "\n".join([*lines, *_rounds(state)])
+    return "\n".join([*lines, *_answered_rounds(state)])
 
 
 def outcome_brief(state: dict) -> str:
@@ -254,7 +252,7 @@ def outcome_brief(state: dict) -> str:
         "reason for wontfix), and for a ready state the brief — what to "
         "build, seams, acceptance criteria, blocked by and parent.",
     ]
-    lines.extend(_rounds(state))
+    lines.extend(_answered_rounds(state))
     if state.get("triage_feedback"):
         lines.append(
             "\nYour last proposal was rejected with this feedback: "
@@ -268,11 +266,3 @@ def _item(state: dict) -> str:
         f"Work item #{state['item_ref']}: {state.get('item_title', '')}"
         f"\n\n{state['task']}"
     )
-
-
-def _rounds(state: dict) -> list[str]:
-    lines = []
-    for index, round_ in enumerate(state.get("rounds", []), 1):
-        lines.append(f"\nRound {index}:")
-        lines.extend(_answered_lines(round_))
-    return lines

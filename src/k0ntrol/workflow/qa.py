@@ -86,3 +86,13 @@ def _answered_lines(round_: dict) -> list[str]:
         for question in round_["questions"]
     ]
     return [*lines, f"  answer: {round_['answer']}"]
+
+
+def _answered_rounds(state: dict) -> list[str]:
+    """Every answered round as a fresh agent run reads it back: a
+    ``Round n:`` block per round, its questions and answering line."""
+    lines = []
+    for index, round_ in enumerate(state.get("rounds", []), 1):
+        lines.append(f"\nRound {index}:")
+        lines.extend(_answered_lines(round_))
+    return lines
