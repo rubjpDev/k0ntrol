@@ -41,7 +41,7 @@ from k0ntrol.workflow.nodes import (
     make_limit_hit,
 )
 from k0ntrol.workflow.qa import (
-    _answered_lines,
+    _answered_rounds,
     _cap,
     _questions,
     make_round_gate,
@@ -152,6 +152,24 @@ def make_publish_decisions(ctx: RunContext) -> Callable[[dict], dict]:
         return {"decision_refs": refs, "outcome": "done"}
 
     return node
+
+
+#: The sections ``map_body`` writes — how a ``/research #<n>`` carrier is
+#: known to be a Map and not another work item's children holder.
+MAP_SECTIONS = (
+    "Destination",
+    "Notes",
+    "Decisions so far",
+    "Not yet specified",
+    "Out of scope",
+)
+
+
+def is_map(item: WorkItem) -> bool:
+    """Whether the work item is a Map: its body carries the sections
+    ``map_body`` writes."""
+    lines = item.body.splitlines()
+    return all(f"## {title}" in lines for title in MAP_SECTIONS)
 
 
 def map_body(chart: dict) -> str:
@@ -288,13 +306,20 @@ def make_researcher_node(ctx: RunContext) -> Callable[[dict], dict]:
     return node
 
 
+def _decision_header(state: dict) -> str:
+    """The line the decision-ticket briefs open with: the ticket and the
+    map it belongs to."""
+    return (
+        f"Decision ticket #{state['decision']['ref']} on map "
+        f"#{state['item_ref']} ({state.get('item_title', '')}):"
+    )
+
+
 def researcher_brief(state: dict) -> str:
     """RESEARCHER's fresh context: the decision ticket to answer."""
-    decision = state["decision"]
     return (
-        f"Decision ticket #{decision['ref']} on map #{state['item_ref']} "
-        f"({state.get('item_title', '')}):\n"
-        f"{decision['question']}\n\n"
+        f"{_decision_header(state)}\n"
+        f"{state['decision']['question']}\n\n"
         "Answer it from primary sources and answer with ResearchFinding — "
         "the cited findings, your proposed decision and each source's "
         "title and URL."
@@ -372,38 +397,28 @@ def decision_brief(state: dict) -> str:
     them."""
     decision = state["decision"]
     lines = [
-        f"Decision ticket #{decision['ref']} on map #{state['item_ref']} "
-        f"({state.get('item_title', '')}):",
+        _decision_header(state),
         f"{decision['question']}",
         "",
         f"Ask the next round of questions — at most {_cap(state)}, each "
         "numbered with your recommended answer — or answer with "
         "DecisionProposal once you can propose the decision.",
     ]
-    for index, round_ in enumerate(state.get("rounds", []), 1):
-        lines.append(f"\nRound {index}:")
-        lines.extend(_answered_lines(round_))
+    lines.extend(_answered_rounds(state))
     return "\n".join(lines)
 
 
 def make_decision_gate(ctx: RunContext) -> Callable[[dict], dict]:
     """The decision gate: the proposal — or, for a human ticket, the bare
     question. ``ok`` takes the proposal; any other line is the human's
-    own decision — free text, like the round gate."""
+    own decision — free text, like the round gate. With no proposal a
+    bare ``ok`` confirms nothing, so the gate asks again."""
 
     def node(state: dict) -> dict:
-        decision = state["decision"]
         proposal = state.get("proposal", "")
-        answer = str(
-            interrupt(
-                {
-                    "gate": "decision",
-                    "question": _gate_question(decision, proposal),
-                    "answers": [],
-                    "detail": _gate_detail(state),
-                }
-            )
-        ).strip()
+        answer = str(interrupt(_gate_payload(state))).strip()
+        while not proposal and answer.lower() == "ok":
+            answer = str(interrupt(_gate_payload(state))).strip()
         if proposal and answer.lower() == "ok":
             return {"decided": proposal}
         return {"decided": answer}
@@ -411,11 +426,21 @@ def make_decision_gate(ctx: RunContext) -> Callable[[dict], dict]:
     return node
 
 
+def _gate_payload(state: dict) -> dict:
+    """The interrupt payload the decision gate shows (and re-shows)."""
+    return {
+        "gate": "decision",
+        "question": _gate_question(state["decision"], state.get("proposal", "")),
+        "answers": [],
+        "detail": _gate_detail(state),
+    }
+
+
 def _gate_question(decision: dict, proposal: str) -> str:
     base = f"#{decision['ref']}: {decision['question']}"
     if proposal:
         return f"{base} — ok takes the proposal, anything else is yours"
-    return base
+    return f"{base} — type the decision"
 
 
 def _gate_detail(state: dict) -> str:

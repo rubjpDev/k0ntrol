@@ -73,7 +73,10 @@ from k0ntrol.workflow.plan import (  # noqa: E402
     DEFAULT_MAX_ROUND_QUESTIONS,
     build_plan_graph,
 )
-from k0ntrol.workflow.research import build_research_graph  # noqa: E402
+from k0ntrol.workflow.research import (  # noqa: E402
+    build_research_graph,
+    is_map,
+)
 from k0ntrol.workflow.routers import DEFAULT_MAX_QUESTIONS  # noqa: E402
 from k0ntrol.workflow.stuck import stuck_update  # noqa: E402
 from k0ntrol.workflow.triage import build_triage_graph  # noqa: E402
@@ -558,10 +561,14 @@ def _item_preflight(kind: str, input_text: str, tracker, root: Path):
     read the ``#<n>`` item but never touch the tree, so no dirt or label is
     checked — planning is what readies work (#120), and the map a research
     run works is the carrier it indexes onto (#125). ``/triage`` reads it
-    the same way (#128).
+    the same way (#128). A ``/research #<n>`` carrier must be a Map —
+    another parent's children are no decision tickets.
     """
     if kind in ("plan", "research", "triage"):
-        return _work_item(input_text, tracker, root, kind)
+        item = _work_item(input_text, tracker, root, kind)
+        if kind == "research" and item is not None:
+            _refuse_not_map(item)
+        return item
     if kind != "full" and not (kind == "implement" and input_text.startswith("#")):
         return None
     _refuse_dirty(root, f"/{kind}")
@@ -569,6 +576,17 @@ def _item_preflight(kind: str, input_text: str, tracker, root: Path):
     if kind == "implement" and item is not None:
         _refuse_not_ready(item, tracker)
     return item
+
+
+def _refuse_not_map(item) -> None:
+    """``/research #<n>`` works a Map's decision tickets — a work item
+    whose body carries no Map sections has none to pick."""
+    if is_map(item):
+        return
+    raise RunRefused(
+        f"work item #{item.ref} is not a Map — /research #<n> works a "
+        "Map's decision tickets; chart one with /research <question>"
+    )
 
 
 def _refuse_not_ready(item, tracker) -> None:
@@ -664,6 +682,7 @@ def _triage_state(cfg: dict, item) -> dict:
         "max_round_questions": cfg.get(
             "max_round_questions", DEFAULT_MAX_ROUND_QUESTIONS
         ),
+        "max_questions": cfg.get("max_questions", DEFAULT_MAX_QUESTIONS),
         "triage_outcome": None,
         "outcome_attempts": 0,
         "triage_approved": False,
@@ -696,6 +715,7 @@ def _research_item_state(cfg: dict, item) -> dict:
         "max_round_questions": cfg.get(
             "max_round_questions", DEFAULT_MAX_ROUND_QUESTIONS
         ),
+        "max_questions": cfg.get("max_questions", DEFAULT_MAX_QUESTIONS),
     }
 
 

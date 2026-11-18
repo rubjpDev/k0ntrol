@@ -6,8 +6,8 @@ scripted ``FakeChatModel``s behind the ``init`` seam and a ``FakeTracker``.
 outcome gate shows the proposed category, state and comment before anything
 is written; ``ok`` applies exactly one category and one state label and
 posts the matching comment — the agent brief for ``ready-for-agent``, triage
-notes for ``needs-info``, a closing reason for ``wontfix`` (spec #102,
-ticket #128).
+notes for ``needs-info``, a reason for ``wontfix``, the item left open (spec
+#102, ticket #128).
 """
 
 import json
@@ -313,6 +313,33 @@ def test_the_next_round_is_given_the_item_and_earlier_answers(tmp_path):
     assert "1 enhancement" in draft
 
 
+def test_the_qa_stops_asking_at_max_questions(tmp_path):
+    """The triage Q&A is bounded like /plan's: a round that would pass
+    ``max_questions`` is never asked — the outcome drafts with what's
+    known."""
+    git_repo(tmp_path)
+    tracker = FakeTracker()
+    item = raw_item(tracker)
+    cfg = triage_cfg(max_questions=1)
+    pending = run_triage(
+        tmp_path, cfg, tracker, planner_model(round_call([Q1])),
+        input=f"#{item.ref}",
+    )
+    assert isinstance(pending, Pending) and pending.gate == "round"
+
+    gate = resume(
+        pending.run,
+        "1 enhancement",
+        root=tmp_path,
+        cfg=cfg,
+        init=models_init(planner_model(round_call([Q2]), outcome_call())),
+        tracker=tracker,
+    )
+
+    assert isinstance(gate, Pending) and gate.gate == "outcome"
+    assert "ready-for-agent" in gate.detail
+
+
 def test_a_blank_answer_reshows_the_round_gate(tmp_path):
     git_repo(tmp_path)
     tracker = FakeTracker()
@@ -522,7 +549,9 @@ def test_needs_info_posts_the_triage_notes(tmp_path):
     assert any("the failing command" in body for body in bodies)
 
 
-def test_wontfix_posts_the_reason_and_closes_the_item(tmp_path):
+def test_wontfix_posts_the_reason_and_leaves_the_item_open(tmp_path):
+    """A ``wontfix`` outcome is one state label and the reason comment —
+    nothing in #128 closes the item; the human closes it."""
     git_repo(tmp_path)
     tracker = FakeTracker()
     item = raw_item(tracker)
@@ -547,9 +576,42 @@ def test_wontfix_posts_the_reason_and_closes_the_item(tmp_path):
 
     assert outcome.outcome == "done"
     assert tracker.read_labels(item.ref) == {"enhancement", "wontfix"}
-    closed = tracker.read_work_item(item.ref)
-    assert closed.state == "closed"
-    assert any("already covered" in c.body for c in closed.comments)
+    assert not [c for c in tracker.calls if c[0] == "close_work_item"]
+    updated = tracker.read_work_item(item.ref)
+    assert updated.state == "open"
+    assert any("already covered" in c.body for c in updated.comments)
+
+
+def test_a_non_ready_outcome_posts_no_agent_brief(tmp_path):
+    """The agent brief belongs to ``ready-for-agent``: a PLANNER that
+    sets one on another state anyway gets only its comment posted."""
+    git_repo(tmp_path)
+    tracker = FakeTracker()
+    item = raw_item(tracker)
+    pending = run_triage(
+        tmp_path,
+        triage_cfg(),
+        tracker,
+        planner_model(
+            round_call([]),
+            outcome_call(
+                state="ready-for-human",
+                comment="a human has to decide the flag's name",
+            ),
+        ),
+        input=f"#{item.ref}",
+    )
+
+    outcome = resume(
+        pending.run, "ok", root=tmp_path, cfg=triage_cfg(), tracker=tracker
+    )
+
+    assert outcome.outcome == "done"
+    assert tracker.read_labels(item.ref) == {"enhancement", "ready-for-human"}
+    bodies = [c.body for c in tracker.read_work_item(item.ref).comments]
+    assert any("a human has to decide" in body for body in bodies)
+    assert not any("## Agent Brief" in body for body in bodies)
+    assert not any(BRIEF["what_to_build"] in body for body in bodies)
 
 
 def test_a_needs_triage_outcome_posts_no_empty_comment(tmp_path):

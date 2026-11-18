@@ -279,21 +279,34 @@ def route_after_researcher(state: dict) -> str:
 
 
 def route_after_decision_planner(state: dict) -> str:
-    """A limited round → the pause; questions → the round gate; a
-    proposal or an empty round → the decision gate."""
+    """A limited round → the pause; a round that would pass
+    ``max_questions`` is never asked — the gate decides with what's
+    known; questions → the round gate; a proposal or an empty round →
+    the decision gate."""
     if state.get("limit"):
         return "limit_hit"
-    return "round_gate" if state.get("questions") else "decision_gate"
+    questions = state.get("questions") or []
+    if not questions:
+        return "decision_gate"
+    if _questions_asked(state) + len(questions) > _max_questions(state):
+        return "decision_gate"
+    return "round_gate"
 
 
 # --- /triage (#128): the Q&A's rounds, the outcome gate, then apply ------------
 
 
 def route_after_triage_planner(state: dict) -> str:
-    """Same shape as ``/plan``'s rounds; an empty round drafts the outcome."""
+    """Same shape as ``/plan``'s rounds; an empty round — or one that
+    would pass ``max_questions`` — drafts the outcome."""
     if state.get("limit"):
         return "limit_hit"
-    return "round_gate" if state.get("questions") else "outcome"
+    questions = state.get("questions") or []
+    if not questions:
+        return "outcome"
+    if _questions_asked(state) + len(questions) > _max_questions(state):
+        return "outcome"
+    return "round_gate"
 
 
 def route_after_outcome(state: dict) -> str:
