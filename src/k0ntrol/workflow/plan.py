@@ -26,6 +26,13 @@ from k0ntrol.workflow.nodes import (
     _last_output,
     make_limit_hit,
 )
+from k0ntrol.workflow.qa import (
+    DEFAULT_MAX_ROUND_QUESTIONS,
+    _answered_lines,
+    _cap,
+    _questions,
+    make_round_gate,
+)
 from k0ntrol.workflow.research import _BLANK, _bullets, _prose
 from k0ntrol.workflow.routers import (
     _exhausted,
@@ -35,8 +42,6 @@ from k0ntrol.workflow.routers import (
     route_plan_spec_gate,
 )
 from k0ntrol.workflow.state import RunState
-
-DEFAULT_MAX_ROUND_QUESTIONS = 7
 
 
 def build_plan_graph(
@@ -71,34 +76,6 @@ def make_planner_node(ctx: RunContext) -> Callable[[dict], dict]:
             return updates
         updates["questions"] = _questions(result, _cap(state))
         return updates
-
-    return node
-
-
-def make_round_gate(ctx: RunContext) -> Callable[[dict], dict]:
-    """The round gate: the round's numbered questions, each with its
-    recommended answer; the human's one line answers the whole round and
-    joins the Q&A every later PLANNER run sees. Free text, so the gate
-    takes any line — ``_check_decision`` only polices listed answers.
-    """
-
-    def node(state: dict) -> dict:
-        decision = interrupt(
-            {
-                "gate": "round",
-                "question": "answer the round's questions in one line",
-                "answers": [],
-                "detail": _round_detail(state.get("questions", [])),
-            }
-        )
-        answered = {
-            "questions": state.get("questions", []),
-            "answer": str(decision).strip(),
-        }
-        return {
-            "rounds": [*state.get("rounds", []), answered],
-            "questions": [],
-        }
 
     return node
 
@@ -205,38 +182,6 @@ def _testing(spec: dict) -> str:
     return f"## Testing Decisions\n\n{decisions or _BLANK}\n\nSeams:\n{seams or _BLANK}"
 
 
-def _questions(result, cap: int) -> list[dict]:
-    """The round's questions as plain dicts, capped in code, never in the
-    prompt alone — and numbered in code too, so the numbers the human
-    answers by are always ``1..n`` whatever the model emitted.
-
-    PLANNER's other outputs (Spec, TicketList) carry no questions:
-    answering early ends the Q&A like an empty round.
-    """
-    questions = getattr(result.structured_response, "questions", None) or []
-    return [
-        {**question.model_dump(), "number": index}
-        for index, question in enumerate(questions[:cap], 1)
-    ]
-
-
-def _cap(state: dict) -> int:
-    return int(state.get("max_round_questions", DEFAULT_MAX_ROUND_QUESTIONS))
-
-
-def _round_detail(questions: list[dict]) -> str:
-    """What the gate shows: ``n. question`` over ``recommended: answer
-    (why)``, one pair of lines per question."""
-    lines = []
-    for question in questions:
-        lines.append(f"{question['number']}. {question['question']}")
-        recommended = f"   recommended: {question['recommendation']}"
-        if question.get("rationale"):
-            recommended += f" ({question['rationale']})"
-        lines.append(recommended)
-    return "\n".join(lines)
-
-
 def planner_brief(state: dict) -> str:
     """PLANNER's fresh context for one round: the idea, then every earlier
     round's questions and the line the human answered."""
@@ -282,14 +227,3 @@ def _idea(state: dict) -> str:
     if state.get("item_ref"):
         idea = f"#{state['item_ref']} {state.get('item_title', '')}\n\n{idea}"
     return idea
-
-
-def _answered_lines(round_: dict) -> list[str]:
-    """One answered round as PLANNER reads it back: its questions, then the
-    line the human answered them with."""
-    lines = [
-        f"  {question['number']}. {question['question']} "
-        f"(recommended: {question['recommendation']})"
-        for question in round_["questions"]
-    ]
-    return [*lines, f"  answer: {round_['answer']}"]

@@ -30,3 +30,5 @@ End every run by calling exactly one structured output tool:
   decision ticket per open question — the question, a type of research,
   Q&A or human, and the `blocked_by` indexes of earlier decisions it
   waits on — plus what is not yet specified and what is out of scope.
+- `DecisionProposal` for the answer to a Q&A decision ticket: the
+  proposed decision and its rationale.

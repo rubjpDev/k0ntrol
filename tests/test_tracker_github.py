@@ -699,6 +699,73 @@ def test_link_blocked_by_adds_a_native_dependency_and_repeats_as_a_noop():
     assert len(posts) == 1
 
 
+def test_list_blockers_returns_ref_title_state_and_labels_in_order():
+    runner = FakeRunner()
+    deps = "repos/{owner}/{repo}/issues/42/dependencies/blocked_by"
+    runner.script(
+        ["gh", "api", "--paginate", "--slurp", deps],
+        stdout=json.dumps(
+            [
+                [_issue({"number": 7, "state": "closed"})],
+                [
+                    _issue(
+                        {
+                            "number": 9,
+                            "title": "Ticket B",
+                            "labels": [{"name": "bug"}],
+                        }
+                    )
+                ],
+            ]
+        ),
+    )
+    tracker = GhTracker(runner)
+
+    blockers = tracker.list_blockers("42")
+
+    assert blockers == (
+        ChildWorkItem(ref="7", title="Add login", state="closed", labels=()),
+        ChildWorkItem(ref="9", title="Ticket B", state="open", labels=("bug",)),
+    )
+
+    runner.script(["gh", "api", "--paginate", "--slurp", deps], stdout="[[]]")
+    assert tracker.list_blockers("42") == ()
+
+
+@pytest.mark.parametrize("ref", ["o/r#1", "one", ""])
+def test_list_blockers_refuses_other_ref_forms(ref):
+    runner = FakeRunner()
+    tracker = GhTracker(runner)
+
+    with pytest.raises(TrackerError, match="expected a work item number like 42 or #42"):
+        tracker.list_blockers(ref)
+
+    assert runner.calls == []
+
+
+def test_edit_work_item_body_replaces_the_body():
+    runner = FakeRunner()
+    runner.script(["gh", "issue", "edit"])
+    tracker = GhTracker(runner)
+
+    tracker.edit_work_item_body("42", "the new body")
+
+    assert runner.calls == [
+        ["gh", "issue", "edit", "42", "--body", "the new body"]
+    ]
+
+
+@pytest.mark.parametrize("ref", ["o/r#1", "one", ""])
+def test_edit_work_item_body_refuses_other_ref_forms(ref):
+    runner = FakeRunner()
+    tracker = GhTracker(runner)
+
+    with pytest.raises(TrackerError, match="expected a work item number like 42 or #42"):
+        tracker.edit_work_item_body(ref, "body")
+
+    assert runner.calls == []
+
+
 def test_close_work_item_comments_then_closes_and_retries_without_reposting():
     runner = FakeRunner()
     runner.script(COMMENTS_ENDPOINT, stdout="[]")

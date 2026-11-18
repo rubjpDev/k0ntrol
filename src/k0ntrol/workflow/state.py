@@ -96,6 +96,13 @@ class RunState(TypedDict, total=False):
     map: dict | None  # the ChartedMap as a plain dict
     decision_refs: list[str]  # child work-item refs, one per decision
 
+    # /research #<n> (#125): the map's next unblocked decision ticket.
+    decision: dict | None  # the picked child: ref, question, type, url
+    finding: dict | None  # RESEARCHER's ResearchFinding as a plain dict
+    proposal: str  # the proposed decision an ``ok`` at the gate takes
+    decided: str  # the confirmed decision the ticket closes with
+    researcher_attempts: int  # RESEARCHER runs so far
+
     limit: dict[str, Any] | None  # set when the last node can hit a limit
     retry_node: str | None  # the node a limit_hit retry sends back to
     retries_granted: int  # limit_hit retries the human granted (stuck comment)

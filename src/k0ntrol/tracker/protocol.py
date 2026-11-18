@@ -102,6 +102,14 @@ class WorkItems(Protocol):
         """List `parent`'s children in tracker order."""
         ...
 
+    def list_blockers(self, ref: str) -> tuple[ChildWorkItem, ...]:
+        """List the work items blocking `ref`."""
+        ...
+
+    def edit_work_item_body(self, ref: str, body: str) -> None:
+        """Replace a work item's body."""
+        ...
+
     def comment_work_item(self, ref: str, body: str, *, run: str, node: str) -> None:
         """Post a marked comment; a no-op when the marker already exists."""
         ...

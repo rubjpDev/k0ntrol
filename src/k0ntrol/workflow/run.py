@@ -172,7 +172,8 @@ def start(
     ``/implement <task>`` runs the working-tree path (#116) and
     ``/implement #<n>`` the tracker path on a ready work item (#117);
     ``/plan <idea>`` and ``/plan #<n>`` run the Q&A definition (#120);
-    ``/research <question>`` charts a Map of decision tickets (#124).
+    ``/research <question>`` charts a Map of decision tickets (#124) and
+    ``/research #<n>`` works the map's next unblocked one (#125).
     Refuses — ``RunRefused`` — on bad usage, a missing tracker or work
     item, an untrusted issue body, a work item not ready for an agent, a
     dirty tree (``.k0-mem/`` ignored), failed doctor checks, a failed
@@ -353,7 +354,7 @@ def _busy_run(
     busy = open_runs(saver, ctx)
     if not busy:
         return None
-    if ctx.kind in ("full", "implement", "plan"):
+    if ctx.kind in ("full", "implement", "plan", "research"):
         same = _same_item_run(busy, input_text)
         if same is not None:
             _work_item(input_text, tracker, root, ctx.kind)
@@ -409,9 +410,12 @@ def _doctor_gate(
 def _roster_for(kind: str, input_text: str) -> tuple[str, ...]:
     """The roster the doctor gate checks on this run's path:
     ``/implement #<n>`` also runs REVIEWER (#118); the working-tree path
-    never does, so it must not be refused for a reviewer's provider."""
+    never does, so it must not be refused for a reviewer's provider.
+    ``/research #<n>`` may run RESEARCHER on a decision ticket (#125)."""
     if kind == "implement" and input_text.startswith("#"):
         return ("agents.implementer", "agents.reviewer", "helpers.bulk_read")
+    if kind == "research" and input_text.startswith("#"):
+        return ("agents.planner", "agents.researcher", "helpers.bulk_read")
     return _ROSTER[kind]
 
 
@@ -446,14 +450,17 @@ def _bind_events(
 def _checked_input(kind: str, input) -> str:
     """Non-empty input in the kind's accepted forms, or a usage refusal."""
     text = str(input).strip()
-    if not text or (kind in ("full", "implement", "plan") and not _usage_ok(text)):
+    if not text or (
+        kind in ("full", "implement", "plan", "research")
+        and not _usage_ok(text)
+    ):
         raise RunRefused(_usage(kind))
-    if kind == "research" and text.startswith("#"):
-        raise RunRefused(_usage(kind))  # /research #<n> is #125
     return text
 
 
 def _usage(kind: str) -> str:
+    if kind == "research":
+        return "usage: /research <question> | /research #<issue>"
     if kind in ("full", "implement", "plan"):
         return f"usage: /{kind} <task> | /{kind} #<issue>"
     return f"usage: /{kind} <task>"
@@ -530,11 +537,12 @@ def _item_preflight(kind: str, input_text: str, tracker, root: Path):
     """The work-item commands' last refusals: dirty tree, then the item read.
 
     ``/full`` always goes through it; ``/implement`` only for ``#<n>``, whose
-    item must also be ready for an agent (#117). ``/plan`` reads the
-    ``#<n>`` item but never touches the tree, so no dirt or label is
-    checked — planning is what readies work (#120).
+    item must also be ready for an agent (#117). ``/plan`` and ``/research``
+    read the ``#<n>`` item but never touch the tree, so no dirt or label is
+    checked — planning is what readies work (#120), and the map a research
+    run works is the carrier it indexes onto (#125).
     """
-    if kind == "plan":
+    if kind in ("plan", "research"):
         return _work_item(input_text, tracker, root, kind)
     if kind != "full" and not (kind == "implement" and input_text.startswith("#")):
         return None
@@ -618,7 +626,31 @@ def _initial_state(kind: str, input_text: str, cfg: dict, item=None) -> dict:
         state.update(
             {"map": None, "decision_refs": [], "planner_attempts": 0}
         )
+        if item is not None:
+            state.update(_research_item_state(cfg, item))
     return state
+
+
+def _research_item_state(cfg: dict, item) -> dict:
+    """The ``/research #<n>`` fields layered over the shared run state
+    (#125): the map's next unblocked decision ticket and the short Q&A a
+    Q&A ticket may take before its gate.
+    """
+    return {
+        "task": item.body,
+        "item_ref": item.ref,
+        "item_title": item.title,
+        "decision": None,
+        "finding": None,
+        "proposal": "",
+        "decided": "",
+        "researcher_attempts": 0,
+        "rounds": [],
+        "questions": [],
+        "max_round_questions": cfg.get(
+            "max_round_questions", DEFAULT_MAX_ROUND_QUESTIONS
+        ),
+    }
 
 
 def _plan_state(cfg: dict, item) -> dict:

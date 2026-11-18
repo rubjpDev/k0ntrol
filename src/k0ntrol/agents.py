@@ -228,6 +228,14 @@ class ChartedMap(BaseModel):
         return self
 
 
+class DecisionProposal(BaseModel):
+    """PLANNER's structured output: the proposed decision on a Q&A
+    decision ticket (#125)."""
+
+    proposed_decision: str
+    rationale: str = ""
+
+
 class ResearchCitation(BaseModel):
     """A primary source RESEARCHER cites."""
 
@@ -243,7 +251,9 @@ class ResearchFinding(BaseModel):
     citations: list[ResearchCitation] = Field(min_length=1)
 
 
-_PLANNER_OUTPUT = QuestionRound | Spec | TicketList | ChartedMap
+_PLANNER_OUTPUT = (
+    QuestionRound | Spec | TicketList | ChartedMap | DecisionProposal
+)
 
 # Agents whose ``create_agent`` gets a structured ``response_format`` (spec
 # #33): the schema becomes a tool the model calls; the validated value lands

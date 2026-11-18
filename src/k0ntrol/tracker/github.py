@@ -82,13 +82,16 @@ class GhTracker:
     def list_children(self, parent: str) -> tuple[ChildWorkItem, ...]:
         parent = _number(parent, "work item")
         return tuple(
-            ChildWorkItem(
-                ref=str(issue["number"]),
-                title=issue["title"],
-                state=issue["state"].lower(),
-                labels=tuple(label["name"] for label in issue["labels"]),
-            )
-            for issue in self._sub_issues(parent)
+            _child_work_item(issue) for issue in self._sub_issues(parent)
+        )
+
+    def list_blockers(self, ref: str) -> tuple[ChildWorkItem, ...]:
+        ref = _number(ref, "work item")
+        return tuple(_child_work_item(issue) for issue in self._blocked_by(ref))
+
+    def edit_work_item_body(self, ref: str, body: str) -> None:
+        self._run(
+            ["gh", "issue", "edit", _number(ref, "work item"), "--body", body]
         )
 
     def _work_items(self) -> list[dict]:
@@ -99,6 +102,11 @@ class GhTracker:
     def _sub_issues(self, parent: str) -> list[dict]:
         return self._paginated_json(
             f"repos/{{owner}}/{{repo}}/issues/{parent}/sub_issues?per_page=100"
+        )
+
+    def _blocked_by(self, ref: str) -> list[dict]:
+        return self._paginated_json(
+            f"repos/{{owner}}/{{repo}}/issues/{ref}/dependencies/blocked_by"
         )
 
     def _paginated_json(self, endpoint: str) -> list[dict]:
@@ -179,10 +187,7 @@ class GhTracker:
         ref = _number(ref, "work item")
         blocker = _number(blocker, "work item")
         blocker_id = self._issue(blocker)["id"]
-        dependencies = self._paginated_json(
-            f"repos/{{owner}}/{{repo}}/issues/{ref}/dependencies/blocked_by"
-        )
-        if any(dep["id"] == blocker_id for dep in dependencies):
+        if any(dep["id"] == blocker_id for dep in self._blocked_by(ref)):
             return
         self._run([
             "gh", "api", "-X", "POST",
@@ -320,6 +325,15 @@ class GhTracker:
 
     def _gh_json(self, argv: list[str]):
         return json.loads(self._run(argv).stdout)
+
+
+def _child_work_item(issue: dict) -> ChildWorkItem:
+    return ChildWorkItem(
+        ref=str(issue["number"]),
+        title=issue["title"],
+        state=issue["state"].lower(),
+        labels=tuple(label["name"] for label in issue["labels"]),
+    )
 
 
 def _preferred_pr(prs: list[dict]) -> dict:
