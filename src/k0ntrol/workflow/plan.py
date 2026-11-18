@@ -123,13 +123,7 @@ def make_question_limit(ctx: RunContext) -> Callable[[dict], dict]:
     """
 
     def node(state: dict) -> dict:
-        decision = interrupt(_limit_payload(ctx, state))
-        verb = str(decision).strip().partition(" ")[0].lower()
-        while verb == "handoff" and ctx.tracker is None:
-            # The answered gate offered the hand off but this resume has
-            # no tracker to publish the Map — ask again without it.
-            decision = interrupt(_limit_payload(ctx, state))
-            verb = str(decision).strip().partition(" ")[0].lower()
+        verb = _limit_decision(ctx, state)
         if verb == "handoff":
             return {
                 "question_limit_route": "publish_map",
@@ -145,6 +139,17 @@ def make_question_limit(ctx: RunContext) -> Callable[[dict], dict]:
         return {"question_limit_route": "spec"}
 
     return node
+
+
+def _limit_decision(ctx: RunContext, state: dict) -> str:
+    """The gate's verb, re-asking when a trackerless resume cannot publish
+    the Map a ``handoff`` answer would need."""
+    decision = interrupt(_limit_payload(ctx, state))
+    verb = str(decision).strip().partition(" ")[0].lower()
+    while verb == "handoff" and ctx.tracker is None:
+        decision = interrupt(_limit_payload(ctx, state))
+        verb = str(decision).strip().partition(" ")[0].lower()
+    return verb
 
 
 def _limit_payload(ctx: RunContext, state: dict) -> dict:

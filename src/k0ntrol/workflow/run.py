@@ -458,14 +458,19 @@ def _bind_events(
 def _checked_input(kind: str, input) -> str:
     """Non-empty input in the kind's accepted forms, or a usage refusal."""
     text = str(input).strip()
-    if not text or (
-        kind in ("full", "implement", "plan", "research")
-        and not _usage_ok(text)
-    ):
+    if not text or not _form_ok(kind, text):
         raise RunRefused(_usage(kind))
-    if kind == "triage" and not (text.startswith("#") and _usage_ok(text)):
-        raise RunRefused(_usage(kind))  # triage always names an item
     return text
+
+
+def _form_ok(kind: str, text: str) -> bool:
+    """The input shape a kind takes: ``/triage`` always names a work item,
+    the work-item commands take text or ``#<n>``, the rest take anything."""
+    if kind == "triage":
+        return text.startswith("#") and _usage_ok(text)
+    if kind in ("full", "implement", "plan", "research"):
+        return _usage_ok(text)
+    return True
 
 
 def _usage(kind: str) -> str:
@@ -505,9 +510,20 @@ def _tracker_for(kind: str, cfg: dict, root: Path, tracker, *, required: bool):
     if tracker is not None:
         return tracker
     if not required:
-        if kind == "plan" and cfg.get("tracker") == "github":
-            return GhTracker(subprocess_runner(root))
-        return None
+        return _optional_tracker(kind, cfg, root)
+    return _required_tracker(kind, cfg, root)
+
+
+def _optional_tracker(kind: str, cfg: dict, root: Path):
+    """The tracker a run may use but needn't: a configured GitHub tracker
+    joins ``/plan`` runs so the hand off can publish (#127)."""
+    if kind == "plan" and cfg.get("tracker") == "github":
+        return GhTracker(subprocess_runner(root))
+    return None
+
+
+def _required_tracker(kind: str, cfg: dict, root: Path):
+    """The configured adapter or the refusal: only GitHub ships in 0.1.0."""
     unshipped = next(
         (cfg[key] for key in ("vcs", "tracker") if cfg.get(key, "github") != "github"), None
     )
@@ -658,20 +674,31 @@ def _initial_state(kind: str, input_text: str, cfg: dict, item=None) -> dict:
         "validator_ok": False,
         "limit": None,
     }
+    state.update(_kind_state(kind, state["task"], cfg, item))
+    return state
+
+
+def _kind_state(kind: str, task: str, cfg: dict, item) -> dict:
+    """The per-kind fields layered over the shared run state."""
     if kind == "full":
-        state.update(_full_state(state["task"], item))
+        return _full_state(task, item)
     if kind == "implement":
-        state.update(_implement_state(item))
+        return _implement_state(item)
     if kind == "plan":
-        state.update(_plan_state(cfg, item))
+        return _plan_state(cfg, item)
     if kind == "research":
-        state.update(
-            {"map": None, "decision_refs": [], "planner_attempts": 0}
-        )
-        if item is not None:
-            state.update(_research_item_state(cfg, item))
+        return _research_state(cfg, item)
     if kind == "triage":
-        state.update(_triage_state(cfg, item))
+        return _triage_state(cfg, item)
+    return {}
+
+
+def _research_state(cfg: dict, item) -> dict:
+    """``/research``'s fields: the charted map's own, plus — for
+    ``/research #<n>`` — the decision-ticket path layered on top (#125)."""
+    state: dict = {"map": None, "decision_refs": [], "planner_attempts": 0}
+    if item is not None:
+        state.update(_research_item_state(cfg, item))
     return state
 
 
