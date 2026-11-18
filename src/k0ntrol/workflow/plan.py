@@ -1,5 +1,5 @@
-"""The ``/plan`` graph: the Q&A definition's rounds (#120), then the
-spec gate (#121).
+"""The ``/plan`` graph: the Q&A definition's rounds (#120), the
+question-limit gate (#127), then the spec gate (#121).
 
 Each round is a fresh PLANNER run given the idea and the questions and
 answers so far. It returns at most ``max_round_questions`` numbered
@@ -7,14 +7,20 @@ questions — each with its recommended answer — shown at the round gate;
 the human answers in one line and the next round sees every earlier
 question and answer. A round with no questions ends the Q&A: a fresh
 PLANNER run then drafts the Spec — its own brief carrying every retained
-round — and the spec gate takes ``ok`` or ``redo <feedback>``. The ticket
-breakdown, its gate and publishing are later tickets (#122, #123).
+round — and the spec gate takes ``ok`` or ``redo <feedback>``.
+
+A round that would pass ``max_questions`` is never asked: the run pauses
+at the question-limit gate with the open questions shown — ``end``
+drafts the spec now (they land under Not yet decided), ``handoff``
+charts them to a Map for ``/research``, ``continue`` grants ten more
+questions. The ticket breakdown, its gate and publishing are later
+tickets (#122, #123).
 """
 
 from collections.abc import Callable
 
 from langgraph.checkpoint.base import BaseCheckpointSaver
-from langgraph.graph import START, StateGraph
+from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 from langgraph.types import interrupt
 
@@ -31,17 +37,30 @@ from k0ntrol.workflow.qa import (
     _answered_lines,
     _cap,
     _questions,
+    _round_detail,
     make_round_gate,
 )
-from k0ntrol.workflow.research import _BLANK, _bullets, _prose
+from k0ntrol.workflow.research import (
+    _BLANK,
+    _bullets,
+    _prose,
+    make_publish_decisions,
+    make_publish_map,
+)
 from k0ntrol.workflow.routers import (
     _exhausted,
+    _max_questions,
+    _questions_asked,
     route_after_plan_spec,
     route_after_planner,
     route_limit_hit,
     route_plan_spec_gate,
+    route_question_limit,
 )
 from k0ntrol.workflow.state import RunState
+
+# The questions a ``continue`` at the question-limit gate grants (#127).
+_CONTINUE_QUESTIONS = 10
 
 
 def build_plan_graph(
@@ -51,14 +70,20 @@ def build_plan_graph(
     graph = StateGraph(RunState)
     graph.add_node("planner", make_planner_node(ctx))
     graph.add_node("round_gate", make_round_gate(ctx))
+    graph.add_node("question_limit", make_question_limit(ctx))
     graph.add_node("spec", make_spec_node(ctx))
     graph.add_node("spec_gate", make_spec_gate(ctx))
+    graph.add_node("publish_map", make_publish_map(ctx))
+    graph.add_node("publish_decisions", make_publish_decisions(ctx))
     graph.add_node("limit_hit", make_limit_hit(ctx))
     graph.add_edge(START, "planner")
     graph.add_conditional_edges("planner", route_after_planner)
     graph.add_edge("round_gate", "planner")
+    graph.add_conditional_edges("question_limit", route_question_limit)
     graph.add_conditional_edges("spec", route_after_plan_spec)
     graph.add_conditional_edges("spec_gate", route_plan_spec_gate)
+    graph.add_edge("publish_map", "publish_decisions")
+    graph.add_edge("publish_decisions", END)
     graph.add_conditional_edges("limit_hit", route_limit_hit)
     return graph.compile(checkpointer=checkpointer)
 
@@ -78,6 +103,87 @@ def make_planner_node(ctx: RunContext) -> Callable[[dict], dict]:
         return updates
 
     return node
+
+
+# --- the question-limit gate (#127) -----------------------------------------------
+
+
+def make_question_limit(ctx: RunContext) -> Callable[[dict], dict]:
+    """The question-limit gate: the round that would pass
+    ``max_questions`` is never asked and stays in ``questions`` as the
+    open questions. ``end`` → the spec draft, which lists them under
+    Not yet decided; ``handoff`` → the Map they chart for ``/research``;
+    ``continue`` → the pending round, with ten more questions granted.
+    """
+
+    def node(state: dict) -> dict:
+        decision = interrupt(_limit_payload(ctx, state))
+        verb = str(decision).strip().partition(" ")[0].lower()
+        while verb == "handoff" and ctx.tracker is None:
+            # The answered gate offered the hand off but this resume has
+            # no tracker to publish the Map — ask again without it.
+            decision = interrupt(_limit_payload(ctx, state))
+            verb = str(decision).strip().partition(" ")[0].lower()
+        if verb == "handoff":
+            return {
+                "question_limit_route": "publish_map",
+                "map": _handoff_map(state),
+            }
+        if verb == "continue":
+            return {
+                "question_limit_route": "round_gate",
+                "max_questions": (
+                    _questions_asked(state) + _CONTINUE_QUESTIONS
+                ),
+            }
+        return {"question_limit_route": "spec"}
+
+    return node
+
+
+def _limit_payload(ctx: RunContext, state: dict) -> dict:
+    """The gate's interrupt payload: the open questions, and the choices
+    the run can take — the hand off needs a tracker to publish the Map."""
+    options = [("end", "end the plan as is"), ("continue", "continue for 10 more")]
+    if ctx.tracker is not None:
+        options.insert(1, ("handoff", "hand off to research"))
+    return {
+        "gate": "question_limit",
+        "question": (
+            f"the Q&A reached the question limit "
+            f"({_questions_asked(state)}/{_max_questions(state)}) — "
+            f"{_either([label for _, label in options])}?"
+        ),
+        "answers": [verb for verb, _ in options],
+        "detail": _round_detail(state.get("questions", [])),
+    }
+
+
+def _either(options: list[str]) -> str:
+    if len(options) == 2:
+        return " or ".join(options)
+    return f"{options[0]}, {options[1]} or {options[2]}"
+
+
+def _handoff_map(state: dict) -> dict:
+    """The Map the hand off publishes, built in code: one Q&A decision
+    ticket per open question — the questions PLANNER still meant to ask
+    the human (spec #102, story 30)."""
+    idea = " ".join(_idea(state).split())
+    source = state.get("item_title") or idea
+    return {
+        "title": f"Open questions: {source[:72]}",
+        "destination": (
+            "decide each open question so the plan's spec can be drafted"
+        ),
+        "notes": f"Charted at a /plan Q&A's question limit.\n\nIdea: {idea}",
+        "decisions": [
+            {"question": q["question"], "type": "Q&A", "blocked_by": []}
+            for q in state.get("questions", [])
+        ],
+        "not_yet_specified": [],
+        "out_of_scope": [],
+    }
 
 
 # --- the spec gate (#121) -------------------------------------------------------
@@ -106,7 +212,9 @@ def make_spec_node(ctx: RunContext) -> Callable[[dict], dict]:
             return updates
         draft = result.structured_response
         if isinstance(draft, Spec):
-            updates["spec"] = draft.model_dump()
+            updates["spec"] = _with_open_questions(
+                draft.model_dump(), state.get("questions", [])
+            )
             return updates
         merged = {**state, **updates}
         if _exhausted(merged, "spec_attempts"):
@@ -151,6 +259,18 @@ def make_spec_gate(ctx: RunContext) -> Callable[[dict], dict]:
         }
 
     return node
+
+
+def _with_open_questions(spec: dict, questions: list[dict]) -> dict:
+    """Fold the questions the limit left unasked into Not yet decided —
+    in code, so ending as is never silently drops one (#127)."""
+    if not questions:
+        return spec
+    undecided = list(spec.get("not_yet_decided", []))
+    undecided += [
+        q["question"] for q in questions if q["question"] not in undecided
+    ]
+    return {**spec, "not_yet_decided": undecided}
 
 
 def render_spec(spec: dict | None) -> str:
@@ -212,6 +332,13 @@ def spec_brief(state: dict) -> str:
     for index, round_ in enumerate(state.get("rounds", []), 1):
         lines.append(f"\nRound {index}:")
         lines.extend(_answered_lines(round_))
+    open_ = state.get("questions") or []
+    if open_:
+        lines.append(
+            "\nThe question limit left these questions unasked — they "
+            "are not yet decided:"
+        )
+        lines.extend(f"  - {question['question']}" for question in open_)
     if state.get("spec_feedback"):
         lines.append(
             "\nYour last draft was rejected with this feedback: "

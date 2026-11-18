@@ -8,6 +8,7 @@ through ``retry_node`` (#42).
 from langgraph.graph import END
 
 DEFAULT_MAX_ATTEMPTS = 2
+DEFAULT_MAX_QUESTIONS = 25
 
 
 def route_after_tester(state: dict) -> str:
@@ -195,11 +196,34 @@ def _exhausted(state: dict, key: str) -> bool:
 
 
 def route_after_planner(state: dict) -> str:
-    """A limited round → the pause; questions → the round gate; a round
-    with no questions ends the Q&A and drafts the spec (#121)."""
+    """A limited round → the pause; a round with no questions ends the
+    Q&A and drafts the spec (#121); a round that would pass
+    ``max_questions`` stops at the question-limit gate (#127); else the
+    round gate asks it."""
     if state.get("limit"):
         return "limit_hit"
-    return "round_gate" if state.get("questions") else "spec"
+    questions = state.get("questions") or []
+    if not questions:
+        return "spec"
+    if _questions_asked(state) + len(questions) > _max_questions(state):
+        return "question_limit"
+    return "round_gate"
+
+
+def route_question_limit(state: dict) -> str:
+    """The limit gate's decision names the next node: end → the spec
+    draft, handoff → publish the Map, continue → the pending round."""
+    return state.get("question_limit_route") or "spec"
+
+
+def _questions_asked(state: dict) -> int:
+    """Questions shown at round gates so far — the pending round is
+    unasked and never counts."""
+    return sum(len(round_.get("questions", [])) for round_ in state.get("rounds", []))
+
+
+def _max_questions(state: dict) -> int:
+    return int(state.get("max_questions", DEFAULT_MAX_QUESTIONS))
 
 
 def route_after_plan_spec(state: dict) -> str:

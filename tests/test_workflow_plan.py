@@ -133,6 +133,17 @@ def read_call(call_id):
     )
 
 
+def section(body: str, title: str) -> str:
+    """The text between ``## <title>`` and the next ``##`` heading."""
+    lines = body.splitlines()
+    collected = []
+    for line in lines[lines.index(f"## {title}") + 1 :]:
+        if line.startswith("## "):
+            break
+        collected.append(line)
+    return "\n".join(collected).strip()
+
+
 def events(root):
     path = root / ".k0-mem" / "events.jsonl"
     if not path.exists():
@@ -728,6 +739,241 @@ def test_events_record_the_plan_run(tmp_path):
     assert ("gate", "spec", "approve") in kinds
     assert kinds[-1][0] == "run_end"
     assert log[-1]["outcome"] == "done"
+
+
+# --- the question-limit gate (#127) ------------------------------------------------
+
+
+def test_reaching_max_questions_pauses_at_the_limit_gate(tmp_path):
+    """The round that would pass ``max_questions`` is never asked: the
+    run pauses at the question-limit gate, the open questions shown."""
+    git_repo(tmp_path)
+    tracker = FakeTracker()
+    cfg = plan_cfg(max_questions=2)
+    pending = run_plan(
+        tmp_path, cfg, planner_model(round_call([Q1, Q2])), tracker=tracker
+    )
+    assert isinstance(pending, Pending) and pending.gate == "round"
+
+    gate = resume(
+        pending.run,
+        "1 yes, 2 yes",
+        root=tmp_path,
+        cfg=cfg,
+        init=models_init(planner_model(round_call([Q3]))),
+        tracker=tracker,
+    )
+
+    assert isinstance(gate, Pending)
+    assert gate.gate == "question_limit"
+    assert gate.answers == ("end", "handoff", "continue")
+    assert "2/2" in gate.question
+    assert "Sync or async?" in gate.detail
+
+
+def test_a_trackerless_limit_gate_offers_end_and_continue_only(tmp_path):
+    """The hand off publishes a Map — without a tracker it is not a
+    choice the gate can offer."""
+    git_repo(tmp_path)
+    cfg = plan_cfg(max_questions=1)
+    pending = run_plan(tmp_path, cfg, planner_model(round_call([Q1])))
+    assert isinstance(pending, Pending) and pending.gate == "round"
+
+    gate = resume(
+        pending.run,
+        "1 yes",
+        root=tmp_path,
+        cfg=cfg,
+        init=models_init(planner_model(round_call([Q2]))),
+    )
+
+    assert isinstance(gate, Pending) and gate.gate == "question_limit"
+    assert gate.answers == ("end", "continue")
+
+
+def test_a_configured_tracker_joins_an_idea_run_for_the_hand_off(tmp_path):
+    """``/plan <idea>`` does not need a tracker, but a configured one
+    joins the run so the hand off can publish the Map."""
+    git_repo(tmp_path)
+    cfg = plan_cfg(tracker="github", max_questions=1)
+    pending = run_plan(tmp_path, cfg, planner_model(round_call([Q1])))
+    assert isinstance(pending, Pending) and pending.gate == "round"
+
+    gate = resume(
+        pending.run,
+        "1 yes",
+        root=tmp_path,
+        cfg=cfg,
+        init=models_init(planner_model(round_call([Q2]))),
+    )
+
+    assert isinstance(gate, Pending) and gate.gate == "question_limit"
+    assert "handoff" in gate.answers
+
+
+def test_end_as_is_goes_to_the_spec_gate_with_the_open_questions(tmp_path):
+    """``end`` drafts the spec now; the unasked questions land under
+    Not yet decided in code — nothing silently disappears."""
+    git_repo(tmp_path)
+    cfg = plan_cfg(max_questions=1)
+    pending = run_plan(tmp_path, cfg, planner_model(round_call([Q1])))
+    gate = resume(
+        pending.run,
+        "1 yes",
+        root=tmp_path,
+        cfg=cfg,
+        init=models_init(planner_model(round_call([Q2]))),
+    )
+    assert isinstance(gate, Pending) and gate.gate == "question_limit"
+    drafter = planner_model(spec_call(not_yet_decided=["font choice"]))
+
+    spec = resume(
+        gate.run,
+        "end",
+        root=tmp_path,
+        cfg=cfg,
+        init=models_init(drafter),
+    )
+
+    assert isinstance(spec, Pending) and spec.gate == "spec"
+    undecided = section(spec.detail, "Not yet decided")
+    assert "Where is it tested?" in undecided
+    assert "font choice" in undecided
+    assert "Where is it tested?" in drafter.invocations[0][-1].content
+
+
+def test_handoff_charts_a_map_whose_decisions_are_the_open_questions(tmp_path):
+    """``handoff`` publishes a Map whose decision tickets are the open
+    questions — typed Q&A, the questions PLANNER still meant to ask."""
+    git_repo(tmp_path)
+    tracker = FakeTracker()
+    cfg = plan_cfg(max_questions=1)
+    pending = run_plan(
+        tmp_path, cfg, planner_model(round_call([Q1])), tracker=tracker
+    )
+    gate = resume(
+        pending.run,
+        "1 yes",
+        root=tmp_path,
+        cfg=cfg,
+        init=models_init(planner_model(round_call([Q2, Q3]))),
+        tracker=tracker,
+    )
+    assert isinstance(gate, Pending) and gate.gate == "question_limit"
+
+    outcome = resume(
+        gate.run,
+        "handoff",
+        root=tmp_path,
+        cfg=cfg,
+        init=models_init(),
+        tracker=tracker,
+    )
+
+    assert isinstance(outcome, Outcome) and outcome.outcome == "done"
+    map_item = tracker.read_work_item("1")
+    assert "Open questions" in map_item.title
+    children = tracker.list_children("1")
+    assert [child.title for child in children] == [
+        "Where is it tested?",
+        "Sync or async?",
+    ]
+    for child in children:
+        assert "Q&A" in tracker.read_work_item(child.ref).body
+
+
+def test_continue_asks_the_pending_round_then_grants_ten_more(tmp_path):
+    """``continue`` asks the round that did not fit, then allows ten
+    more questions before the limit gate returns."""
+    git_repo(tmp_path)
+    cfg = plan_cfg(max_questions=1)
+    pending = run_plan(tmp_path, cfg, planner_model(round_call([Q1])))
+    gate = resume(
+        pending.run,
+        "1 yes",
+        root=tmp_path,
+        cfg=cfg,
+        init=models_init(planner_model(round_call([Q2]))),
+    )
+    assert gate.gate == "question_limit"
+
+    round_again = resume(gate.run, "continue", root=tmp_path, cfg=cfg)
+
+    assert isinstance(round_again, Pending) and round_again.gate == "round"
+    assert "Where is it tested?" in round_again.detail
+
+
+def test_continue_relimits_once_the_ten_more_are_asked(tmp_path):
+    """After ``continue`` the cap is ten questions higher: rounds ask
+    while they fit, and the limit gate returns."""
+    git_repo(tmp_path)
+    cfg = plan_cfg(max_questions=1)
+    seven = [
+        {"number": i, "question": f"question {i}?", "recommendation": f"r{i}"}
+        for i in range(1, 8)
+    ]
+    pending = run_plan(tmp_path, cfg, planner_model(round_call([Q1])))
+    gate = resume(
+        pending.run,
+        "1 yes",
+        root=tmp_path,
+        cfg=cfg,
+        init=models_init(planner_model(round_call([Q2]))),
+    )
+    gate = resume(gate.run, "continue", root=tmp_path, cfg=cfg)
+    assert isinstance(gate, Pending) and gate.gate == "round"
+
+    # asked 1; continue grants 11. Q2, then seven, then one fit (10/11).
+    for answer, questions in (
+        ("2 yes", seven),
+        ("all yes", [Q1]),
+    ):
+        gate = resume(
+            gate.run,
+            answer,
+            root=tmp_path,
+            cfg=cfg,
+            init=models_init(planner_model(round_call(questions))),
+        )
+        assert isinstance(gate, Pending) and gate.gate == "round"
+
+    gate = resume(
+        gate.run,
+        "all yes",
+        root=tmp_path,
+        cfg=cfg,
+        init=models_init(planner_model(round_call([Q2, Q3]))),
+    )
+
+    assert isinstance(gate, Pending) and gate.gate == "question_limit"
+
+
+def test_the_limit_gate_is_recorded_in_the_events(tmp_path):
+    git_repo(tmp_path)
+    cfg = plan_cfg(max_questions=1)
+    pending = run_plan(tmp_path, cfg, planner_model(round_call([Q1])))
+    gate = resume(
+        pending.run,
+        "1 yes",
+        root=tmp_path,
+        cfg=cfg,
+        init=models_init(planner_model(round_call([Q2]))),
+    )
+    spec = resume(
+        gate.run,
+        "end",
+        root=tmp_path,
+        cfg=cfg,
+        init=models_init(planner_model(spec_call())),
+    )
+    outcome = resume(spec.run, "ok", root=tmp_path, cfg=cfg)
+    assert outcome.outcome == "done"
+
+    kinds = [
+        (e["kind"], e.get("gate"), e.get("result")) for e in events(tmp_path)
+    ]
+    assert ("gate", "question_limit", "waiting") in kinds
+    assert ("gate", "question_limit", "end") in kinds
 
 
 def test_plan_public_functions_have_complete_annotations():
