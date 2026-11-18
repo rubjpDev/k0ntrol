@@ -565,16 +565,22 @@ def _item_preflight(kind: str, input_text: str, tracker, root: Path):
     another parent's children are no decision tickets.
     """
     if kind in ("plan", "research", "triage"):
-        item = _work_item(input_text, tracker, root, kind)
-        if kind == "research" and item is not None:
-            _refuse_not_map(item)
-        return item
+        return _read_only_item(kind, input_text, tracker, root)
     if kind != "full" and not (kind == "implement" and input_text.startswith("#")):
         return None
     _refuse_dirty(root, f"/{kind}")
     item = _work_item(input_text, tracker, root, kind)
     if kind == "implement" and item is not None:
         _refuse_not_ready(item, tracker)
+    return item
+
+
+def _read_only_item(kind: str, input_text: str, tracker, root: Path):
+    """The ``#<n>`` read for the planning kinds — no tree, no label; but
+    a ``/research #<n>`` carrier must be a Map."""
+    item = _work_item(input_text, tracker, root, kind)
+    if kind == "research" and item is not None:
+        _refuse_not_map(item)
     return item
 
 
