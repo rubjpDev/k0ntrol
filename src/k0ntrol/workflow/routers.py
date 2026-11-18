@@ -186,3 +186,14 @@ def route_after_planner(state: dict) -> str:
     if state.get("limit"):
         return "limit_hit"
     return "round_gate" if state.get("questions") else END
+
+
+# --- /research (#124): chart the map, then publish ---------------------------------
+
+
+def route_after_chart(state: dict) -> str:
+    """A limited or attempts-exhausted chart → the pause; a charted map →
+    publish; anything else → PLANNER charts again."""
+    if state.get("limit"):
+        return "limit_hit"
+    return "publish_map" if state.get("map") else "planner"

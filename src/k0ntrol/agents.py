@@ -22,7 +22,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from importlib.resources import files
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 from uuid import uuid4
 
 from langchain.agents import create_agent
@@ -197,6 +197,37 @@ class TicketList(BaseModel):
         return self
 
 
+class DecisionTicket(BaseModel):
+    """One open question on a Map, typed by who answers it (#124)."""
+
+    question: str
+    type: Literal["research", "Q&A", "human"]
+    blocked_by: list[int] = Field(default_factory=list)
+
+
+class ChartedMap(BaseModel):
+    """PLANNER's structured output: the map ``/research`` charts."""
+
+    title: str
+    destination: str
+    notes: str = ""
+    decisions: list[DecisionTicket]
+    not_yet_specified: list[str] = Field(default_factory=list)
+    out_of_scope: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _blockers_point_backwards(self) -> "ChartedMap":
+        for index, decision in enumerate(self.decisions):
+            if any(
+                not _earlier_ticket(index, blocker)
+                for blocker in decision.blocked_by
+            ):
+                raise ValueError(
+                    "decision blockers must be earlier decision indexes"
+                )
+        return self
+
+
 class ResearchCitation(BaseModel):
     """A primary source RESEARCHER cites."""
 
@@ -212,7 +243,7 @@ class ResearchFinding(BaseModel):
     citations: list[ResearchCitation] = Field(min_length=1)
 
 
-_PLANNER_OUTPUT = QuestionRound | Spec | TicketList
+_PLANNER_OUTPUT = QuestionRound | Spec | TicketList | ChartedMap
 
 # Agents whose ``create_agent`` gets a structured ``response_format`` (spec
 # #33): the schema becomes a tool the model calls; the validated value lands
