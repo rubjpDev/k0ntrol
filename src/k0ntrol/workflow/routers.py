@@ -173,6 +173,20 @@ def route_implement_ci_gate(state: dict) -> str:
     return _route_ci(state, prefix="", skipped="implementer")
 
 
+def route_after_conventions_review(state: dict) -> str:
+    """A limited REVIEWER run never posts; else the Conventions review posts."""
+    if state.get("limit"):
+        return "limit_hit"
+    return "post_conventions"
+
+
+def route_after_contract_review(state: dict) -> str:
+    """A limited REVIEWER run never posts; else the Contract review posts."""
+    if state.get("limit"):
+        return "limit_hit"
+    return "post_contract"
+
+
 def _exhausted(state: dict, key: str) -> bool:
     return state.get(key, 0) >= state.get("max_attempts", DEFAULT_MAX_ATTEMPTS)
 

@@ -72,6 +72,16 @@ class RunState(TypedDict, total=False):
     seam_feedback: str | None  # the feedback of the last seam-gate reject
     implementer_attempts: int  # IMPLEMENTER build runs so far (VALIDATOR loop)
 
+    # /implement #<n> (#118): once the draft change is open, REVIEWER runs
+    # twice with fresh context — a Conventions review and a Contract
+    # review — each posted on the change as its own labelled review.
+    conventions_review: dict | None  # the Conventions Review as a plain dict
+    contract_review: dict | None  # the Contract Review as a plain dict
+    conventions_review_attempts: int  # Conventions REVIEWER runs so far
+    contract_review_attempts: int  # Contract REVIEWER runs so far
+    conventions_review_round: int  # Conventions reviews produced (marker suffix)
+    contract_review_round: int  # Contract reviews produced (marker suffix)
+
     # /plan (#120): the Q&A definition — PLANNER's rounds of numbered
     # questions, each round answered by the human in one line.
     rounds: list[dict]  # answered rounds: {"questions": [...], "answer": str}

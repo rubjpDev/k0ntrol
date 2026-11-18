@@ -200,7 +200,7 @@ def start(
         busy = _busy_run(saver, ctx, input_text, tracker, root)
         if busy is not None:
             return busy
-        _doctor_gate(check, cfg, kind, root)
+        _doctor_gate(check, cfg, kind, root, input_text)
         _rescan(scan, root)
         item = _item_preflight(kind, input_text, tracker, root)
         graph = _BUILDERS[kind](ctx, saver)
@@ -398,10 +398,21 @@ def _resume_command(values: dict) -> str:
     return f"/{values.get('kind')} <task>"
 
 
-def _doctor_gate(check: Callable, cfg: dict, kind: str, root: Path) -> None:
-    checks = check(cfg, names=_ROSTER[kind], root=root)
+def _doctor_gate(
+    check: Callable, cfg: dict, kind: str, root: Path, input_text: str
+) -> None:
+    checks = check(cfg, names=_roster_for(kind, input_text), root=root)
     if has_errors(checks):
         raise RunRefused(report_lines(checks))
+
+
+def _roster_for(kind: str, input_text: str) -> tuple[str, ...]:
+    """The roster the doctor gate checks on this run's path:
+    ``/implement #<n>`` also runs REVIEWER (#118); the working-tree path
+    never does, so it must not be refused for a reviewer's provider."""
+    if kind == "implement" and input_text.startswith("#"):
+        return ("agents.implementer", "agents.reviewer", "helpers.bulk_read")
+    return _ROSTER[kind]
 
 
 def _rescan(scan: Callable, root: Path) -> None:
@@ -651,6 +662,10 @@ def _implement_state(item) -> dict:
                 "task": latest_agent_brief(item) or item.body,
                 "item_ref": item.ref,
                 "item_title": item.title,
+                "conventions_review_attempts": 0,
+                "contract_review_attempts": 0,
+                "conventions_review_round": 0,
+                "contract_review_round": 0,
             }
         )
     return state
@@ -689,7 +704,7 @@ def _runnable(run_id: str, ctx: RunContext, session_id=None) -> RunnableConfig:
     # Always explicit (langgraph's default is a safety net, not a budget):
     # each loop-back costs at most two super-steps per agent node.
     attempts = ctx.cfg.get("max_attempts", 2)
-    slack = 16 if ctx.kind == "full" else _OUTER_STEPS_SLACK
+    slack = 16 if ctx.kind in ("full", "implement") else _OUTER_STEPS_SLACK
     config["recursion_limit"] = _OUTER_STEPS_PER_ATTEMPT * attempts + slack
     if ctx.trace is not None and ctx.trace.handler is not None:
         callbacks.append(ctx.trace.handler)
