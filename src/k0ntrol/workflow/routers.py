@@ -255,9 +255,9 @@ def route_after_tickets(state: dict) -> str:
 
 
 def route_ticket_gate(state: dict) -> str:
-    """``redo`` → cut again with the feedback; ``ok`` → done: publishing
-    the spec and its tickets is #123."""
-    return END if state.get("tickets_approved") else "tickets"
+    """``redo`` → cut again with the feedback; ``ok`` → publish the
+    spec and its tickets (#123)."""
+    return "publish_spec" if state.get("tickets_approved") else "tickets"
 
 
 # --- /research (#124): chart the map, then publish ---------------------------------

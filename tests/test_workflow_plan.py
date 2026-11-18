@@ -18,6 +18,7 @@ import pytest
 from langchain_core.messages import AIMessage
 
 from fakes import FakeChatModel, FakeTracker, cfg_with
+from k0ntrol.tracker import TrackerError
 from k0ntrol.workflow import (
     Outcome,
     Pending,
@@ -1028,7 +1029,9 @@ def test_the_limit_gate_is_recorded_in_the_events(tmp_path):
 # --- the ticket gate (#122) ------------------------------------------------------
 
 
-def to_ticket_gate(tmp_path, cfg=None, tickets=None, planner=None):
+def to_ticket_gate(
+    tmp_path, cfg=None, tickets=None, planner=None, tracker=None, input=IDEA
+):
     """``/plan`` through an approved spec, paused at the ticket gate."""
     git_repo(tmp_path)
     cfg = cfg or plan_cfg()
@@ -1036,6 +1039,8 @@ def to_ticket_gate(tmp_path, cfg=None, tickets=None, planner=None):
         tmp_path,
         cfg,
         planner or planner_model(round_call([]), spec_call()),
+        tracker=tracker,
+        input=input,
     )
     assert isinstance(pending, Pending) and pending.gate == "spec"
     cutter = planner_model(ticket_call(tickets if tickets is not None else [SLICE, WIRED]))
@@ -1291,6 +1296,139 @@ def test_the_spec_drafted_from_a_map_links_the_map(tmp_path):
 
     assert isinstance(pending, Pending)
     assert f"#{item.ref}" in pending.detail
+
+
+# --- publishing the spec and its tickets (#123) -------------------------------------
+
+
+class FlakyTracker(FakeTracker):
+    """A tracker that dies once mid-publish, like a provider outage."""
+
+    def __init__(self, fail_after: int):
+        super().__init__()
+        self.fail_after = fail_after
+
+    def create_child_work_item(self, parent, title, body, *, run, node):
+        if self.fail_after is not None:
+            if self.fail_after == 0:
+                raise TrackerError("provider down")
+            self.fail_after -= 1
+        return super().create_child_work_item(
+            parent, title, body, run=run, node=node
+        )
+
+
+def to_published(tmp_path, tickets=None, input=IDEA, tracker=None):
+    """``/plan`` through the ticket gate's ``ok``: the run done, the
+    spec and its tickets on the tracker (#123)."""
+    tracker = tracker or FakeTracker()
+    cfg = plan_cfg(tracker="github")
+    gate, _ = to_ticket_gate(
+        tmp_path, cfg=cfg, tickets=tickets, tracker=tracker, input=input
+    )
+    return resume(gate.run, "ok", root=tmp_path, cfg=cfg, tracker=tracker), tracker
+
+
+def test_ok_publishes_the_spec_as_the_parent_work_item(tmp_path):
+    """``ok`` at the ticket gate publishes the Spec as the parent work
+    item: its title, its rendered body — the same rendering the gate
+    showed (#123)."""
+    outcome, tracker = to_published(tmp_path)
+
+    assert isinstance(outcome, Outcome) and outcome.outcome == "done"
+    spec_item = tracker.read_work_item("1")
+    assert spec_item.title == "Calc"  # spec_call's title
+    assert "a calc module" in spec_item.body  # the rendered spec
+
+
+def test_each_ticket_is_a_child_in_order_with_links_and_label(tmp_path):
+    """Every ticket is a child of the spec, blockers first — the
+    glossary ticket first — each with its native blocker links and the
+    ready-for-agent label (#123)."""
+    outcome, tracker = to_published(tmp_path)
+
+    children = tracker.list_children("1")
+    assert [child.title for child in children] == [
+        "Record the spec's glossary and ADR changes",
+        "Build the calc slice",
+        "Wire the gate",
+    ]
+    for child in children:
+        assert "ready-for-agent" in tracker.read_labels(child.ref)
+    blockers = tracker.list_blockers(children[2].ref)
+    assert [b.ref for b in blockers] == [children[0].ref, children[1].ref]
+
+
+def test_each_ticket_body_carries_the_one_format(tmp_path):
+    """The one ticket format: what to build, seams, acceptance
+    criteria, blocked by, and the parent (ADR 0012, #123)."""
+    outcome, tracker = to_published(tmp_path)
+
+    children = tracker.list_children("1")
+    body = tracker.read_work_item(children[2].ref).body
+    assert "the CLI gate around it" in body  # what to build
+    assert "## Seams" in body
+    assert "## Acceptance criteria" in body
+    assert "## Blocked by" in body
+    assert f"#{children[0].ref}" in body  # blocked by the glossary ticket
+    assert "Parent: #1" in body
+
+
+def test_plan_on_an_item_posts_the_spec_on_it_and_parents_the_tickets(tmp_path):
+    """``/plan #<n>`` updates the item's plan: the spec is posted on it
+    rather than a new item opened, and the tickets are its children
+    (#123)."""
+    tracker = FakeTracker()
+    item = tracker.create_work_item("Calc", "a calc module")
+
+    outcome, tracker = to_published(tmp_path, input=f"#{item.ref}", tracker=tracker)
+
+    assert isinstance(outcome, Outcome) and outcome.outcome == "done"
+    item = tracker.read_work_item("1")
+    assert any("Problem Statement" in c.body for c in item.comments)
+    assert len(tracker.list_children("1")) == 3
+    assert tracker._next_item == 5  # item + 3 children; no spec item
+
+
+def test_plan_on_a_map_publishes_the_spec_as_its_own_item(tmp_path):
+    """A decided Map is never the spec's parent — its children are
+    decision tickets, so the spec gets its own item that links the map,
+    and the build tickets are children of the spec, not the map."""
+    tracker = FakeTracker()
+    map_item = decided_map(tracker)
+
+    outcome, tracker = to_published(
+        tmp_path, input=f"#{map_item.ref}", tracker=tracker
+    )
+
+    assert isinstance(outcome, Outcome) and outcome.outcome == "done"
+    spec_ref = next(
+        ref
+        for ref, item in tracker._items.items()
+        if "Problem Statement" in item["body"]
+    )
+    spec_item = tracker.read_work_item(spec_ref)
+    assert f"**Map:** #{map_item.ref}" in spec_item.body
+    assert len(tracker.list_children(spec_item.ref)) == 3  # the tickets
+    assert len(tracker.list_children(map_item.ref)) == 1  # its decision only
+
+
+def test_resuming_mid_publish_duplicates_no_work_items(tmp_path):
+    """A run that dies between children publishes the rest on resume —
+    the earlier children are recovered by their markers, not recreated
+    (#123)."""
+    tracker = FlakyTracker(fail_after=1)  # dies on the second child create
+    cfg = plan_cfg(tracker="github")
+    gate, _ = to_ticket_gate(tmp_path, cfg=cfg, tracker=tracker)
+
+    with pytest.raises(TrackerError):
+        resume(gate.run, "ok", root=tmp_path, cfg=cfg, tracker=tracker)
+
+    tracker.fail_after = None
+    outcome = resume(gate.run, None, root=tmp_path, cfg=cfg, tracker=tracker)
+
+    assert isinstance(outcome, Outcome) and outcome.outcome == "done"
+    assert len(tracker.list_children("1")) == 3  # 1 + 2 more, not 4
 
 
 def test_plan_public_functions_have_complete_annotations():
