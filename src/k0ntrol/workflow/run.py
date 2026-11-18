@@ -634,6 +634,11 @@ def _plan_state(cfg: dict, item) -> dict:
         "max_round_questions": cfg.get(
             "max_round_questions", DEFAULT_MAX_ROUND_QUESTIONS
         ),
+        "spec": None,
+        "spec_attempts": 0,
+        "spec_approved": False,
+        "spec_rejections": [],
+        "spec_feedback": None,
     }
     if item is not None:
         state.update(

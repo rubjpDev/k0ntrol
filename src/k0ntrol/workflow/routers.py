@@ -191,15 +191,29 @@ def _exhausted(state: dict, key: str) -> bool:
     return state.get(key, 0) >= state.get("max_attempts", DEFAULT_MAX_ATTEMPTS)
 
 
-# --- /plan (#120): the Q&A definition's rounds ------------------------------------
+# --- /plan (#120, #121): the Q&A's rounds, then the spec gate ---------------------
 
 
 def route_after_planner(state: dict) -> str:
     """A limited round → the pause; questions → the round gate; a round
-    with no questions ends the Q&A."""
+    with no questions ends the Q&A and drafts the spec (#121)."""
     if state.get("limit"):
         return "limit_hit"
-    return "round_gate" if state.get("questions") else END
+    return "round_gate" if state.get("questions") else "spec"
+
+
+def route_after_plan_spec(state: dict) -> str:
+    """A limited draft → the pause; a drafted spec → its gate; anything
+    else → PLANNER drafts again while attempts remain."""
+    if state.get("limit"):
+        return "limit_hit"
+    return "spec_gate" if state.get("spec") else "spec"
+
+
+def route_plan_spec_gate(state: dict) -> str:
+    """``redo`` → draft again with the feedback; ``ok`` → the ticket
+    breakdown (#122) — END until it lands, the run already ``done``."""
+    return END if state.get("spec_approved") else "spec"
 
 
 # --- /research (#124): chart the map, then publish ---------------------------------

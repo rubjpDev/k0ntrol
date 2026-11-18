@@ -33,8 +33,8 @@ class RunState(TypedDict, total=False):
     item_title: str
     branch: str  # k0/<n>-<slug>
     brief: dict | None  # SPEC's structured AgentBrief as a plain dict
-    spec_attempts: int  # SPEC agent runs so far
-    spec_approved: bool  # the human ok'd the brief
+    spec_attempts: int  # spec-drafting runs so far (/full's SPEC, /plan's draft)
+    spec_approved: bool  # the human ok'd the brief or draft at the spec gate
     spec_rejections: list[str]  # earlier spec-gate feedback, for the comment
     spec_feedback: str | None  # the feedback of the last spec-gate reject
     test_approved: bool  # the human ok'd the tests
@@ -83,11 +83,14 @@ class RunState(TypedDict, total=False):
     contract_review_round: int  # Contract reviews produced (marker suffix)
 
     # /plan (#120): the Q&A definition — PLANNER's rounds of numbered
-    # questions, each round answered by the human in one line.
+    # questions, each round answered by the human in one line. #121:
+    # once a round holds no questions PLANNER drafts the Spec under its
+    # own brief, and the spec gate decides ok / redo.
     rounds: list[dict]  # answered rounds: {"questions": [...], "answer": str}
     questions: list[dict]  # the open round's questions (the gate's detail)
     planner_attempts: int  # PLANNER runs so far
     max_round_questions: int  # how many questions one round may hold
+    spec: dict | None  # the Spec draft at the spec gate (plain dict)
 
     # /research (#124): PLANNER's charted map, then the published refs.
     map: dict | None  # the ChartedMap as a plain dict
