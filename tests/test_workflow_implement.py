@@ -15,6 +15,7 @@ import pytest
 from langchain_core.messages import AIMessage
 
 from fakes import STUB_TEST_CMD, FakeChatModel, FakeTracker, cfg_with
+from k0ntrol.tracker import TrackerError
 from k0ntrol.workflow import (
     Outcome,
     Pending,
@@ -616,7 +617,13 @@ def test_seam_proposal_hitting_its_call_limit_pauses(tmp_path):
 
 
 def item_cfg(**overrides):
-    return implement_cfg(tracker="github", **overrides)
+    cfg = implement_cfg(tracker="github", **overrides)
+    cfg["agents"]["reviewer"] = {
+        "provider": "anthropic",
+        "model": "m",
+        "model_calls": 25,
+    }
+    return cfg
 
 
 def item_repo(root: Path) -> None:
@@ -724,7 +731,7 @@ def test_a_ready_item_is_pushed_and_opened_as_a_draft_change(tmp_path):
     item = ready_item(tracker)
     builder = builder_model()
 
-    result = run_item(tmp_path, item_cfg(), tracker, builder)
+    result = run_item(tmp_path, item_cfg(), tracker, builder, passing_reviewer())
 
     assert isinstance(result, Outcome)
     assert result.outcome == "done"
@@ -763,7 +770,7 @@ def test_implementer_runs_on_the_latest_agent_brief(tmp_path):
     )
     builder = builder_model()
 
-    run_item(tmp_path, item_cfg(), tracker, builder)
+    run_item(tmp_path, item_cfg(), tracker, builder, passing_reviewer())
 
     first = builder.invocations[0][-1].content
     assert "brief v2" in first
@@ -783,7 +790,7 @@ def test_an_untrusted_brief_comment_is_never_the_contract(tmp_path):
     )
     builder = builder_model()
 
-    run_item(tmp_path, item_cfg(), tracker, builder)
+    run_item(tmp_path, item_cfg(), tracker, builder, passing_reviewer())
 
     first = builder.invocations[0][-1].content
     assert "BODY TEXT" in first
@@ -799,7 +806,7 @@ def test_a_k0_created_item_runs_without_the_label(tmp_path):
     )
     tracker.calls.clear()
 
-    result = run_item(tmp_path, item_cfg(), tracker, builder_model())
+    result = run_item(tmp_path, item_cfg(), tracker, builder_model(), passing_reviewer())
 
     assert isinstance(result, Outcome) and result.outcome == "done"
     assert tracker.read_change("k0/1-calc-answers-42").is_draft
@@ -818,6 +825,39 @@ def test_a_marker_quoted_in_the_body_is_not_a_k0_ticket(tmp_path):
 
     with pytest.raises(RunRefused, match="/triage"):
         run_item(tmp_path, item_cfg(), tracker, input=f"#{item.ref}")
+
+
+def review_call(summary, findings, call_id):
+    return AIMessage(
+        content="",
+        tool_calls=[
+            {
+                "name": "Review",
+                "args": {"summary": summary, "findings": findings},
+                "id": call_id,
+            }
+        ],
+    )
+
+
+def reviewer_model(*messages):
+    """A REVIEWER fake answering the Review structured output."""
+    return FakeChatModel(messages=list(messages))
+
+
+def passing_reviewer():
+    """A REVIEWER fake for the tracker path: two passes, no findings."""
+    return reviewer_model(
+        review_call("conventions pass", [], "c1"),
+        review_call("contract pass", [], "c2"),
+    )
+
+
+def read_call(path, call_id):
+    return AIMessage(
+        content="",
+        tool_calls=[{"name": "read_file", "args": {"path": path}, "id": call_id}],
+    )
 
 
 WORKFLOW_SRC = "name: ci\non: push\njobs: {}\n"
@@ -864,7 +904,7 @@ def test_github_changes_wait_at_the_ci_gate(tmp_path):
         "ok",
         root=tmp_path,
         cfg=item_cfg(),
-        init=models_init(),
+        init=models_init(passing_reviewer()),
         tracker=tracker,
     )
 
@@ -909,7 +949,7 @@ def test_a_rejected_ci_gate_sends_the_feedback_to_implementer(tmp_path):
         "ok",
         root=tmp_path,
         cfg=item_cfg(),
-        init=models_init(),
+        init=models_init(passing_reviewer()),
         tracker=tracker,
     )
     assert done.outcome == "done"
@@ -974,12 +1014,194 @@ def test_validator_red_retries_implementer_on_the_item_path(tmp_path):
         ]
     )
 
-    result = run_item(tmp_path, item_cfg(), tracker, builder)
+    result = run_item(tmp_path, item_cfg(), tracker, builder, passing_reviewer())
 
     assert isinstance(result, Outcome) and result.outcome == "done"
     retry_brief = builder.invocations[5][-1].content
     assert "Work item #1: Calc answers 42" in retry_brief
     assert "VALIDATOR is still red" in retry_brief
+
+
+# --- /implement #<n>: the two reviews on the change (ticket #118) ---------------
+
+
+def test_the_draft_change_gets_conventions_and_contract_reviews(tmp_path):
+    """After the draft change opens, REVIEWER runs twice with fresh
+    context — a Conventions review and a Contract review — and each is
+    posted on the change as its own labelled review (ticket #118)."""
+    item_repo(tmp_path)
+    tracker = FakeTracker(git_runner=git_runner_for(tmp_path))
+    ready_item(tracker)
+    reviewer = reviewer_model(
+        review_call("fits the rules", ["minor smell"], "c1"),
+        review_call("does what was asked", [], "c2"),
+    )
+
+    result = run_item(tmp_path, item_cfg(), tracker, builder_model(), reviewer)
+
+    assert isinstance(result, Outcome) and result.outcome == "done"
+    change = tracker.read_change("k0/1-calc-answers-42")
+    reviews = tracker.reviews_on(change.ref)
+    assert len(reviews) == 2
+    assert f"run={result.run} node=post_conventions" in reviews[0]
+    assert f"run={result.run} node=post_contract" in reviews[1]
+    assert "## Conventions review" in reviews[0]
+    assert "## Contract review" in reviews[1]
+    assert "fits the rules" in reviews[0] and "minor smell" in reviews[0]
+    assert "does what was asked" in reviews[1]
+    # each review came from its own REVIEWER run on fresh context
+    assert len(reviewer.invocations) == 2
+    assert "Conventions" in reviewer.invocations[0][-1].content
+    assert "Contract" in reviewer.invocations[1][-1].content
+
+
+def test_the_conventions_brief_judges_rules_and_smells_never_gates(tmp_path):
+    """The Conventions run's brief carries the fixed smell list and names
+    the checks the run's gates already enforce, so REVIEWER skips them."""
+    item_repo(tmp_path)
+    tracker = FakeTracker(git_runner=git_runner_for(tmp_path))
+    ready_item(tracker)
+    cfg = item_cfg(gates=[{"name": "mypy", "cmd": "true"}])
+    reviewer = passing_reviewer()
+
+    run_item(tmp_path, cfg, tracker, builder_model(), reviewer)
+
+    brief = reviewer.invocations[0][-1].content
+    assert "Conventions" in brief
+    assert "Mysterious Name" in brief and "Feature Envy" in brief
+    assert STUB_TEST_CMD in brief  # the test command a gate already runs
+    assert "mypy" in brief
+
+
+def test_the_contract_brief_judges_the_change_against_the_work_item(tmp_path):
+    """The Contract run's brief carries the work item (the contract) and
+    the change's diff — and the review quotes the item for findings."""
+    item_repo(tmp_path)
+    tracker = FakeTracker(git_runner=git_runner_for(tmp_path))
+    ready_item(tracker, body="build the calc module")
+    reviewer = passing_reviewer()
+
+    run_item(tmp_path, item_cfg(), tracker, builder_model(), reviewer)
+
+    brief = reviewer.invocations[1][-1].content
+    assert "Contract" in brief
+    assert "build the calc module" in brief
+    assert "## Diff" in brief
+
+
+def test_a_rerun_post_node_never_posts_a_review_twice(tmp_path):
+    """The post nodes are marker-idempotent: a review that posted but whose
+    node's answer was lost is not posted again when the run resumes (#118)."""
+    item_repo(tmp_path)
+    tracker = _FlakyPostTracker(git_runner=git_runner_for(tmp_path))
+    ready_item(tracker)
+
+    with pytest.raises(TrackerError):
+        run_item(tmp_path, item_cfg(), tracker, builder_model(), passing_reviewer())
+
+    run_id = events(tmp_path)[0]["run"]
+    result = resume(
+        run_id,
+        None,
+        root=tmp_path,
+        cfg=item_cfg(),
+        init=models_init(
+            reviewer_model(review_call("contract pass", [], "c1"))
+        ),
+        tracker=tracker,
+    )
+
+    assert isinstance(result, Outcome) and result.outcome == "done"
+    change = tracker.read_change("k0/1-calc-answers-42")
+    reviews = tracker.reviews_on(change.ref)
+    assert len(reviews) == 2  # conventions posted once, contract once
+
+
+class _FlakyPostTracker(FakeTracker):
+    """``post_review`` succeeds, then reports a lost answer once."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._flaked = False
+
+    def post_review(self, ref, body, *, run, node):
+        super().post_review(ref, body, run=run, node=node)
+        if node == "post_conventions" and not self._flaked:
+            self._flaked = True
+            raise TrackerError("the post's answer was lost")
+
+
+def test_a_review_hitting_its_call_limit_pauses_mid_reviews(tmp_path):
+    """A limited REVIEWER run pauses at ``limit_hit`` — the Conventions
+    review already posted stays posted; ``retry`` finishes the Contract
+    pass and the run ends done."""
+    item_repo(tmp_path)
+    tracker = FakeTracker(git_runner=git_runner_for(tmp_path))
+    ready_item(tracker)
+    cfg = item_cfg()
+    cfg["agents"]["reviewer"]["model_calls"] = 3
+    reviewer = reviewer_model(
+        review_call("conventions pass", [], "c1"),
+        *[read_call("README.md", f"r{i}") for i in range(6)],
+    )
+
+    pending = run_item(tmp_path, cfg, tracker, builder_model(), reviewer)
+
+    assert isinstance(pending, Pending) and pending.gate == "limit_hit"
+    assert "contract_review" in pending.question
+    change = tracker.read_change("k0/1-calc-answers-42")
+    assert len(tracker.reviews_on(change.ref)) == 1  # conventions posted
+
+    done = resume(
+        pending.run,
+        "retry",
+        root=tmp_path,
+        cfg=cfg,
+        init=models_init(reviewer_model(review_call("contract pass", [], "c2"))),
+        tracker=tracker,
+    )
+
+    assert isinstance(done, Outcome) and done.outcome == "done"
+    assert len(tracker.reviews_on(change.ref)) == 2
+
+
+def test_the_item_run_gates_on_the_reviewer_provider(tmp_path):
+    """``/implement #<n>`` runs REVIEWER: its doctor gate checks the
+    reviewer's provider too (#118)."""
+    captured = {}
+
+    def record(cfg, *, names=None, **kwargs):
+        captured["names"] = tuple(names or ())
+        return []
+
+    item_repo(tmp_path)
+    tracker = FakeTracker(git_runner=git_runner_for(tmp_path))
+    ready_item(tracker)
+    run_item(
+        tmp_path,
+        item_cfg(),
+        tracker,
+        builder_model(),
+        passing_reviewer(),
+        check=record,
+    )
+
+    assert "agents.reviewer" in captured["names"]
+
+
+def test_the_task_run_does_not_gate_on_the_reviewer_provider(tmp_path):
+    """The working-tree path never runs REVIEWER, so a broken reviewer
+    provider must not refuse it."""
+    captured = {}
+
+    def record(cfg, *, names=None, **kwargs):
+        captured["names"] = tuple(names or ())
+        return []
+
+    git_repo(tmp_path)
+    run_implement(tmp_path, implement_cfg(), seams_model(), check=record)
+
+    assert "agents.reviewer" not in captured["names"]
 
 
 def test_implement_public_functions_have_complete_annotations():

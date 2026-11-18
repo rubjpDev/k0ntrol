@@ -187,13 +187,13 @@ def make_spec_node(ctx: RunContext) -> Callable[[dict], dict]:
             updates["spec_attempts"] = state.get("spec_attempts", 0)
             updates["limit"] = _call_limit(ctx, "spec", result)
             return updates
-        updates["brief"] = _brief_dict(result.structured_response)
+        updates["brief"] = brief_dict(result.structured_response)
         return updates
 
     return node
 
 
-def _brief_dict(response) -> dict | None:
+def brief_dict(response: Any) -> dict | None:
     if response is None:
         return None
     if hasattr(response, "model_dump"):
@@ -252,7 +252,7 @@ def make_post_brief(ctx: RunContext) -> Callable[[dict], dict]:
             state["item_ref"],
             render_brief(state["brief"]),
             run=ctx.run_id,
-            node=f"post_brief{_round_suffix(state, 'spec_round')}",
+            node=f"post_brief{round_suffix(state, 'spec_round')}",
         )
         return {}
 
@@ -269,7 +269,7 @@ def make_spec_comment(ctx: RunContext) -> Callable[[dict], dict]:
                 "spec", decider(ctx.root), state.get("spec_rejections", [])
             ),
             run=ctx.run_id,
-            node=f"spec_gate{_round_suffix(state, 'spec_round')}",
+            node=f"spec_gate{round_suffix(state, 'spec_round')}",
         )
         return {}
 
@@ -361,7 +361,7 @@ def make_test_comment(ctx: RunContext) -> Callable[[dict], dict]:
                 "test", decider(ctx.root), state.get("test_rejections", [])
             ),
             run=ctx.run_id,
-            node=f"test_gate{_round_suffix(state, 'spec_round')}",
+            node=f"test_gate{round_suffix(state, 'spec_round')}",
         )
         return {}
 
@@ -451,7 +451,7 @@ def make_push(ctx: RunContext) -> Callable[[dict], dict]:
 
 def make_reviewer_node(ctx: RunContext) -> Callable[[dict], dict]:
     """REVIEWER reads the item and the diff, returns a structured Review."""
-    brief = with_work_item(ctx, _review_brief(ctx))
+    brief = with_work_item(ctx, with_change(ctx, contract_brief))
 
     def node(state: dict) -> dict:
         attempt = state.get("reviewer_attempts", 0) + 1
@@ -469,25 +469,27 @@ def make_reviewer_node(ctx: RunContext) -> Callable[[dict], dict]:
             updates["reviewer_attempts"] = state.get("reviewer_attempts", 0)
             updates["limit"] = _call_limit(ctx, "reviewer", result)
             return updates
-        updates["review"] = _brief_dict(result.structured_response)
+        updates["review"] = brief_dict(result.structured_response)
         updates["review_round"] = state.get("review_round", 0) + 1
         return updates
 
     return node
 
 
-def _review_brief(ctx: RunContext) -> Callable[[dict], str]:
-    """The reviewer brief builder bound to the run's tracker reads: the PR
-    and its code diff go in, so REVIEWER never judges without reading the
-    change (#94)."""
+def with_change(
+    ctx: RunContext, brief: Callable[[dict], str]
+) -> Callable[[dict], str]:
+    """``brief`` plus the change as an agent sees it: the PR rendered like
+    a work item, and its code diff — so REVIEWER never judges without
+    reading the change (#94)."""
 
-    def brief(state: dict) -> str:
+    def build(state: dict) -> str:
         ref = state["change_ref"]
         change = render_work_item(ctx.tracker.read_work_item(ref))
         diff = code_diff(ctx.tracker.read_change_diff(ref))
-        return f"{reviewer_brief(state)}\n\n{change}\n\n## Diff\n\n{diff}"
+        return f"{brief(state)}\n\n{change}\n\n## Diff\n\n{diff}"
 
-    return brief
+    return build
 
 
 def code_diff(diff: str) -> str:
@@ -505,7 +507,7 @@ def make_post_review(ctx: RunContext) -> Callable[[dict], dict]:
             state["change_ref"],
             render_review(state.get("review")),
             run=ctx.run_id,
-            node=f"post_review{_round_suffix(state, 'review_round')}",
+            node=f"post_review{round_suffix(state, 'review_round')}",
         )
         return {}
 
@@ -726,25 +728,34 @@ def coder_brief(state: dict) -> str:
     return text
 
 
-def reviewer_brief(state: dict) -> str:
-    """REVIEWER's fresh context: the work item and the change to judge."""
+def contract_brief(state: dict) -> str:
+    """The Contract review's fresh context: the work item is the contract.
+
+    ``/full``'s one review and ``/implement #<n>``'s second pass judge the
+    same thing (#118): what the contract asked that is missing, what the
+    diff adds unasked, what looks done but wrong.
+    """
     return (
         f"Work item #{state['item_ref']}: {state['item_title']} — shown "
         "below; the latest ## Agent Brief comment is the contract.\n\n"
-        f"Review pull request {state['change_ref']}: its diff is below, "
-        "without the .k0-mem/ memory files. Read the files it touches with "
-        "the read tools. Call the Review tool exactly once with your summary "
-        "and findings."
+        f"Review pull request {state['change_ref']} — this is a Contract "
+        "review: judge the change against the work item and quote it for "
+        "each finding — work the contract asks that is missing or "
+        "partial, work the diff adds that was never asked for, and work "
+        "that looks done but wrong. Its diff is below, without the "
+        ".k0-mem/ memory files. Read the files it touches with the read "
+        "tools. Call the Review tool exactly once with your summary and "
+        "findings."
     )
 
 
-def render_review(review: dict | None) -> str:
-    """The ``## Review`` markdown: PR review body and gate detail."""
+def render_review(review: dict | None, label: str = "Review") -> str:
+    """The ``## <label>`` markdown: PR review body and gate detail."""
     if not review:
         return "(REVIEWER produced no review)"
     findings = "\n".join(f"- {item}" for item in review.get("findings", []))
     return (
-        "## Review\n\n"
+        f"## {label}\n\n"
         f"{review.get('summary', '')}\n\n"
         f"### Findings\n{findings or '- none'}\n"
     )
@@ -820,7 +831,7 @@ def _significant(text: str) -> set[str]:
     }
 
 
-def _round_suffix(state: dict, key: str) -> str:
+def round_suffix(state: dict, key: str) -> str:
     """``_<round>`` for a marker-idempotent node's second pass, "" first."""
     round_ = state.get(key, 1)
     return f"_{round_}" if round_ > 1 else ""
