@@ -1,3 +1,6 @@
+from rich.text import Text
+
+from k0ntrol.frontends.badges import service_badges
 from k0ntrol.frontends.banner import color_enabled, render_banner
 from k0ntrol.frontends.logo import LOGO
 
@@ -61,6 +64,19 @@ def test_color_banner_uses_the_decided_palette():
     assert "\x1b[38;2;156;163;175m" in text
     assert "\x1b[38;2;94;234;212m" in text
     assert "\x1b[38;2;167;139;250m" in text
+
+
+def test_a_pinned_width_survives_a_dumb_ambient_terminal(monkeypatch):
+    monkeypatch.setenv("TERM", "dumb")
+    badges = service_badges(tracker="linear", vcs="github", provider="anthropic")
+
+    text = render_banner(
+        version="0.1.0", provider="anthropic", cwd="/w",
+        color=True, badges=badges, width=120,
+    )
+
+    assert Text.from_ansi(text.splitlines()[0]).cell_len == 120
+    assert "Anthropic" in Text.from_ansi(text).plain
 
 
 def test_color_enabled_follows_no_color_and_tty(monkeypatch):
