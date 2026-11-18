@@ -236,8 +236,22 @@ def route_after_plan_spec(state: dict) -> str:
 
 def route_plan_spec_gate(state: dict) -> str:
     """``redo`` → draft again with the feedback; ``ok`` → the ticket
-    breakdown (#122) — END until it lands, the run already ``done``."""
-    return END if state.get("spec_approved") else "spec"
+    breakdown (#122)."""
+    return "tickets" if state.get("spec_approved") else "spec"
+
+
+def route_after_tickets(state: dict) -> str:
+    """A limited breakdown → the pause; a cut → its gate; anything else
+    → PLANNER cuts again while attempts remain (#122)."""
+    if state.get("limit"):
+        return "limit_hit"
+    return "ticket_gate" if state.get("tickets") else "tickets"
+
+
+def route_ticket_gate(state: dict) -> str:
+    """``redo`` → cut again with the feedback; ``ok`` → done: publishing
+    the spec and its tickets is #123."""
+    return END if state.get("tickets_approved") else "tickets"
 
 
 # --- /research (#124): chart the map, then publish ---------------------------------

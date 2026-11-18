@@ -102,6 +102,15 @@ class RunState(TypedDict, total=False):
     question_limit_route: str  # the limit gate's decision: spec | publish_map | round_gate
     spec: dict | None  # the Spec draft at the spec gate (plain dict)
 
+    # /plan #122: the approved spec cut into tickets — the first, made
+    # in code, records the glossary and ADR changes and blocks the rest.
+    ticket_size: str  # small | medium | large — a ticket's criteria cap
+    tickets: list[dict] | None  # the breakdown at the ticket gate
+    tickets_approved: bool  # the ticket gate's ok
+    tickets_attempts: int  # breakdown runs so far
+    ticket_rejections: list[str]  # the feedback of each redo so far
+    ticket_feedback: str | None  # the feedback the next breakdown gets
+
     # /research (#124): PLANNER's charted map, then the published refs.
     map: dict | None  # the ChartedMap as a plain dict
     decision_refs: list[str]  # child work-item refs, one per decision

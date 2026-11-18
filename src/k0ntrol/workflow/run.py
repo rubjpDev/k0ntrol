@@ -771,6 +771,12 @@ def _plan_state(cfg: dict, item) -> dict:
         "spec_approved": False,
         "spec_rejections": [],
         "spec_feedback": None,
+        "ticket_size": cfg.get("ticket_size", "small"),
+        "tickets": None,
+        "tickets_approved": False,
+        "tickets_attempts": 0,
+        "ticket_rejections": [],
+        "ticket_feedback": None,
     }
     if item is not None:
         state.update(
