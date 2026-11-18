@@ -1120,6 +1120,34 @@ def test_ticket_gate_redo_recuts_with_the_feedback(tmp_path):
     assert isinstance(outcome, Outcome) and outcome.outcome == "done"
 
 
+def test_the_breakdown_attempt_limit_pauses_and_retries_fresh(tmp_path):
+    """Two non-TicketList outputs pause the breakdown at its attempts
+    limit naming the real count, and ``retry`` restores the full
+    allowance — the counter is the node's own key (``tickets_attempts``,
+    like ``spec``/``spec_attempts``)."""
+    git_repo(tmp_path)
+    cfg = plan_cfg()
+    pending = run_plan(tmp_path, cfg, planner_model(round_call([]), spec_call()))
+    assert isinstance(pending, Pending) and pending.gate == "spec"
+
+    blocked = planner_model(round_call([]), round_call([]))
+    paused = resume(
+        pending.run, "ok", root=tmp_path, cfg=cfg, init=models_init(blocked)
+    )
+
+    assert isinstance(paused, Pending) and paused.gate == "limit_hit"
+    assert "tickets" in paused.question
+    assert "2/2" in paused.question  # the real count, not a wrong key's 0
+
+    recut = planner_model(round_call([]), ticket_call([SLICE], call_id="t9"))
+    gate = resume(
+        paused.run, "retry", root=tmp_path, cfg=cfg, init=models_init(recut)
+    )
+
+    # a wrong output, then a cut: only a reset counter reaches the gate
+    assert isinstance(gate, Pending) and gate.gate == "ticket"
+
+
 def fat_slice():
     """A PLANNER ticket over `small`'s acceptance-criteria count."""
     return {**SLICE, "acceptance_criteria": ["a", "b", "c", "d"]}

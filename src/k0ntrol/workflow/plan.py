@@ -355,7 +355,7 @@ def make_tickets_node(ctx: RunContext) -> Callable[[dict], dict]:
             "planner",
             state,
             tickets_brief,
-            attempts_key="ticket_attempts",
+            attempts_key="tickets_attempts",
             limit_node="tickets",
         )
         if result.limit_hit:
@@ -375,7 +375,7 @@ def _uncut(result: object, updates: dict, state: dict) -> dict:
     """No TicketList this run: cut again while attempts remain, then
     the attempts pause."""
     merged = {**state, **updates}
-    if _exhausted(merged, "ticket_attempts"):
+    if _exhausted(merged, "tickets_attempts"):
         updates["limit"] = _attempt_limit(
             merged, "tickets", "tickets", _last_output(result)
         )
@@ -442,7 +442,7 @@ def make_ticket_gate(ctx: RunContext) -> Callable[[dict], dict]:
         return {
             "tickets": None,
             "tickets_approved": False,
-            "ticket_attempts": 0,
+            "tickets_attempts": 0,
             "ticket_feedback": feedback.strip(),
             "ticket_rejections": [
                 *state.get("ticket_rejections", []), feedback.strip()

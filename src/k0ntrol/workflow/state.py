@@ -107,7 +107,7 @@ class RunState(TypedDict, total=False):
     ticket_size: str  # small | medium | large — a ticket's criteria cap
     tickets: list[dict] | None  # the breakdown at the ticket gate
     tickets_approved: bool  # the ticket gate's ok
-    ticket_attempts: int  # breakdown runs so far
+    tickets_attempts: int  # breakdown runs so far
     ticket_rejections: list[str]  # the feedback of each redo so far
     ticket_feedback: str | None  # the feedback the next breakdown gets
 

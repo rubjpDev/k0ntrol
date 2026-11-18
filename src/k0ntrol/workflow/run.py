@@ -774,7 +774,7 @@ def _plan_state(cfg: dict, item) -> dict:
         "ticket_size": cfg.get("ticket_size", "small"),
         "tickets": None,
         "tickets_approved": False,
-        "ticket_attempts": 0,
+        "tickets_attempts": 0,
         "ticket_rejections": [],
         "ticket_feedback": None,
     }
