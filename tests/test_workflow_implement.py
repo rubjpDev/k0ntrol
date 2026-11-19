@@ -422,7 +422,7 @@ def test_environment_advice_after_finishing_a_run_in_a_later_session(tmp_path, r
         init=models_init(model),
     )
 
-    assert "run done" in shown
+    assert any(line.startswith("done in ") for line in shown)
     assert shown.count("[hint] Start at calc.py.") == int(redo)
     assert ("Environment proposals (not applied):" in shown) == redo
 
@@ -719,6 +719,189 @@ def test_an_unterminated_last_line_diffs_cleanly(tmp_path):
     assert "-old_last\n" in result.diff
     assert "+new_last" in result.diff
     assert "\\ No newline at end of file" in result.diff
+
+
+# --- the run's cost line (ticket #150) -------------------------------------------
+
+
+def test_run_end_records_the_runs_work(tmp_path):
+    """``run_end`` carries the agent runs, VALIDATOR reds and model calls
+    the run took — here a VALIDATOR red sent IMPLEMENTER back for a
+    second build (#150)."""
+    git_repo(tmp_path)
+    builder = FakeChatModel(
+        messages=[
+            write_call("tests/test_calc.py", TEST_SRC),
+            run_tests_call(),
+            write_call("calc.py", "def answer():\n    return 41\n", "w2"),
+            run_tests_call("r2"),
+            AIMessage(content="first pass"),
+            write_call("calc.py", CALC_SRC, "w3"),
+            run_tests_call("r3"),
+            AIMessage(content="fixed"),
+        ]
+    )
+
+    _, _, result = to_diff_gate(tmp_path, builder=builder)
+    outcome = resume(
+        result.run, "y", root=tmp_path, cfg=implement_cfg(), init=models_init()
+    )
+
+    assert isinstance(outcome, Outcome) and outcome.outcome == "done"
+    end = next(
+        e for e in reversed(events(tmp_path)) if e["kind"] == "run_end"
+    )
+    # the seam proposal and the two builds are three counted runs
+    assert end["agent_runs"] == {"seam": 1, "implementer": 2}
+    assert end["validator_reds"] == 1
+    assert end["model_calls"] == 9
+    assert outcome.agent_runs == {"seam": 1, "implementer": 2}
+    assert outcome.validator_reds == 1
+    assert outcome.model_calls == 9
+
+
+def test_the_session_shows_the_runs_cost_when_it_ends(tmp_path):
+    """Ending the run prints one line with its duration and the counts
+    the ``run_end`` event recorded (#150)."""
+    git_repo(tmp_path)
+    answers = iter(
+        ["/implement add a calc module that answers 42", "ok", "y", "/quit"]
+    )
+    reflect = FakeChatModel(
+        messages=[
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "reflect",
+                        "args": {"facts": [], "mem": [], "environment": {}},
+                        "id": "reflect-1",
+                    }
+                ],
+            )
+        ]
+    )
+    shown = []
+
+    run_session(
+        lambda: next(answers),
+        shown.append,
+        root=tmp_path,
+        config=implement_cfg(),
+        start=partial(
+            start,
+            check=lambda *a, **kw: [],
+            scan=lambda root: None,
+            init=models_init(seams_model()),
+        ),
+        resume=partial(resume, init=models_init(builder_model())),
+        init=models_init(reflect),
+    )
+
+    summary = [line for line in shown if line.startswith("done in ")]
+    assert len(summary) == 1
+    assert "seam ×1" in summary[0]
+    assert "implementer ×1" in summary[0]
+    assert summary[0].endswith("6 model calls")
+
+
+def test_a_crashed_agent_run_still_counts_in_the_cost(tmp_path):
+    """An agent run that dies mid-invoke still took work: ``run_end``
+    counts it even though its node update never landed (#150)."""
+    git_repo(tmp_path)
+    cfg = implement_cfg()
+    pending = run_implement(tmp_path, cfg, seams_model())
+    assert isinstance(pending, Pending) and pending.gate == "seam"
+
+    flaky = FakeChatModel(
+        messages=[
+            write_call("tests/test_calc.py", TEST_SRC),
+            RuntimeError("provider died"),
+        ]
+    )
+    with pytest.raises(RuntimeError, match="provider died"):
+        resume(pending.run, "ok", root=tmp_path, cfg=cfg, init=models_init(flaky))
+
+    pending = resume(
+        pending.run, None, root=tmp_path, cfg=cfg, init=models_init(builder_model())
+    )
+    assert isinstance(pending, Pending) and pending.gate == "diff"
+    outcome = resume(
+        pending.run, "y", root=tmp_path, cfg=cfg, init=models_init()
+    )
+    assert isinstance(outcome, Outcome) and outcome.outcome == "done"
+
+    end = next(
+        e for e in reversed(events(tmp_path)) if e["kind"] == "run_end"
+    )
+    assert end["agent_runs"] == {"seam": 1, "implementer": 2}
+
+
+def test_a_custom_gate_named_validator_is_not_counted_twice(tmp_path):
+    """A configured gate called ``validator`` logs its own fail line
+    right before the aggregate's — one red, not two (#150)."""
+    git_repo(tmp_path)
+    cfg = implement_cfg(gates=[{"name": "validator", "cmd": "false"}])
+    pending = run_implement(tmp_path, cfg, seams_model())
+    assert isinstance(pending, Pending) and pending.gate == "seam"
+
+    builder = FakeChatModel(
+        messages=[
+            write_call("tests/test_calc.py", TEST_SRC),
+            run_tests_call(),
+            write_call("calc.py", CALC_SRC, "w2"),
+            run_tests_call("r2"),
+            AIMessage(content="first build"),
+            write_call("tests/test_calc.py", TEST_SRC, "w3"),
+            run_tests_call("r3"),
+            write_call("calc.py", CALC_SRC, "w4"),
+            run_tests_call("r4"),
+            AIMessage(content="second build"),
+        ]
+    )
+    pending = resume(
+        pending.run, "ok", root=tmp_path, cfg=cfg, init=models_init(builder)
+    )
+    assert isinstance(pending, Pending) and pending.gate == "limit_hit"
+    outcome = resume(
+        pending.run, "stop", root=tmp_path, cfg=cfg, init=models_init()
+    )
+    assert isinstance(outcome, Outcome) and outcome.outcome == "stuck"
+
+    end = next(
+        e for e in reversed(events(tmp_path)) if e["kind"] == "run_end"
+    )
+    assert end["validator_reds"] == 2
+
+
+def test_a_run_paused_at_a_gate_shows_no_cost_summary(tmp_path):
+    """A run paused at a gate has not ended — nothing to sum up (#150)."""
+    git_repo(tmp_path)
+    lines = iter(["/implement add a calc module that answers 42"])
+
+    def read() -> str:
+        try:
+            return next(lines)
+        except StopIteration:
+            raise KeyboardInterrupt
+
+    shown = []
+    run_session(
+        read,
+        shown.append,
+        root=tmp_path,
+        config=implement_cfg(),
+        start=partial(
+            start,
+            check=lambda *a, **kw: [],
+            scan=lambda root: None,
+            init=models_init(seams_model()),
+        ),
+    )
+
+    assert any("is paused at seam" in line for line in shown)
+    assert not any("model calls" in line for line in shown)
+    assert not [e for e in events(tmp_path) if e["kind"] == "run_end"]
 
 
 def test_validator_red_sends_implementer_back_with_the_output(tmp_path):

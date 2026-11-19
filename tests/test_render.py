@@ -137,6 +137,25 @@ def test_run_end_stuck(renderer: LiveRenderer, console: Console) -> None:
     assert lines_of(console) == ["✗ Run stuck · model_call_limit at coder · 12m 3s"]
 
 
+def test_run_end_lists_the_runs_counts(renderer: LiveRenderer, console: Console) -> None:
+    """The run-end line tails the duration with the work the run took
+    (#150): agent runs, VALIDATOR reds, model calls."""
+    renderer(
+        {
+            "kind": "run_end",
+            "outcome": "done",
+            "ms": 252_000,
+            "agent_runs": {"seam": 1, "implementer": 2},
+            "validator_reds": 1,
+            "model_calls": 37,
+        }
+    )
+    assert lines_of(console) == [
+        "✓ Run done · 4m 12s · seam ×1 · implementer ×2 · "
+        "validator red ×1 · 37 model calls"
+    ]
+
+
 def test_run_end_rejected_and_bare(renderer: LiveRenderer, console: Console) -> None:
     renderer({"kind": "run_end", "outcome": "rejected", "reason": "reviewer said no"})
     renderer({"kind": "run_end"})

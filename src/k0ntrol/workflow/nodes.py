@@ -52,6 +52,9 @@ def _invoke_counted(
     """
     key = attempts_key or f"{name}_attempts"
     attempt = state.get(key, 0) + 1
+    # The `agent` event lands before the invoke so a run that dies
+    # mid-call still counts in the run's cost (#150).
+    ctx.writer.emit("agent", agent=key.removesuffix("_attempts"))
     result = ctx.agent(
         name, slot=slot, read_only=read_only, slice_start=slice_start
     ).invoke(

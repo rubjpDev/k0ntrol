@@ -22,10 +22,10 @@ or resumed the run (the stem of its `.k0-mem/sessions/<id>.txt` file, also the
 Langfuse session of task runs and `/ask` chats), so the log can group runs
 by sitting. Omitted when no sitting is known.
 
-`EventWriter` appends lines for harness events (`run_start`, `gate`,
-`run_end`). `K0EventHandler` — the one callback attached to every graph and
-helper model call — emits the `model` and `tool` events through the same
-writer.
+`EventWriter` appends lines for harness events (`run_start`, `agent`,
+`gate`, `run_end`). `K0EventHandler` — the one callback attached to every
+graph and helper model call — emits the `model` and `tool` events through
+the same writer.
 
 Shared contract for tool refusals (the `denied` field): a tool refuses a
 call by raising an exception that carries a `denied` attribute with value
@@ -276,10 +276,22 @@ class EventWriter:
         *,
         reason: str | None = None,
         node: str | None = None,
+        agent_runs: dict[str, int] | None = None,
+        validator_reds: int | None = None,
+        model_calls: int | None = None,
     ) -> dict:
-        """Emit `run_end`. `reason`/`node` only for `stuck` from a limit."""
+        """Emit `run_end`. `reason`/`node` only for `stuck` from a limit;
+        the rest is the run's cost: agent runs per node, VALIDATOR reds
+        and model calls (#150)."""
         return self.emit(
-            "run_end", outcome=outcome, ms=ms, reason=reason, node=node
+            "run_end",
+            outcome=outcome,
+            ms=ms,
+            reason=reason,
+            node=node,
+            agent_runs=agent_runs,
+            validator_reds=validator_reds,
+            model_calls=model_calls,
         )
 
 
@@ -630,12 +642,95 @@ def _render_gate(e: dict) -> str:
     return line
 
 
+def cost_parts(
+    agent_runs: Mapping[str, int] | None,
+    validator_reds: int | None,
+    model_calls: int | None,
+) -> list[str]:
+    """The run's cost as summary parts — ``implementer ×2``,
+    ``validator red ×1``, ``37 model calls`` — for the one line a
+    finished run shows (#150)."""
+    parts = [
+        f"{name} ×{count}" for name, count in (agent_runs or {}).items()
+    ]
+    if validator_reds:
+        parts.append(f"validator red ×{validator_reds}")
+    if model_calls:
+        parts.append(f"{model_calls} model calls")
+    return parts
+
+
+def run_cost(path: Path, run: str) -> dict[str, Any]:
+    """The run's work counts off its event log (#150): agent runs per
+    label (the ``agent`` events — crashed runs count too), VALIDATOR
+    reds (its ``fail`` gate results) and model calls — helpers and
+    failed calls included."""
+    events = [e for e in _log_events(path) if e.get("run") == run]
+    return {
+        "agent_runs": _agent_runs(events),
+        "validator_reds": _validator_reds(events),
+        "model_calls": sum(1 for e in events if e.get("kind") == "model"),
+    }
+
+
+def _agent_runs(events: list[dict]) -> dict[str, int]:
+    runs: dict[str, int] = {}
+    for event in events:
+        if event.get("kind") == "agent" and event.get("agent"):
+            label = str(event["agent"])
+            runs[label] = runs.get(label, 0) + 1
+    return runs
+
+
+def _validator_reds(events: list[dict]) -> int:
+    """One red per VALIDATOR round: a configured gate itself named
+    ``validator`` logs its own ``fail`` right before the aggregate's —
+    adjacent duplicates collapse into the one red they came from."""
+    reds = 0
+    for index, event in enumerate(events):
+        if _is_red(event) and not (index and _is_red(events[index - 1])):
+            reds += 1
+    return reds
+
+
+def _is_red(event: dict) -> bool:
+    return (
+        event.get("kind") == "gate"
+        and event.get("gate") == "validator"
+        and event.get("result") == "fail"
+    )
+
+
+def _log_events(path: Path) -> Iterable[dict]:
+    for log in sorted(path.parent.glob(f"{path.stem}*.jsonl")):
+        yield from _log_lines(log)
+
+
+def _log_lines(log: Path) -> Iterable[dict]:
+    try:
+        lines = log.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return
+    for line in lines:
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(event, dict):
+            yield event
+
+
 def _render_run_end(e: dict) -> str:
     line = f"run ended {e.get('outcome', '?')} ({e.get('ms', 0)}ms)"
     if e.get("reason"):
         line += f" {e['reason']}"
         if e.get("node"):
             line += f" at {e['node']}"
+    cost = cost_parts(
+        e.get("agent_runs"), e.get("validator_reds"), e.get("model_calls")
+    )
+    if cost:
+        line += " · " + " · ".join(cost)
     return line
 
 

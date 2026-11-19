@@ -20,6 +20,7 @@ from rich.panel import Panel
 from rich.text import Text
 from rich.theme import Theme
 
+from k0ntrol.events import cost_parts
 from k0ntrol.frontends.diffview import render_diff
 from k0ntrol.frontends.theme import (
     ACCENT,
@@ -200,6 +201,11 @@ def run_end_line(event: dict) -> Text:
         parts.append(f"{event['reason']}{where}")
     if isinstance(event.get("ms"), int | float):
         parts.append(format_elapsed(event["ms"] / 1000))
+    parts += cost_parts(
+        event.get("agent_runs"),
+        event.get("validator_reds"),
+        event.get("model_calls"),
+    )
     style = _OUTCOME_STYLES.get(outcome, WARN)
     return Text(_OUTCOME_GLYPHS.get(outcome, "") + " · ".join(parts), style=style)
 

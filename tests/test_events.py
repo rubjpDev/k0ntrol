@@ -268,6 +268,40 @@ def test_render_event_gate_and_run_end():
     assert "stuck" in end and "model_call_limit" in end and "coder" in end
 
 
+def test_render_event_run_end_lists_the_counts():
+    """The transcript's run_end line tails the counts the event carries
+    (#150)."""
+    line = render_event(
+        {
+            "kind": "run_end",
+            "outcome": "done",
+            "ms": 1000,
+            "agent_runs": {"implementer": 2},
+            "validator_reds": 1,
+            "model_calls": 9,
+        }
+    )
+    assert line == (
+        "run ended done (1000ms) · implementer ×2 · "
+        "validator red ×1 · 9 model calls"
+    )
+
+
+def test_run_end_records_the_cost_fields(tmp_path):
+    writer = make_writer(tmp_path)
+    writer.run_end(
+        "done",
+        ms=1,
+        agent_runs={"implementer": 2},
+        validator_reds=1,
+        model_calls=9,
+    )
+    (event,) = read_events(tmp_path / ".k0-mem" / "events.jsonl")
+    assert event["agent_runs"] == {"implementer": 2}
+    assert event["validator_reds"] == 1
+    assert event["model_calls"] == 9
+
+
 def test_render_event_skips_unknown_kinds():
     assert render_event({"kind": "mystery"}) is None
     assert render_event({"ts": "x"}) is None
