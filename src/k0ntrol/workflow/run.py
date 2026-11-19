@@ -11,12 +11,12 @@ Checkpoints are a ``SqliteSaver`` at ``.k0-mem/checkpoints.sqlite`` with
 survives the process dying: a later ``resume`` compiles a fresh graph on
 the same DB and picks up at the gate.
 
-One run per checkout (ADR 0007). A ``/full #<n>`` for the open run's own
-work item gets it back as ``Unfinished`` (#46), and so does a ``/fast`` or
-``/full <text>`` when the open run is of the same kind and has no work item
-to name: the REPL asks whether to resume it, and ``abandon`` drops its
-checkpoint thread on a ``n`` (#69: not while the tree is dirty). Any other
-second run is refused with the command that resumes the open one, or a
+One run per checkout (ADR 0007). ``#<n>`` for the open run's own
+work item gets it back as ``Unfinished`` (#46), and so does a text task
+when the open run is of the same kind and has no work item to name: the
+REPL asks whether to resume it, and ``abandon`` drops its checkpoint
+thread on a ``n`` (#69: not while the tree is dirty). Any other second
+run is refused with the command that resumes the open one, or a
 git-worktree hint.
 """
 
@@ -31,6 +31,7 @@ from typing import Any, Literal, cast
 from langchain.chat_models import init_chat_model
 from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.runnables import RunnableConfig
+from langgraph.graph.state import CompiledStateGraph
 from langgraph.types import Command
 
 os.environ.setdefault("LANGGRAPH_STRICT_MSGPACK", "true")
@@ -66,8 +67,6 @@ from k0ntrol.workflow.change import (  # noqa: E402
     worktree_snapshot_dir,
 )
 from k0ntrol.workflow.context import RunContext  # noqa: E402
-from k0ntrol.workflow.fast import build_fast_graph  # noqa: E402
-from k0ntrol.workflow.full import build_full_graph  # noqa: E402
 from k0ntrol.workflow.implement import build_implement_graph  # noqa: E402
 from k0ntrol.workflow.plan import (  # noqa: E402
     DEFAULT_MAX_ROUND_QUESTIONS,
@@ -78,12 +77,9 @@ from k0ntrol.workflow.research import (  # noqa: E402
     is_map,
 )
 from k0ntrol.workflow.routers import DEFAULT_MAX_QUESTIONS  # noqa: E402
-from k0ntrol.workflow.stuck import stuck_update  # noqa: E402
 from k0ntrol.workflow.triage import build_triage_graph  # noqa: E402
 
 _BUILDERS = {
-    "fast": build_fast_graph,
-    "full": build_full_graph,
     "implement": build_implement_graph,
     "plan": build_plan_graph,
     "research": build_research_graph,
@@ -94,14 +90,6 @@ _BUILDERS = {
 # Every agent gets the bulk_read tool, so the helper is part of each roster
 # (#61, same gate /ask already applies).
 _ROSTER = {
-    "fast": ("agents.tester", "agents.coder", "helpers.bulk_read"),
-    "full": (
-        "agents.spec",
-        "agents.tester",
-        "agents.coder",
-        "agents.reviewer",
-        "helpers.bulk_read",
-    ),
     "implement": ("agents.implementer", "helpers.bulk_read"),
     "plan": ("agents.planner", "helpers.bulk_read"),
     "research": ("agents.planner", "helpers.bulk_read"),
@@ -145,7 +133,7 @@ class Pending:
 
 @dataclass(frozen=True)
 class Unfinished:
-    """``/full`` found an unfinished run: resume it or abandon it."""
+    """A run is unfinished: resume it or abandon it."""
 
     run: str
     node: str
@@ -175,7 +163,6 @@ def start(
 ) -> Result:
     """Start a run of ``kind`` for ``input``.
 
-    ``/full <text>`` drafts a brief; ``/full #<n>`` refines issue ``n``;
     ``/implement <task>`` runs the working-tree path (#116) and
     ``/implement #<n>`` the tracker path on a ready work item (#117);
     ``/plan <idea>`` and ``/plan #<n>`` run the Q&A definition (#120);
@@ -185,19 +172,19 @@ def start(
     Refuses — ``RunRefused`` — on bad usage, a missing tracker or work
     item, an untrusted issue body, a work item not ready for an agent, a
     dirty tree (``.k0-mem/`` ignored), failed doctor checks, a failed
-    rescan or (for ``/fast`` and ``/implement``) another open run.
+    rescan or another open run.
     ``#<n>`` answers an open run for item ``n`` with ``Unfinished``.
     """
     if kind not in _BUILDERS:
         raise RunRefused(f"unknown run: {kind}")
-    kind = cast(Literal["full", "fast", "implement", "plan", "research", "triage"], kind)  # _BUILDERS' keys
+    kind = cast(Literal["implement", "plan", "research", "triage"], kind)  # _BUILDERS' keys
     input_text = _checked_input(kind, input)
     tracker = _tracker_for(
         kind,
         cfg,
         root,
         tracker,
-        required=kind in ("full", "research", "triage")
+        required=kind in ("research", "triage")
         or (kind in ("implement", "plan") and input_text.startswith("#")),
     )
     conn, saver = _open_checkpoints(root)
@@ -271,7 +258,7 @@ def resume(
             cfg,
             root,
             tracker,
-            required=kind in ("full", "research", "triage")
+            required=kind in ("research", "triage")
             or _run_item_ref(saver, run_id) is not None,
         )
         ctx = RunContext(
@@ -331,15 +318,26 @@ def open_runs(saver: SqliteSaver, ctx: RunContext) -> list[tuple[str, str, dict]
         tuple_.config["configurable"]["thread_id"]
         for tuple_ in saver.list(None)
     }
-    open_ = []
-    for thread_id in sorted(threads):
-        kind = _run_kind(saver, thread_id)
-        assert kind is not None
-        graph = graphs[kind]
-        state = graph.get_state(_thread(thread_id))
-        if state.next:
-            open_.append((thread_id, state.next[0], state.values))
-    return open_
+    return [
+        open_run
+        for thread_id in sorted(threads)
+        if (open_run := _open_run(graphs, saver, thread_id)) is not None
+    ]
+
+
+def _open_run(
+    graphs: dict[str, CompiledStateGraph], saver: SqliteSaver, thread_id: str
+) -> tuple[str, str, dict] | None:
+    """One checkpoint read through its own kind's graph — ``None`` for a
+    thread whose kind is gone (a retired workflow's checkpoint is dead
+    weight) or whose graph sees no pending node."""
+    graph = graphs.get(_run_kind(saver, thread_id) or "")
+    if graph is None:
+        return None
+    state = graph.get_state(_thread(thread_id))
+    if not state.next:
+        return None
+    return (thread_id, state.next[0], state.values)
 
 
 def _open_checkpoints(root: Path) -> tuple[sqlite3.Connection, SqliteSaver]:
@@ -352,9 +350,9 @@ def _open_checkpoints(root: Path) -> tuple[sqlite3.Connection, SqliteSaver]:
 def _busy_run(
     saver: SqliteSaver, ctx: RunContext, input_text: str, tracker, root: Path
 ) -> Unfinished | None:
-    """An open run answers ``/full #<n>`` or ``/implement #<n>`` for its own
-    work item, and a run of its own kind when it has no work item (``/fast``,
-    or ``/full <text>`` before the spec gate published the issue).
+    """An open run answers ``#<n>`` for its own work item, and a run of its
+    own kind when it has no work item (a ``<task>``, ``<idea>`` or
+    ``<question>`` run before it names a work item).
 
     Anything else is refused. The refusals for an ended work item (closed
     issue, merged or closed PR) come before the resume prompt.
@@ -362,7 +360,7 @@ def _busy_run(
     busy = open_runs(saver, ctx)
     if not busy:
         return None
-    if ctx.kind in ("full", "implement", "plan", "research", "triage"):
+    if ctx.kind in ("implement", "plan", "research", "triage"):
         same = _same_item_run(busy, input_text)
         if same is not None:
             _work_item(input_text, tracker, root, ctx.kind)
@@ -391,7 +389,7 @@ def _same_item_run(busy: list[tuple[str, str, dict]], input_text: str):
 
 def _itemless_run(busy: list[tuple[str, str, dict]], kind: str, input_text: str):
     """The open ``(run, node)`` of ``kind`` with no work item, if any:
-    ``/fast`` or ``/full <text>`` is the only way back to it."""
+    the same command with free text is the only way back to it."""
     if input_text.startswith("#"):
         return None
     for run_id, node, values in busy:
@@ -403,7 +401,7 @@ def _itemless_run(busy: list[tuple[str, str, dict]], kind: str, input_text: str)
 def _resume_command(values: dict) -> str:
     """The REPL command that offers an open run back."""
     if values.get("item_ref"):
-        return f"/{values.get('kind', 'full')} #{values['item_ref']}"
+        return f"/{values.get('kind', 'implement')} #{values['item_ref']}"
     return f"/{values.get('kind')} <task>"
 
 
@@ -468,7 +466,7 @@ def _form_ok(kind: str, text: str) -> bool:
     the work-item commands take text or ``#<n>``, the rest take anything."""
     if kind == "triage":
         return text.startswith("#") and _usage_ok(text)
-    if kind in ("full", "implement", "plan", "research"):
+    if kind in ("implement", "plan", "research"):
         return _usage_ok(text)
     return True
 
@@ -476,7 +474,7 @@ def _form_ok(kind: str, text: str) -> bool:
 def _usage(kind: str) -> str:
     if kind == "research":
         return "usage: /research <question> | /research #<issue>"
-    if kind in ("full", "implement", "plan"):
+    if kind in ("implement", "plan"):
         return f"usage: /{kind} <task> | /{kind} #<issue>"
     if kind == "triage":
         return "usage: /triage #<issue>"
@@ -539,40 +537,21 @@ def _log_failed(
 ) -> Outcome:
     """A broken event log ends the run stuck (events contract, #16).
 
-    ``/full`` still runs the stuck effects from where the run stood (#46);
-    there is no ``run_end`` — the log cannot take it. ``/implement``'s
+    There is no ``run_end`` — the log cannot take it. ``/implement``'s
     checkpoint is left where the write failed: still resumable, so its
     rollback snapshot stays until the graph actually ends.
     """
     state = graph.get_state(config)
-    reason, node = None, None
-    if ctx.kind == "full" and state.next:
-        state = _stuck_by_log(graph, config, state)
-        reason, node = "event_log", state.values.get("node")
     _trace_finish(ctx, "stuck", session_id, state.values)
     if ctx.kind == "implement" and not state.next:
         drop_worktree_snapshot(ctx.root, worktree_snapshot_dir(ctx.root, run_id))
-    return Outcome(run=run_id, outcome="stuck", reason=reason, node=node)
-
-
-def _stuck_by_log(graph, config: RunnableConfig, state):
-    """Run the stuck effects; a pass already marked ``event_log`` just continues.
-
-    Resuming a run whose log is still broken lands here again, and must
-    pick the effects up where the failed tracker write left them.
-    """
-    if state.values.get("reason") != "event_log":
-        graph.update_state(
-            config, stuck_update(state.next[0], state.values), as_node="limit_hit"
-        )
-    graph.invoke(None, config=config, durability="sync")
-    return graph.get_state(config)
+    return Outcome(run=run_id, outcome="stuck")
 
 
 def _item_preflight(kind: str, input_text: str, tracker, root: Path):
     """The work-item commands' last refusals: dirty tree, then the item read.
 
-    ``/full`` always goes through it; ``/implement`` only for ``#<n>``, whose
+    ``/implement`` goes through it only for ``#<n>``, whose
     item must also be ready for an agent (#117). ``/plan`` and ``/research``
     read the ``#<n>`` item but never touch the tree, so no dirt or label is
     checked — planning is what readies work (#120), and the map a research
@@ -582,7 +561,7 @@ def _item_preflight(kind: str, input_text: str, tracker, root: Path):
     """
     if kind in ("plan", "research", "triage"):
         return _read_only_item(kind, input_text, tracker, root)
-    if kind != "full" and not (kind == "implement" and input_text.startswith("#")):
+    if kind != "implement" or not input_text.startswith("#"):
         return None
     _refuse_dirty(root, f"/{kind}")
     item = _work_item(input_text, tracker, root, kind)
@@ -697,11 +676,6 @@ def _initial_state(kind: str, input_text: str, cfg: dict, item=None) -> dict:
         "task": str(input_text).strip(),
         "start_ms": _now_ms(),
         "max_attempts": cfg.get("max_attempts", 2),
-        "test_files": [],
-        "code_files": [],
-        "tester_attempts": 0,
-        "coder_attempts": 0,
-        "tests_red": False,
         "validator_ok": False,
         "limit": None,
     }
@@ -711,8 +685,6 @@ def _initial_state(kind: str, input_text: str, cfg: dict, item=None) -> dict:
 
 def _kind_state(kind: str, task: str, cfg: dict, item) -> dict:
     """The per-kind fields layered over the shared run state."""
-    if kind == "full":
-        return _full_state(task, item)
     if kind == "implement":
         return _implement_state(item)
     if kind == "plan":
@@ -847,31 +819,6 @@ def _implement_state(item) -> dict:
     return state
 
 
-def _full_state(task: str, item) -> dict:
-    """The ``/full`` fields layered over the shared run state."""
-    state: dict[str, Any] = {
-        "task": task,
-        "item_ref": None,
-        "item_title": "",
-        "refining": False,
-        "branch": "",
-        "brief": None,
-        "spec_attempts": 0,
-        "spec_approved": False,
-        "spec_rejections": [],
-        "spec_feedback": None,
-        "test_approved": False,
-        "test_rejections": [],
-        "test_feedback": None,
-    }
-    if item is not None:
-        state["task"] = item.body
-        state["item_ref"] = item.ref
-        state["item_title"] = item.title
-        state["refining"] = True
-    return state
-
-
 def _runnable(run_id: str, ctx: RunContext, session_id=None) -> RunnableConfig:
     config = _thread(run_id)
     assert ctx.handler is not None
@@ -880,7 +827,7 @@ def _runnable(run_id: str, ctx: RunContext, session_id=None) -> RunnableConfig:
     # Always explicit (langgraph's default is a safety net, not a budget):
     # each loop-back costs at most two super-steps per agent node.
     attempts = ctx.cfg.get("max_attempts", 2)
-    slack = 16 if ctx.kind in ("full", "implement") else _OUTER_STEPS_SLACK
+    slack = 16 if ctx.kind == "implement" else _OUTER_STEPS_SLACK
     config["recursion_limit"] = _OUTER_STEPS_PER_ATTEMPT * attempts + slack
     if ctx.trace is not None and ctx.trace.handler is not None:
         callbacks.append(ctx.trace.handler)
@@ -899,7 +846,7 @@ def _langfuse_metadata(kind: str, session_id) -> dict:
 
 def _session_id(ctx: RunContext, values: dict) -> str | None:
     """The run's Langfuse session: its work item, resolved through the
-    tracker, else (``/fast`` only) the REPL sitting."""
+    tracker, else the REPL sitting."""
     ref = values.get("item_ref")
     if not ref or ctx.tracker is None:
         return _sitting_session(ctx)
@@ -910,11 +857,11 @@ def _session_id(ctx: RunContext, values: dict) -> str | None:
 
 
 def _sitting_session(ctx: RunContext) -> str | None:
-    """``/fast``, ``/implement <task>``, ``/plan <idea>`` and
+    """``/implement <task>``, ``/plan <idea>`` and
     ``/research <question>`` have no work item: their session is the
-    sitting. ``/full``'s is always the work item, which outlives any one
-    sitting."""
-    return ctx.session if ctx.kind in ("fast", "implement", "plan", "research") else None
+    sitting. A ``#<n>`` run's is always the work item, which outlives any
+    one sitting."""
+    return ctx.session if ctx.kind in ("implement", "plan", "research") else None
 
 
 def _trace_metadata(ctx: RunContext, values: dict) -> dict:
@@ -946,7 +893,7 @@ def _thread(run_id: str) -> RunnableConfig:
 
 def _run_kind(
     saver: SqliteSaver, run_id: str
-) -> Literal["full", "fast", "implement", "plan", "research", "triage"] | None:
+) -> Literal["implement", "plan", "research", "triage"] | None:
     """The run's kind, read from the checkpoint before a graph is built."""
     tuple_ = saver.get_tuple(_thread(run_id))
     if tuple_ is None:

@@ -121,7 +121,7 @@ def test_a_coming_soon_tracker_is_saved_with_a_warning(tmp_path):
 
     run_project_setup(tmp_path, make_prompt(console, "github", "jira", "1", "1", "pytest"), console)
 
-    assert screen(console).count("/full needs GitHub in 0.1.0") == 1
+    assert screen(console).count("#<issue> runs need GitHub in 0.1.0") == 1
     assert saved(tmp_path)["tracker"] == "jira"
 
 
@@ -135,7 +135,7 @@ def test_a_coming_soon_host_is_saved_and_offers_only_its_trackers(tmp_path):
     run_project_setup(tmp_path, prompt, console)
 
     assert [key for key, _ in seen[1]] == ["jira", "linear"]
-    assert screen(console).count("/full needs GitHub in 0.1.0") == 1
+    assert screen(console).count("#<issue> runs need GitHub in 0.1.0") == 1
     assert (saved(tmp_path)["vcs"], saved(tmp_path)["tracker"]) == ("bitbucket", "jira")
 
 

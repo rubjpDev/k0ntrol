@@ -12,48 +12,32 @@ from typing import Any, TypedDict
 class RunState(TypedDict, total=False):
     """One run's state; every field is a plain msgpack-safe value."""
 
-    kind: str  # "fast" | "full" | "implement" | "plan" | "research"
-    task: str  # the run's task text (issue body for /full #<n>)
+    kind: str  # "implement" | "plan" | "research" | "triage"
+    task: str  # the run's task text (issue body for ``#<n>`` runs)
     start_ms: int  # epoch ms when the run started (run_end.ms)
     max_attempts: int  # agent runs allowed per loop (default 2)
 
-    test_files: list[str]  # test paths TESTER wrote
-    code_files: list[str]  # non-test paths CODER wrote
-    tester_attempts: int  # TESTER agent runs so far (red-check loop)
-    coder_attempts: int  # CODER agent runs so far (VALIDATOR loop)
-
-    tests_red: bool  # last red check: test_cmd failed on the test files
     validator_ok: bool  # last VALIDATOR run: test_cmd + gates all green
-    red_check_output: str  # last red-check output (TESTER retry context)
-    validator_output: str  # last VALIDATOR raw output (CODER retry input)
+    validator_output: str  # last VALIDATOR raw output (IMPLEMENTER retry input)
 
-    # /full (#44): the work item the run carries, its branch and gates.
-    item_ref: str | None  # the issue number (None until the spec gate passes)
-    refining: bool  # /full #<n>: the issue existed before the run (re-runs)
+    # The work item a ``#<n>`` run carries, its branch and gates.
+    item_ref: str | None  # the issue number (None until a gate publishes)
     item_title: str
     branch: str  # k0/<n>-<slug>
-    brief: dict | None  # SPEC's structured AgentBrief as a plain dict
-    spec_attempts: int  # spec-drafting runs so far (/full's SPEC, /plan's draft)
-    spec_approved: bool  # the human ok'd the brief or draft at the spec gate
+    spec_attempts: int  # spec-drafting runs so far (/plan's draft)
+    spec_approved: bool  # the human ok'd the draft at the spec gate
     spec_rejections: list[str]  # earlier spec-gate feedback, for the comment
     spec_feedback: str | None  # the feedback of the last spec-gate reject
-    test_approved: bool  # the human ok'd the tests
-    test_rejections: list[str]  # earlier test-gate feedback
-    test_feedback: str | None  # the feedback of the last test-gate reject
 
-    # /full (#45): the change, REVIEWER's structured review and its gate.
+    # The change (draft pull request) and its review gate.
     change_ref: str | None  # the PR ref once the draft is open
     change_url: str
-    review: dict | None  # REVIEWER's structured Review as a plain dict
-    review_round: int  # REVIEWER runs that produced a review (marker suffix)
     review_approved: bool  # the human ok'd the review
     review_route: str  # the review gate's decision: a node name
-    review_feedback: str | None  # review + feedback, sent to CODER on redo
+    review_feedback: str | None  # review + feedback, sent back on redo
     review_rejections: list[str]  # earlier review-gate feedback
-    reviewer_attempts: int  # REVIEWER agent runs so far
-    spec_round: int  # approved briefs so far (marker suffix on republish)
 
-    # /full (#47): the CI gate for pushes that change .github/.
+    # The CI gate for pushes that change .github/.
     ci_cleared_sha: str | None  # the HEAD the CI gate cleared for a push
     ci_approved: bool  # the human approved on the last pass (comment due)
     ci_approved_sha: str | None  # HEAD at the last push; the next diff base
@@ -63,7 +47,7 @@ class RunState(TypedDict, total=False):
 
     # /implement <task> (#116): the working-tree path — seam gate, then
     # IMPLEMENTER's red-to-green slices under the guard. /implement #<n>
-    # (#117) shares files and implementer_attempts and reuses the /full
+    # (#117) shares files and implementer_attempts and reuses the
     # work-item, branch, change and ci fields above.
     files: list[str]  # paths IMPLEMENTER wrote (tests and code)
     seam_attempts: int  # IMPLEMENTER proposal runs so far

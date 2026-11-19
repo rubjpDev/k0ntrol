@@ -19,7 +19,7 @@ exists and does not already cover it.
 
 `run_start` may also carry `session`: the id of the REPL sitting that started
 or resumed the run (the stem of its `.k0-mem/sessions/<id>.txt` file, also the
-Langfuse session of `/fast` runs and `/ask` chats), so the log can group runs
+Langfuse session of task runs and `/ask` chats), so the log can group runs
 by sitting. Omitted when no sitting is known.
 
 `EventWriter` appends lines for harness events (`run_start`, `gate`,
@@ -237,7 +237,7 @@ class EventWriter:
     def run_start(
         self,
         run_kind: Literal[
-            "full", "fast", "implement", "plan", "research", "triage"
+            "implement", "plan", "research", "triage"
         ],
         *,
         work_item: str | None = None,

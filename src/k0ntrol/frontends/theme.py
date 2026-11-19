@@ -21,4 +21,4 @@ CROSS = "✗"
 SPINNER_FRAMES = ("·", "✢", "✳", "✶", "✻", "✽", "✻", "✶", "✳", "✢")
 
 # Workflow agents show in capitals, helpers in lower case (GLOSSARY).
-AGENTS = ("spec", "tester", "coder", "reviewer", "chatty")
+AGENTS = ("planner", "researcher", "implementer", "reviewer", "chatty")

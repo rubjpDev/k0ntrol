@@ -1,7 +1,7 @@
 """The CI gate: no push changes ``.github/`` without the human (#47).
 
 ADR 0006: ``.github/`` stays writable, so the risk is the push, not the
-write. Every ``/full`` and ``/implement #<n>`` push goes through this
+write. Every ``/implement #<n>`` push goes through this
 module: ``run_ci_gate`` is
 the node body that decides, ``gated_push`` is the only place the harness
 calls ``tracker.push`` and it refuses to push a HEAD the gate has not
@@ -31,14 +31,14 @@ def ci_diff(ctx: RunContext, state: dict) -> str:
 
 
 def run_ci_gate(
-    ctx: RunContext, state: dict, *, attempts_key: str = "coder_attempts"
+    ctx: RunContext, state: dict, *, attempts_key: str = "implementer_attempts"
 ) -> dict:
     """Clear HEAD for a push: pass through, or interrupt on a ``.github/`` diff.
 
     ``ci_cleared_sha`` names the HEAD the push may use; ``None`` means the
     human rejected and the feedback goes to the building agent, whose
-    ``attempts_key`` counter the reject resets (``coder_attempts`` on
-    ``/full``, ``implementer_attempts`` on ``/implement``). ``ci_approved``
+    ``attempts_key`` counter the reject resets
+    (``implementer_attempts`` on ``/implement``). ``ci_approved``
     is True only when the human approved on this pass (the gate comment is
     due). A run stuck by its event log never interrupts — nobody can be
     asked and the log cannot record the gate — so unapproved changes stay
@@ -70,13 +70,14 @@ def run_ci_gate(
         "ci_cleared_sha": None,
         "ci_approved": False,
         attempts_key: 0,
+        "refactor": True,
         "ci_feedback": feedback.strip(),
         "ci_rejections": [*state.get("ci_rejections", []), feedback.strip()],
     }
 
 
 def make_ci_gate(
-    ctx: RunContext, *, attempts_key: str = "coder_attempts"
+    ctx: RunContext, *, attempts_key: str = "implementer_attempts"
 ) -> Callable[[dict], dict]:
     """The ``ci_gate`` graph node."""
 

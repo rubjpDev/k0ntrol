@@ -28,15 +28,18 @@ from k0ntrol.workflow import Outcome, Pending, resume, start
 TEST_SRC = "from calc import answer\n\n\ndef test_answer():\n    assert answer() == 42\n"
 CALC_SRC = "def answer():\n    return 42\n"
 
-BRIEF = {
+SEAMS = "seam: calc.answer() -> int\nseam: tests/test_calc.py"
+SPEC = {
     "title": "Calc answers 42",
-    "category": "feature",
-    "summary": "one module that answers 42",
-    "current_behavior": "there is no calc module",
-    "desired_behavior": "calc.answer() returns 42",
-    "key_interfaces": "calc.answer() -> int",
-    "acceptance_criteria": ["answer() returns 42"],
-    "out_of_scope": "anything else",
+    "problem_statement": "there is no calc module",
+    "solution": "one module that answers 42",
+    "user_stories": ["as a user I get 42"],
+    "implementation_decisions": ["pure functions"],
+    "testing_decisions": ["pytest"],
+    "seams": ["tests/test_calc.py"],
+    "glossary_and_decisions": ["answer: 42"],
+    "not_yet_decided": [],
+    "out_of_scope": ["repl"],
 }
 
 KEYS_ENV = {"LANGFUSE_PUBLIC_KEY": "pk-x", "LANGFUSE_SECRET_KEY": "sk-x"}
@@ -51,11 +54,10 @@ def _git_repo(root: Path) -> None:
     subprocess.run(["git", "commit", "-qm", "init"], cwd=root, check=True)
 
 
-def _fast_cfg():
+def _implement_cfg():
     cfg = cfg_with(
         {
-            "tester": {"provider": "anthropic", "model": "m", "model_calls": 40},
-            "coder": {"provider": "anthropic", "model": "m", "model_calls": 60},
+            "implementer": {"provider": "anthropic", "model": "m", "model_calls": 60},
         }
     )
     cfg.update(
@@ -69,12 +71,10 @@ def _fast_cfg():
     return cfg
 
 
-def _full_cfg():
+def _plan_cfg():
     cfg = cfg_with(
         {
-            "spec": {"provider": "anthropic", "model": "m", "model_calls": 25},
-            "tester": {"provider": "anthropic", "model": "m", "model_calls": 40},
-            "coder": {"provider": "anthropic", "model": "m", "model_calls": 60},
+            "planner": {"provider": "anthropic", "model": "m", "model_calls": 25},
         }
     )
     cfg.update(
@@ -107,6 +107,13 @@ def _write(path, content, call_id="t1"):
         tool_calls=[
             {"name": "write_file", "args": {"path": path, "content": content}, "id": call_id}
         ],
+    )
+
+
+def _run_tests(call_id="r1"):
+    return AIMessage(
+        content="",
+        tool_calls=[{"name": "run_tests", "args": {"paths": []}, "id": call_id}],
     )
 
 
@@ -193,7 +200,7 @@ def fake_sdk(monkeypatch):
 def test_no_handler_without_keys():
     trace = build_trace("trace-1", env={})
     assert trace.handler is None
-    trace.finish(kind="fast", outcome="done")
+    trace.finish(kind="implement", outcome="done")
     trace.flush()
 
 
@@ -274,7 +281,7 @@ def test_mask_includes_known_provider_credentials(monkeypatch, tmp_path):
 def test_finish_tags_kind_and_outcome_then_flushes(fake_sdk):
     trace = build_trace("run-abc", env=KEYS_ENV)
     trace.finish(
-        kind="full",
+        kind="plan",
         outcome="done",
         session_id="acme/widgets#9",
         metadata={"branch": "k0/9-calc", "change_url": "http://x/1", "k0_version": "0"},
@@ -282,7 +289,7 @@ def test_finish_tags_kind_and_outcome_then_flushes(fake_sdk):
 
     attrs = fake_sdk["attrs"][-1]
     assert attrs["session_id"] == "acme/widgets#9"
-    assert set(attrs["tags"]) == {"full", "done"}
+    assert set(attrs["tags"]) == {"plan", "done"}
     assert attrs["metadata"]["branch"] == "k0/9-calc"
     assert attrs["metadata"]["change_url"] == "http://x/1"
     observation = fake_sdk["observations"][-1]
@@ -294,7 +301,7 @@ def test_finish_tags_kind_and_outcome_then_flushes(fake_sdk):
 def test_a_langfuse_error_never_raises(fake_sdk):
     fake_sdk["raise"] = True
     trace = build_trace("run-abc", env=KEYS_ENV)
-    trace.finish(kind="fast", outcome="done")
+    trace.finish(kind="implement", outcome="done")
     trace.flush()
 
 
@@ -352,23 +359,27 @@ def _tracing(made, handler=None):
     return factory
 
 
-def test_fast_run_trace_tags_and_finish(tmp_path):
+def test_implement_run_trace_tags_and_finish(tmp_path):
     _git_repo(tmp_path)
     handler = _RecordingHandler()
     made = []
-    tester = FakeChatModel(
-        messages=[_write("tests/test_calc.py", TEST_SRC), AIMessage(content="tests")]
-    )
-    coder = FakeChatModel(
-        messages=[_write("calc.py", CALC_SRC), AIMessage(content="code")]
+    seams = FakeChatModel(messages=[AIMessage(content=SEAMS)])
+    builder = FakeChatModel(
+        messages=[
+            _write("tests/test_calc.py", TEST_SRC),
+            _run_tests(),
+            _write("calc.py", CALC_SRC, "w2"),
+            _run_tests("r2"),
+            AIMessage(content="done"),
+        ]
     )
 
     result = start(
-        "fast",
+        "implement",
         "add a calc module that answers 42",
         root=tmp_path,
-        cfg=_fast_cfg(),
-        init=_models(tester, coder),
+        cfg=_implement_cfg(),
+        init=_models(seams),
         check=lambda *a, **k: [],
         scan=lambda r: "scanned",
         tracing=_tracing(made, handler),
@@ -379,25 +390,35 @@ def test_fast_run_trace_tags_and_finish(tmp_path):
     assert trace.trace_id == result.run
     assert handler.llm_ends > 0  # the handler really sat in the callbacks
     root_meta = handler.root_metadata[0]
-    assert root_meta["langfuse_tags"] == ["fast"]
-    assert "langfuse_session_id" not in root_meta  # no work item for /fast
+    assert root_meta["langfuse_tags"] == ["implement"]
+    assert "langfuse_session_id" not in root_meta  # no work item for /implement <task>
     assert trace.flushes == 1  # a parked run flushes but does not finish
     assert not trace.finished
+
+    gate = resume(
+        result.run,
+        "ok",
+        root=tmp_path,
+        cfg=_implement_cfg(),
+        init=_models(builder),
+        tracing=_tracing(made, handler),
+    )
+    assert isinstance(gate, Pending)
 
     outcome = resume(
         result.run,
         "y",
         root=tmp_path,
-        cfg=_fast_cfg(),
+        cfg=_implement_cfg(),
         init=_models(),
         tracing=_tracing(made, handler),
     )
 
     assert isinstance(outcome, Outcome)
     assert outcome.outcome == "done"
-    assert made[1].trace_id == result.run  # same trace across processes
-    finish = made[1].finished[0]
-    assert finish["kind"] == "fast"
+    assert made[-1].trace_id == result.run  # same trace across processes
+    finish = made[-1].finished[0]
+    assert finish["kind"] == "implement"
     assert finish["outcome"] == "done"
     assert finish["session_id"] is None
     assert finish["metadata"]["k0_version"] == __version__
@@ -405,27 +426,24 @@ def test_fast_run_trace_tags_and_finish(tmp_path):
     assert "change_url" not in finish["metadata"]  # no change yet: omitted
 
 
-def test_full_run_session_is_the_work_item(tmp_path):
+def test_plan_run_session_is_the_work_item(tmp_path):
     _git_repo(tmp_path)
     tracker = FakeTracker()
     item = tracker.create_work_item("Calc answers 42", "add a calc module")
     handler = _RecordingHandler()
     made = []
-    spec = FakeChatModel(
-        messages=[
-            AIMessage(
-                content="",
-                tool_calls=[{"name": "AgentBrief", "args": dict(BRIEF), "id": "b1"}],
-            )
-        ]
+    spec_msg = AIMessage(
+        content="",
+        tool_calls=[{"name": "Spec", "args": dict(SPEC), "id": "b1"}],
     )
+    planner = FakeChatModel(messages=[spec_msg, spec_msg])
 
     result = start(
-        "full",
+        "plan",
         f"#{item.ref}",
         root=tmp_path,
-        cfg=_full_cfg(),
-        init=_models(spec),
+        cfg=_plan_cfg(),
+        init=_models(planner),
         tracker=tracker,
         check=lambda *a, **k: [],
         scan=lambda r: "scanned",
@@ -435,7 +453,7 @@ def test_full_run_session_is_the_work_item(tmp_path):
     assert isinstance(result, Pending)
     root_meta = handler.root_metadata[0]
     assert root_meta["langfuse_session_id"] == f"acme/widgets#{item.ref}"
-    assert root_meta["langfuse_tags"] == ["full"]
+    assert root_meta["langfuse_tags"] == ["plan"]
     assert made[0].flushes == 1
 
 
@@ -503,19 +521,14 @@ def test_ask_session_is_the_sitting(tmp_path):
     assert handler.root_metadata[0]["langfuse_session_id"] == "sitting-1"
 
 
-def _start_fast(tmp_path, made, handler, **extra):
-    tester = FakeChatModel(
-        messages=[_write("tests/test_calc.py", TEST_SRC), AIMessage(content="tests")]
-    )
-    coder = FakeChatModel(
-        messages=[_write("calc.py", CALC_SRC), AIMessage(content="code")]
-    )
+def _start_implement(tmp_path, made, handler, **extra):
+    seams = FakeChatModel(messages=[AIMessage(content=SEAMS)])
     return start(
-        "fast",
+        "implement",
         "add a calc module that answers 42",
         root=tmp_path,
-        cfg=_fast_cfg(),
-        init=_models(tester, coder),
+        cfg=_implement_cfg(),
+        init=_models(seams),
         check=lambda *a, **k: [],
         scan=lambda r: "scanned",
         tracing=_tracing(made, handler),
@@ -523,35 +536,61 @@ def _start_fast(tmp_path, made, handler, **extra):
     )
 
 
-def test_fast_session_is_the_sitting_across_start_and_resume(tmp_path):
+def test_implement_session_is_the_sitting_across_start_and_resume(tmp_path):
     _git_repo(tmp_path)
     handler = _RecordingHandler()
     made = []
 
-    result = _start_fast(tmp_path, made, handler, session="sitting-1")
+    result = _start_implement(tmp_path, made, handler, session="sitting-1")
 
     assert handler.root_metadata[0]["langfuse_session_id"] == "sitting-1"
+    builder = FakeChatModel(
+        messages=[
+            _write("tests/test_calc.py", TEST_SRC),
+            _run_tests(),
+            _write("calc.py", CALC_SRC, "w2"),
+            _run_tests("r2"),
+            AIMessage(content="done"),
+        ]
+    )
+    resume(
+        result.run,
+        "ok",
+        root=tmp_path,
+        cfg=_implement_cfg(),
+        init=_models(builder),
+        tracing=_tracing(made, handler),
+    )
     resume(
         result.run,
         "y",
         root=tmp_path,
-        cfg=_fast_cfg(),
+        cfg=_implement_cfg(),
         init=_models(),
         tracing=_tracing(made, handler),
         session="sitting-2",
     )
-    assert made[1].finished[0]["session_id"] == "sitting-2"
+    assert made[-1].finished[0]["session_id"] == "sitting-2"
 
 
 def test_run_start_events_carry_the_sitting(tmp_path):
     _git_repo(tmp_path)
-    result = _start_fast(tmp_path, [], None, session="sitting-1")
+    result = _start_implement(tmp_path, [], None, session="sitting-1")
+    builder = FakeChatModel(
+        messages=[
+            _write("tests/test_calc.py", TEST_SRC),
+            _run_tests(),
+            _write("calc.py", CALC_SRC, "w2"),
+            _run_tests("r2"),
+            AIMessage(content="done"),
+        ]
+    )
     resume(
         result.run,
-        "y",
+        "ok",
         root=tmp_path,
-        cfg=_fast_cfg(),
-        init=_models(),
+        cfg=_implement_cfg(),
+        init=_models(builder),
         session="sitting-2",
     )
 
@@ -565,7 +604,7 @@ def test_run_start_events_carry_the_sitting(tmp_path):
 
 def test_a_run_without_a_sitting_has_no_session_field(tmp_path):
     _git_repo(tmp_path)
-    _start_fast(tmp_path, [], None)
+    _start_implement(tmp_path, [], None)
 
     lines = (tmp_path / ".k0-mem" / "events.jsonl").read_text().splitlines()
     start_event = json.loads(lines[0])
@@ -573,26 +612,23 @@ def test_a_run_without_a_sitting_has_no_session_field(tmp_path):
     assert "session" not in start_event
 
 
-def test_full_keeps_the_work_item_as_its_session(tmp_path):
+def test_plan_keeps_the_work_item_as_its_session(tmp_path):
     _git_repo(tmp_path)
     tracker = FakeTracker()
     item = tracker.create_work_item("Calc answers 42", "add a calc module")
     handler = _RecordingHandler()
-    spec = FakeChatModel(
-        messages=[
-            AIMessage(
-                content="",
-                tool_calls=[{"name": "AgentBrief", "args": dict(BRIEF), "id": "b1"}],
-            )
-        ]
+    spec_msg = AIMessage(
+        content="",
+        tool_calls=[{"name": "Spec", "args": dict(SPEC), "id": "b1"}],
     )
+    planner = FakeChatModel(messages=[spec_msg, spec_msg])
 
     start(
-        "full",
+        "plan",
         f"#{item.ref}",
         root=tmp_path,
-        cfg=_full_cfg(),
-        init=_models(spec),
+        cfg=_plan_cfg(),
+        init=_models(planner),
         tracker=tracker,
         check=lambda *a, **k: [],
         scan=lambda r: "scanned",
@@ -609,19 +645,23 @@ def test_runs_without_the_extra_behave_normally(tmp_path):
     """No ``tracing`` seam: the default factory finds no langfuse and the
     run is unchanged (the suite itself runs without the extra)."""
     _git_repo(tmp_path)
-    tester = FakeChatModel(
-        messages=[_write("tests/test_calc.py", TEST_SRC), AIMessage(content="tests")]
-    )
-    coder = FakeChatModel(
-        messages=[_write("calc.py", CALC_SRC), AIMessage(content="code")]
+    seams = FakeChatModel(messages=[AIMessage(content=SEAMS)])
+    builder = FakeChatModel(
+        messages=[
+            _write("tests/test_calc.py", TEST_SRC),
+            _run_tests(),
+            _write("calc.py", CALC_SRC, "w2"),
+            _run_tests("r2"),
+            AIMessage(content="done"),
+        ]
     )
 
     result = start(
-        "fast",
+        "implement",
         "add a calc module that answers 42",
         root=tmp_path,
-        cfg=_fast_cfg(),
-        init=_models(tester, coder),
+        cfg=_implement_cfg(),
+        init=_models(seams, builder),
         check=lambda *a, **k: [],
         scan=lambda r: "scanned",
     )

@@ -2,7 +2,7 @@
 
 #41 needs only reads — the current branch for ``run_start`` and the
 working-tree summary the diff gate shows. #44/#45 add the write side
-(branch, memory commits, commit + push + draft PR, stuck side effects)
+(branch, memory commits, commit + push + draft PR)
 as marker-idempotent nodes through this module.
 """
 
@@ -22,7 +22,7 @@ def dirty_paths(root: Path, *, ignored_prefix: str = ".k0-mem/") -> list[str]:
     """Porcelain lines for the working tree, minus ``.k0-mem/`` entries.
 
     Local memory is the harness's own scratch space — it never makes the
-    tree dirty for ``/full``.
+    tree dirty for a run.
     """
     status = _status(root)
     return [

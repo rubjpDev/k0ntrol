@@ -175,7 +175,7 @@ def _closing(ui) -> None:
 def _commands(
     ui, show: Callable[[str], None], config: dict, root: Path, klog: Callable[[Path], str]
 ) -> dict:
-    """The slash commands besides /ask, /fast, /full, /implement and /quit."""
+    """The slash commands besides the run commands, /ask and /quit."""
     help_ = ui.help if ui is not None else lambda: show(_HELP)
     rows = lambda: _status_rows(config, root)  # noqa: E731
     status = (lambda: ui.status(rows())) if ui is not None else (lambda: _show_rows(show, rows()))
@@ -210,7 +210,7 @@ def _reconfigure(ui, show: Callable[[str], None], config: dict, root: Path) -> N
 
 
 _HELP = (
-    "commands: /ask, /plan, /research, /implement, /triage, /fast, /full, "
+    "commands: /ask, /plan, /research, /implement, /triage, "
     "/status, /klog, /quit"
 )
 
@@ -591,7 +591,7 @@ def _route_text(line: str, *, ask: Callable[[str], None], work: Callable[[str, s
     """Plain text is a question for CHATTY; ``#12`` alone works issue 12."""
     text = line.strip()
     if re.fullmatch(r"#\d+", text):
-        work("full", text)
+        work("implement", text)
         return
     ask(text)
 
@@ -663,8 +663,14 @@ def _handle_command(
         return False
     handlers = {
         "/ask": ask,
-        "/fast": lambda task: work("fast", task),
-        "/full": lambda task: work("full", task),
+        "/fast": lambda _task: write(
+            "/fast is retired — /implement <task> builds a change; "
+            "/plan <idea> drafts the tickets"
+        ),
+        "/full": lambda _task: write(
+            "/full is retired — /plan <idea> drafts the tickets; "
+            "/implement #<n> builds one"
+        ),
         "/plan": lambda task: work("plan", task),
         "/research": lambda task: work("research", task),
         "/implement": lambda task: work("implement", task),

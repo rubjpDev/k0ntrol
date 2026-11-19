@@ -90,7 +90,7 @@ def test_enabled_with_the_endpoint_and_the_packages():
 def test_off_builds_a_trace_without_a_handler():
     trace = build_otel_trace(RUN, env={})
     assert trace.handler is None
-    trace.finish(kind="fast", outcome="done")  # no-ops, no raise
+    trace.finish(kind="implement", outcome="done")  # no-ops, no raise
     trace.flush()
 
 
@@ -107,7 +107,7 @@ def test_off_imports_and_builds_nothing():
         from k0ntrol.otel import build_run_trace
         before = set(sys.modules)  # langsmith may already pull opentelemetry in
         trace = build_run_trace("0123456789abcdef0123456789abcdef", env={})
-        trace.finish(kind="fast", outcome="done")
+        trace.finish(kind="implement", outcome="done")
         trace.flush()
         added = set(sys.modules) - before
         assert not added, sorted(added)
@@ -265,15 +265,15 @@ def test_finish_emits_the_run_outcome_span_and_flushes():
     exporter = _memory()
     trace = build_otel_trace(RUN, env=ENV, exporter=exporter)
     trace.finish(
-        kind="fast",
+        kind="implement",
         outcome="done",
         session_id="acme/widgets#4",
         metadata={"branch": "k0/4", "k0_version": "1.2.3"},
     )
     # no explicit flush(): finish already pushed the span to the exporter
-    span = {s.name: s for s in exporter.get_finished_spans()}["k0 fast end"]
+    span = {s.name: s for s in exporter.get_finished_spans()}["k0 implement end"]
     assert span.context.trace_id == int(RUN, 16)
-    assert span.attributes["k0.kind"] == "fast"
+    assert span.attributes["k0.kind"] == "implement"
     assert span.attributes["k0.outcome"] == "done"
     assert span.attributes["k0.session_id"] == "acme/widgets#4"
     assert span.attributes["k0.branch"] == "k0/4"
@@ -289,7 +289,7 @@ def test_flush_and_finish_never_raise(monkeypatch):
 
     monkeypatch.setattr(trace._provider, "force_flush", boom)
     trace.flush()
-    trace.finish(kind="full", outcome="stuck")
+    trace.finish(kind="plan", outcome="stuck")
 
 
 @needs_otel
@@ -306,14 +306,14 @@ def test_the_service_name_defaults_to_k0_and_yields_to_the_env(monkeypatch):
     monkeypatch.delenv("OTEL_SERVICE_NAME", raising=False)
     exporter = _memory()
     trace = build_otel_trace(RUN, env=ENV, exporter=exporter)
-    trace.finish(kind="fast")
+    trace.finish(kind="implement")
     resource = exporter.get_finished_spans()[0].resource
     assert resource.attributes["service.name"] == "k0"
 
     monkeypatch.setenv("OTEL_SERVICE_NAME", "mine")  # the SDK reads os.environ
     exporter = _memory()
     trace = build_otel_trace(RUN, env={**ENV, "OTEL_SERVICE_NAME": "mine"}, exporter=exporter)
-    trace.finish(kind="fast")
+    trace.finish(kind="implement")
     assert exporter.get_finished_spans()[0].resource.attributes["service.name"] == "mine"
 
 
@@ -351,10 +351,10 @@ def test_run_trace_fans_out_to_langfuse_and_otel(monkeypatch):
     assert trace.handler == "lf-handler"
     assert isinstance(trace.otel_handler, BaseCallbackHandler)
     assert otel_callbacks(trace) == [trace.otel_handler]
-    trace.finish(kind="fast", outcome="done")
+    trace.finish(kind="implement", outcome="done")
     trace.flush()
-    assert ("lf.finish", "fast") in calls and ("lf.flush",) in calls
-    assert "k0 fast end" in {s.name for s in exporter.get_finished_spans()}
+    assert ("lf.finish", "implement") in calls and ("lf.flush",) in calls
+    assert "k0 implement end" in {s.name for s in exporter.get_finished_spans()}
 
 
 @needs_otel
@@ -366,9 +366,9 @@ def test_one_side_failing_does_not_stop_the_other(monkeypatch):
     monkeypatch.setattr("k0ntrol.otel.build_trace", lambda *a, **k: lf)
     exporter = _memory()
     trace = build_run_trace(RUN, env=ENV, exporter=exporter)
-    trace.finish(kind="fast", outcome="done")
+    trace.finish(kind="implement", outcome="done")
     trace.flush()
-    assert "k0 fast end" in {s.name for s in exporter.get_finished_spans()}
+    assert "k0 implement end" in {s.name for s in exporter.get_finished_spans()}
 
 
 @needs_otel
@@ -426,27 +426,30 @@ def _write(path, content):
 
 
 @needs_otel
-def test_a_fast_run_exports_agent_model_and_tool_spans(tmp_path):
+def test_an_implement_run_exports_agent_model_and_tool_spans(tmp_path):
     _repo(tmp_path)
     exporter = _memory()
     test_src = "from calc import answer\n\n\ndef test_answer():\n    assert answer() == 42\n"
-    tester = FakeChatModel(
-        messages=[_write("tests/test_calc.py", test_src), AIMessage(content="tests")]
+    seams = FakeChatModel(
+        messages=[AIMessage(content="seam: calc.answer() -> int\nseam: tests/test_calc.py")]
     )
-    coder = FakeChatModel(
-        messages=[_write("calc.py", "def answer():\n    return 42\n"), AIMessage(content="code")]
+    builder = FakeChatModel(
+        messages=[
+            _write("calc.py", "def answer():\n    return 42\n"),
+            _write("tests/test_calc.py", test_src),
+            AIMessage(content="done"),
+        ]
     )
-    queue = [tester, coder]
+    queue = [seams, builder]
     cfg = cfg_with(
         {
-            "tester": {"provider": "anthropic", "model": "m", "model_calls": 40},
-            "coder": {"provider": "anthropic", "model": "m", "model_calls": 60},
+            "implementer": {"provider": "anthropic", "model": "m", "model_calls": 60},
         }
     )
     cfg.update({"test_cmd": STUB_TEST_CMD, "gates": [], "max_attempts": 2, "test_timeout": 60})
 
     result = start(
-        "fast",
+        "implement",
         "add a calc module that answers 42",
         root=tmp_path,
         cfg=cfg,
@@ -463,4 +466,4 @@ def test_a_fast_run_exports_agent_model_and_tool_spans(tmp_path):
     # the run paused at a gate: its spans were flushed there, no end marker yet
     assert any(n.startswith("chat") for n in names)
     assert "execute_tool write_file" in names
-    assert {s.attributes.get("k0.agent") for s in spans} >= {"tester", "coder"}
+    assert {s.attributes.get("k0.agent") for s in spans} >= {"implementer"}
