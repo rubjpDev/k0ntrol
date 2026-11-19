@@ -837,6 +837,43 @@ def test_a_crashed_agent_run_still_counts_in_the_cost(tmp_path):
     assert end["agent_runs"] == {"seam": 1, "implementer": 2}
 
 
+def test_a_custom_gate_named_validator_is_not_counted_twice(tmp_path):
+    """A configured gate called ``validator`` logs its own fail line
+    right before the aggregate's — one red, not two (#150)."""
+    git_repo(tmp_path)
+    cfg = implement_cfg(gates=[{"name": "validator", "cmd": "false"}])
+    pending = run_implement(tmp_path, cfg, seams_model())
+    assert isinstance(pending, Pending) and pending.gate == "seam"
+
+    builder = FakeChatModel(
+        messages=[
+            write_call("tests/test_calc.py", TEST_SRC),
+            run_tests_call(),
+            write_call("calc.py", CALC_SRC, "w2"),
+            run_tests_call("r2"),
+            AIMessage(content="first build"),
+            write_call("tests/test_calc.py", TEST_SRC, "w3"),
+            run_tests_call("r3"),
+            write_call("calc.py", CALC_SRC, "w4"),
+            run_tests_call("r4"),
+            AIMessage(content="second build"),
+        ]
+    )
+    pending = resume(
+        pending.run, "ok", root=tmp_path, cfg=cfg, init=models_init(builder)
+    )
+    assert isinstance(pending, Pending) and pending.gate == "limit_hit"
+    outcome = resume(
+        pending.run, "stop", root=tmp_path, cfg=cfg, init=models_init()
+    )
+    assert isinstance(outcome, Outcome) and outcome.outcome == "stuck"
+
+    end = next(
+        e for e in reversed(events(tmp_path)) if e["kind"] == "run_end"
+    )
+    assert end["validator_reds"] == 2
+
+
 def test_a_run_paused_at_a_gate_shows_no_cost_summary(tmp_path):
     """A run paused at a gate has not ended — nothing to sum up (#150)."""
     git_repo(tmp_path)

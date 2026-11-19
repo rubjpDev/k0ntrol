@@ -668,7 +668,7 @@ def run_cost(path: Path, run: str) -> dict[str, Any]:
     events = [e for e in _log_events(path) if e.get("run") == run]
     return {
         "agent_runs": _agent_runs(events),
-        "validator_reds": sum(1 for e in events if _is_red(e)),
+        "validator_reds": _validator_reds(events),
         "model_calls": sum(1 for e in events if e.get("kind") == "model"),
     }
 
@@ -680,6 +680,17 @@ def _agent_runs(events: list[dict]) -> dict[str, int]:
             label = str(event["agent"])
             runs[label] = runs.get(label, 0) + 1
     return runs
+
+
+def _validator_reds(events: list[dict]) -> int:
+    """One red per VALIDATOR round: a configured gate itself named
+    ``validator`` logs its own ``fail`` right before the aggregate's —
+    adjacent duplicates collapse into the one red they came from."""
+    reds = 0
+    for index, event in enumerate(events):
+        if _is_red(event) and not (index and _is_red(events[index - 1])):
+            reds += 1
+    return reds
 
 
 def _is_red(event: dict) -> bool:
