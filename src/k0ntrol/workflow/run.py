@@ -45,7 +45,7 @@ from k0ntrol.events import (  # noqa: E402
     ProgressRenderer,
     events_path,
     new_run_id,
-    run_model_calls,
+    run_cost,
 )
 from k0ntrol.memory.refresh import refresh_memory  # noqa: E402
 from k0ntrol.tools.tracker import latest_agent_brief  # noqa: E402
@@ -996,17 +996,15 @@ def _finish(ctx: RunContext, graph, run_id: str, config: RunnableConfig) -> Resu
     values = state.values
     outcome = values.get("outcome", "stuck")
     ms = _now_ms() - values.get("start_ms", _now_ms())
-    agent_runs = values.get("agent_runs") or {}
-    validator_reds = values.get("validator_reds", 0)
-    model_calls = run_model_calls(events_path(ctx.root), run_id)
+    cost = run_cost(events_path(ctx.root), run_id)
     ctx.writer.run_end(
         outcome,
         ms,
         reason=values.get("reason"),
         node=values.get("node"),
-        agent_runs=agent_runs or None,
-        validator_reds=validator_reds,
-        model_calls=model_calls,
+        agent_runs=cost["agent_runs"] or None,
+        validator_reds=cost["validator_reds"],
+        model_calls=cost["model_calls"],
     )
     _trace_finish(ctx, outcome, _session_id(ctx, values), values)
     if ctx.kind == "implement":
@@ -1018,9 +1016,9 @@ def _finish(ctx: RunContext, graph, run_id: str, config: RunnableConfig) -> Resu
         node=values.get("node"),
         redone=values.get("redone", False),
         ms=ms,
-        agent_runs=agent_runs,
-        validator_reds=validator_reds,
-        model_calls=model_calls,
+        agent_runs=cost["agent_runs"],
+        validator_reds=cost["validator_reds"],
+        model_calls=cost["model_calls"],
     )
 
 

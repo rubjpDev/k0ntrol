@@ -22,10 +22,10 @@ or resumed the run (the stem of its `.k0-mem/sessions/<id>.txt` file, also the
 Langfuse session of task runs and `/ask` chats), so the log can group runs
 by sitting. Omitted when no sitting is known.
 
-`EventWriter` appends lines for harness events (`run_start`, `gate`,
-`run_end`). `K0EventHandler` — the one callback attached to every graph and
-helper model call — emits the `model` and `tool` events through the same
-writer.
+`EventWriter` appends lines for harness events (`run_start`, `agent`,
+`gate`, `run_end`). `K0EventHandler` — the one callback attached to every
+graph and helper model call — emits the `model` and `tool` events through
+the same writer.
 
 Shared contract for tool refusals (the `denied` field): a tool refuses a
 call by raising an exception that carries a `denied` attribute with value
@@ -660,13 +660,33 @@ def cost_parts(
     return parts
 
 
-def run_model_calls(path: Path, run: str) -> int:
-    """The `model` events the run logged — helpers and failed calls
-    included — over the live file and the rotated ones."""
-    return sum(
-        1
-        for event in _log_events(path)
-        if event.get("run") == run and event.get("kind") == "model"
+def run_cost(path: Path, run: str) -> dict[str, Any]:
+    """The run's work counts off its event log (#150): agent runs per
+    label (the ``agent`` events — crashed runs count too), VALIDATOR
+    reds (its ``fail`` gate results) and model calls — helpers and
+    failed calls included."""
+    events = [e for e in _log_events(path) if e.get("run") == run]
+    return {
+        "agent_runs": _agent_runs(events),
+        "validator_reds": sum(1 for e in events if _is_red(e)),
+        "model_calls": sum(1 for e in events if e.get("kind") == "model"),
+    }
+
+
+def _agent_runs(events: list[dict]) -> dict[str, int]:
+    runs: dict[str, int] = {}
+    for event in events:
+        if event.get("kind") == "agent" and event.get("agent"):
+            label = str(event["agent"])
+            runs[label] = runs.get(label, 0) + 1
+    return runs
+
+
+def _is_red(event: dict) -> bool:
+    return (
+        event.get("kind") == "gate"
+        and event.get("gate") == "validator"
+        and event.get("result") == "fail"
     )
 
 

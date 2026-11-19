@@ -805,6 +805,38 @@ def test_the_session_shows_the_runs_cost_when_it_ends(tmp_path):
     assert summary[0].endswith("6 model calls")
 
 
+def test_a_crashed_agent_run_still_counts_in_the_cost(tmp_path):
+    """An agent run that dies mid-invoke still took work: ``run_end``
+    counts it even though its node update never landed (#150)."""
+    git_repo(tmp_path)
+    cfg = implement_cfg()
+    pending = run_implement(tmp_path, cfg, seams_model())
+    assert isinstance(pending, Pending) and pending.gate == "seam"
+
+    flaky = FakeChatModel(
+        messages=[
+            write_call("tests/test_calc.py", TEST_SRC),
+            RuntimeError("provider died"),
+        ]
+    )
+    with pytest.raises(RuntimeError, match="provider died"):
+        resume(pending.run, "ok", root=tmp_path, cfg=cfg, init=models_init(flaky))
+
+    pending = resume(
+        pending.run, None, root=tmp_path, cfg=cfg, init=models_init(builder_model())
+    )
+    assert isinstance(pending, Pending) and pending.gate == "diff"
+    outcome = resume(
+        pending.run, "y", root=tmp_path, cfg=cfg, init=models_init()
+    )
+    assert isinstance(outcome, Outcome) and outcome.outcome == "done"
+
+    end = next(
+        e for e in reversed(events(tmp_path)) if e["kind"] == "run_end"
+    )
+    assert end["agent_runs"] == {"seam": 1, "implementer": 2}
+
+
 def test_a_run_paused_at_a_gate_shows_no_cost_summary(tmp_path):
     """A run paused at a gate has not ended — nothing to sum up (#150)."""
     git_repo(tmp_path)
