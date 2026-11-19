@@ -12,6 +12,7 @@ resume and never fails a run.
 from __future__ import annotations
 
 import threading
+from collections import deque
 from collections.abc import Callable, Mapping
 from pathlib import Path
 
@@ -203,6 +204,8 @@ class Reflector:
     successfully. A fire covers ``_completed`` up to the transcript size at
     dispatch, and only a success moves ``_completed`` — so a failed range
     is covered again by the next reflect, after a run or at ``/quit``.
+    Rough runs keep their own end offsets until reflected successfully, so
+    a retry can recover their advice without asking for advice on a clean run.
     Reflect is not a graph node: it cannot delay an outcome, and a failure
     shows one line instead of failing the run.
     """
@@ -227,7 +230,7 @@ class Reflector:
         self._reflect = reflect
         self._threads: list[threading.Thread] = []
         self._dispatched = 0
-        self._dispatched_rough_run: str | None = None
+        self._rough_ranges: deque[tuple[int, str]] = deque()
         self._completed = 0
         self._ask_turns = 0
         self._cfg = cfg
@@ -250,11 +253,10 @@ class Reflector:
         """``/quit``: reflect pending ``/ask`` turns once, retry a failed
         range once, then wait."""
         self._wait()
-        failed = self._completed < self._dispatched
-        if failed or (self._ask_turns and self._has_new_text()):
-            self._fire(
-                chat=new_chat_id(), rough_run=self._dispatched_rough_run if failed else None,
-            )
+        if self._completed < self._dispatched or (
+            self._ask_turns and self._has_new_text()
+        ):
+            self._fire(chat=new_chat_id())
             self._wait()
 
     def _fire(
@@ -262,13 +264,14 @@ class Reflector:
         rough_run: str | None = None,
     ) -> None:
         self._dispatched = _transcript_size(self._transcript)
-        self._dispatched_rough_run = rough_run
+        if rough_run is not None:
+            self._rough_ranges.append((self._dispatched, rough_run))
         self._ask_turns = 0
         previous = self._tail
         self._tail = threading.Event()
         thread = threading.Thread(
             target=self._run,
-            args=(self._dispatched, run, chat, previous, self._tail, rough_run),
+            args=(self._dispatched, run, chat, previous, self._tail),
             daemon=True, name="k0-reflect",
         )
         self._threads.append(thread)
@@ -276,7 +279,7 @@ class Reflector:
 
     def _run(
         self, end: int, run: str | None, chat: str | None,
-        previous: threading.Event, completed: threading.Event, rough_run: str | None,
+        previous: threading.Event, completed: threading.Event,
     ) -> None:
         # Same trace id as the run or chat reflected on: its calls land in
         # that trace. Never ``finish``: that would overwrite the outcome tags.
@@ -292,7 +295,7 @@ class Reflector:
             )
             invoke = self._make_invoke(_callbacks(handler, trace))
             previous.wait()
-            self._reflect_range(end, invoke, rough_run)
+            self._reflect_through(end, invoke)
         except Exception as error:
             if self._write is not None:
                 self._write(f"reflect failed: {_short(error)}")
@@ -300,6 +303,14 @@ class Reflector:
             trace.flush()
             previous.wait()
             completed.set()
+
+    def _reflect_through(self, end: int, invoke: Invoke) -> None:
+        # Dispatch only appends; the ordered workers remove successful ranges.
+        while self._rough_ranges and self._rough_ranges[0][0] <= end:
+            rough_end, reason = self._rough_ranges[0]
+            self._reflect_range(rough_end, invoke, reason)
+            self._rough_ranges.popleft()
+        self._reflect_range(end, invoke, None)
 
     def _reflect_range(self, end: int, invoke: Invoke, rough_run: str | None) -> None:
         if self._completed >= end:
