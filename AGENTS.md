@@ -39,7 +39,7 @@ From the charting decision [rubjpDev/k0ntrol#3](https://github.com/rubjpDev/k0nt
 
 - Edges between agents are code, never a supervisor LLM. The agent decides how to do its node; the workflow graph decides which node runs.
 - Each agent's tool allowlist and path guards are enforced in code.
-- Gates are code or the human, never a prompt. VALIDATOR is deterministic (`test_cmd` + `gates`).
+- Gates are code or the human, never a prompt. The VALIDATOR gate is deterministic (`test_cmd` + `gates`).
 - Each agent run starts with fresh context.
 - k0 never merges.
 - Every model invocation emits one JSONL event.

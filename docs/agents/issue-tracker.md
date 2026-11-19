@@ -4,6 +4,8 @@ Issues and specs for this repo live as GitHub issues on `rubjpDev/k0ntrol`. Use 
 
 Work starts from a GitHub issue. Use one issue per branch and pull request, and commit with `#<issue>: <what>`.
 
+In the k0 REPL, use `/plan` to publish a spec and its tickets, `/triage #<issue>` to prepare an existing issue, and `/implement #<issue>` to build one ready work item. These are k0 commands, not the contributor skills `/implement-spec` and `/wayfinder`. See the [workflow commands](../../README.md#workflow-commands).
+
 ## Issue titles
 
 Every issue created for product work carries exactly one title prefix. The prefix says what kind of issue it is. The rest of the title is the outcome, in English.

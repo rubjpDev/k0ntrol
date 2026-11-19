@@ -12,4 +12,6 @@ The skills speak in terms of five canonical triage roles. This file maps those r
 
 When a skill mentions a role (e.g. "apply the AFK-ready triage label"), use the corresponding label string from this table.
 
+In the k0 REPL, `/triage #<issue>` applies one state label and one category label after human approval. If the state is `ready-for-agent`, it posts an agent brief for `/implement #<issue>`.
+
 Edit the right-hand column to match whatever vocabulary you actually use.
