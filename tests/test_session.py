@@ -402,7 +402,7 @@ class _RecordingReflector:
     def ask_turn(self) -> None:
         self.calls.append("ask")
 
-    def after_run(self, run: str) -> None:
+    def after_run(self, run: str, **_kwargs) -> None:
         snapshot = None if self._shown is None else list(self._shown)
         self.calls.append(("run", run, snapshot))
 
@@ -550,8 +550,8 @@ def test_quit_waits_for_a_running_reflect(tmp_path):
     inside_finish = threading.Event()
 
     class SlowReflector(_RecordingReflector):
-        def after_run(self, run):
-            super().after_run(run)
+        def after_run(self, run, **kwargs):
+            super().after_run(run, **kwargs)
             entered.set()
 
         def finish(self):

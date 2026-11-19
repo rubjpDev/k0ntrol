@@ -36,6 +36,11 @@ from k0ntrol.otel import build_run_trace, trace_callbacks
 
 Invoke = Callable[[str], Mapping]
 MEM_RELATIVE = Path(".k0-mem") / "General_mem" / "Mem.md"
+_ENVIRONMENT_KINDS = {
+    "gate": "a new deterministic check for a mechanical mistake",
+    "rule": "a coding rule for a judgement call",
+    "hint": "a navigation hint where an agent got lost",
+}
 
 # The reflect helper's structured output shape (with_structured_output).
 REFLECT_SCHEMA = {
@@ -53,6 +58,14 @@ REFLECT_SCHEMA = {
             "items": {"type": "string"},
             "description": "project-wide Mem.md bullet proposals",
         },
+        "environment": {
+            "type": "object",
+            "description": "Read-only advice for the human after a rough run.",
+            "properties": {
+                kind: {"type": "array", "items": {"type": "string"}, "description": description}
+                for kind, description in _ENVIRONMENT_KINDS.items()
+            },
+        },
     },
     "required": ["facts", "mem"],
 }
@@ -65,13 +78,29 @@ def run_reflect(
     transcript: Path | None = None,
     offset: int = 0,
     end: int | None = None,
-) -> None:
-    """Invoke the reflect helper; store facts and pending Mem.md proposals."""
-    raw = invoke(_reflect_prompt(root, transcript, offset, end))
+    rough_run: str | None = None,
+) -> list[str]:
+    """Store facts and Mem.md proposals; return display-only environment advice."""
+    raw = invoke(_reflect_prompt(root, transcript, offset, end, rough_run))
     for body in _output_bodies(raw, "facts"):
         add_fact(root, body)
     for body in _output_bodies(raw, "mem"):
         add_mem_proposal(root, body)
+    return _environment_lines(raw) if rough_run else []
+
+
+def _environment_lines(raw: object) -> list[str]:
+    environment = raw.get("environment") if isinstance(raw, Mapping) else None
+    return [
+        f"[{kind}] {body}"
+        for kind in _ENVIRONMENT_KINDS
+        for body in map(_one_line, _output_bodies(environment, kind))
+        if body
+    ]
+
+
+def _one_line(body: str) -> str:
+    return " ".join("".join(char if char.isprintable() else " " for char in body).split())
 
 
 def _output_bodies(raw: object, key: str) -> list[str]:
@@ -115,13 +144,27 @@ def _append_mem(root: Path, body: str) -> None:
     path.write_text(f"{existing}{prefix}- {body}\n", encoding="utf-8")
 
 
-def _reflect_prompt(root: Path, transcript: Path | None, offset: int, end: int | None) -> str:
-    sections = [
+def _reflect_prompt(
+    root: Path, transcript: Path | None, offset: int, end: int | None, rough_run: str | None,
+) -> str:
+    instructions = (
         "You are the reflect helper. Distill this part of the session "
         "transcript into durable session facts and, only where a fact is "
-        "worth keeping project-wide, Mem.md bullet proposals.\n"
-        "\nSession transcript:\n"
-        + (_transcript_text(transcript, offset, end) or "(empty)")
+        "worth keeping project-wide, Mem.md bullet proposals."
+    )
+    if rough_run:
+        instructions += (
+            f"\nThe run {rough_run}. In environment, suggest a gate for a mechanical "
+            "mistake, a coding rule for a judgement call, or a navigation hint where "
+            "an agent got lost. Only propose changes supported by this run; leave "
+            "categories empty when there is no actionable lesson. The human sees "
+            "the suggestions but they are never applied; do not copy them into Mem.md proposals."
+        )
+    else:
+        instructions += "\nLeave environment empty; this is not a rough run."
+    sections = [
+        instructions,
+        "Session transcript:\n" + (_transcript_text(transcript, offset, end) or "(empty)"),
     ]
     decided = _decided_mem_prompt(root)
     if decided:
@@ -172,6 +215,7 @@ class Reflector:
         cfg: dict,
         init: Callable = init_chat_model,
         write: Callable[[str], None] | None = None,
+        propose: Callable[[list[str]], None] | None = None,
         reflect: Callable = run_reflect,
         make_invoke: Callable[[list], Invoke] | None = None,
         tracing: Callable = build_run_trace,
@@ -179,9 +223,11 @@ class Reflector:
         self._root = root
         self._transcript = transcript
         self._write = write
+        self._propose = propose
         self._reflect = reflect
         self._threads: list[threading.Thread] = []
         self._dispatched = 0
+        self._dispatched_rough_run: str | None = None
         self._completed = 0
         self._ask_turns = 0
         self._cfg = cfg
@@ -195,28 +241,34 @@ class Reflector:
         """One ``/ask`` exchange happened since the last reflect check."""
         self._ask_turns += 1
 
-    def after_run(self, run_id: str) -> None:
+    def after_run(self, run_id: str, *, stuck: bool = False, redone: bool = False) -> None:
         """Fire a background reflect for an ended run; never blocks."""
-        self._fire(run=run_id)
+        rough_run = "took a redo" if redone else None
+        self._fire(run=run_id, rough_run="ended stuck" if stuck else rough_run)
 
     def finish(self) -> None:
         """``/quit``: reflect pending ``/ask`` turns once, retry a failed
         range once, then wait."""
         self._wait()
-        if self._completed < self._dispatched or (
-            self._ask_turns and self._has_new_text()
-        ):
-            self._fire(chat=new_chat_id())
+        failed = self._completed < self._dispatched
+        if failed or (self._ask_turns and self._has_new_text()):
+            self._fire(
+                chat=new_chat_id(), rough_run=self._dispatched_rough_run if failed else None,
+            )
             self._wait()
 
-    def _fire(self, *, run: str | None = None, chat: str | None = None) -> None:
+    def _fire(
+        self, *, run: str | None = None, chat: str | None = None,
+        rough_run: str | None = None,
+    ) -> None:
         self._dispatched = _transcript_size(self._transcript)
+        self._dispatched_rough_run = rough_run
         self._ask_turns = 0
         previous = self._tail
         self._tail = threading.Event()
         thread = threading.Thread(
             target=self._run,
-            args=(self._dispatched, run, chat, previous, self._tail),
+            args=(self._dispatched, run, chat, previous, self._tail, rough_run),
             daemon=True, name="k0-reflect",
         )
         self._threads.append(thread)
@@ -224,7 +276,7 @@ class Reflector:
 
     def _run(
         self, end: int, run: str | None, chat: str | None,
-        previous: threading.Event, completed: threading.Event,
+        previous: threading.Event, completed: threading.Event, rough_run: str | None,
     ) -> None:
         # Same trace id as the run or chat reflected on: its calls land in
         # that trace. Never ``finish``: that would overwrite the outcome tags.
@@ -240,17 +292,7 @@ class Reflector:
             )
             invoke = self._make_invoke(_callbacks(handler, trace))
             previous.wait()
-            offset = self._completed
-            if offset >= end:
-                return
-            self._reflect(
-                root=self._root,
-                invoke=invoke,
-                transcript=self._transcript,
-                offset=offset,
-                end=end,
-            )
-            self._completed = end
+            self._reflect_range(end, invoke, rough_run)
         except Exception as error:
             if self._write is not None:
                 self._write(f"reflect failed: {_short(error)}")
@@ -258,6 +300,21 @@ class Reflector:
             trace.flush()
             previous.wait()
             completed.set()
+
+    def _reflect_range(self, end: int, invoke: Invoke, rough_run: str | None) -> None:
+        if self._completed >= end:
+            return
+        proposals = self._reflect(
+            root=self._root,
+            invoke=invoke,
+            transcript=self._transcript,
+            offset=self._completed,
+            end=end,
+            rough_run=rough_run,
+        )
+        self._completed = end
+        if proposals and self._propose is not None:
+            self._propose(proposals)
 
     def _progress(self) -> ProgressRenderer | None:
         if self._write is None:

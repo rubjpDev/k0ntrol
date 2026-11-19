@@ -127,7 +127,7 @@ The facts reflect distills from transcripts. It stays local and is never committ
 _Avoid_: History, chat log
 
 **Reflect**:
-The background pass after each run that turns its transcript into session memory and proposes additions to `Mem.md`.
+The background pass after each run that turns its transcript into session memory and proposes additions to `Mem.md`. After a stuck run or a redo, it can also suggest gates, coding rules or navigation hints for the human, without applying them.
 _Avoid_: Summarize, consolidate
 
 **Provider**:
