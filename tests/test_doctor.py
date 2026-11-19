@@ -54,10 +54,49 @@ def anthropic_cfg(**overrides):
 
 
 def test_all_green_config_reports_only_ok():
-    checks = free_checks(anthropic_cfg())
+    cfg = anthropic_cfg()
+    cfg["search"] = {"provider": "brave"}
+    checks = free_checks(
+        cfg, environ={"ANTHROPIC_API_KEY": "x", "BRAVE_SEARCH_API_KEY": "fake-search-key"}
+    )
     assert errors(checks) == []
     assert warnings(checks) == []
     assert any(c.name == "config" and c.status == "ok" for c in checks)
+    assert any(
+        c.name == "web search" and c.status == "ok" and "brave" in c.detail
+        for c in checks
+    )
+    assert all("fake-search-key" not in c.detail for c in checks)
+
+
+def test_unconfigured_search_warns_which_agents_lack_web_search():
+    checks = free_checks(anthropic_cfg())
+    assert any(
+        c.name == "web search"
+        and "PLANNER and RESEARCHER will have no web search" in c.detail
+        for c in warnings(checks)
+    )
+    assert errors(checks) == []
+
+
+def test_search_provider_without_a_key_reports_the_variable_to_set():
+    cfg = anthropic_cfg()
+    cfg["search"] = {"provider": "brave"}
+    checks = free_checks(cfg)
+    assert any(
+        c.name == "web search" and "set BRAVE_SEARCH_API_KEY" in c.detail
+        for c in errors(checks)
+    )
+
+
+def test_unknown_search_provider_reports_an_error_with_supported_providers():
+    cfg = anthropic_cfg()
+    cfg["search"] = {"provider": "braev"}
+    checks = free_checks(cfg)
+    assert any(
+        c.name == "web search" and "braev" in c.detail and "brave" in c.detail
+        for c in errors(checks)
+    )
 
 
 def test_unknown_provider_is_an_error_naming_it():

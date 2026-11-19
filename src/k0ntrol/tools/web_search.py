@@ -24,6 +24,7 @@ from k0ntrol.search import (
     SearchProvider,
     SearchRequest,
     SearchResult,
+    search_provider_name,
 )
 from k0ntrol.tools.errors import ToolError
 
@@ -63,7 +64,7 @@ def make_web_search(
     fetch: Fetch | None = None,
 ) -> BaseTool:
     """Build ``web_search`` for the ``search.provider`` named in ``cfg``."""
-    name = _provider_name(cfg)
+    name = search_provider_name(cfg)
     provider = SEARCH_PROVIDERS.get(name) if name is not None else None
     env = os.environ if environ is None else environ
     http = fetch or http_fetch
@@ -112,12 +113,6 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
 
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         return None
-
-
-def _provider_name(cfg: dict) -> str | None:
-    search = cfg.get("search")
-    name = search.get("provider") if isinstance(search, dict) else None
-    return name if isinstance(name, str) else None
 
 
 def _run_search(

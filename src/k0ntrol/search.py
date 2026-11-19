@@ -48,6 +48,13 @@ class SearchProvider:
     parse_results: Callable[[bytes], list[SearchResult]]
 
 
+def search_provider_name(cfg: dict) -> str | None:
+    """Read the provider named by ``search.provider``, if configured."""
+    search = cfg.get("search")
+    name = search.get("provider") if isinstance(search, dict) else None
+    return name if isinstance(name, str) else None
+
+
 def _brave_request(endpoint: str, query: str, api_key: str) -> SearchRequest:
     url = f"{endpoint}?q={quote(query, safe='')}"
     headers = {"Accept": "application/json", "X-Subscription-Token": api_key}
