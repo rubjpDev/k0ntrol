@@ -671,3 +671,62 @@ def test_plain_gate_prints_the_diff_after_the_detail(tmp_path):
     )
     text = "\n".join(shown)
     assert text.index("the review") < text.index("diff --git a/x b/x") < text.index("approve?")
+
+
+import pytest
+
+
+@pytest.mark.parametrize(
+    ("line", "kind", "task"),
+    [
+        ("/plan add a checkout page", "plan", "add a checkout page"),
+        ("/plan #4", "plan", "#4"),
+        ("/research which queue library?", "research", "which queue library?"),
+        ("/research #9", "research", "#9"),
+        ("/triage #5", "triage", "#5"),
+        ("/implement #12", "implement", "#12"),
+    ],
+)
+def test_each_new_command_starts_its_graph_with_the_text_or_ref(tmp_path, line, kind, task):
+    from k0ntrol.workflow import Outcome
+
+    calls = []
+
+    def fake_start(kind, task, **kwargs):
+        calls.append((kind, task))
+        return Outcome(run="r1", outcome="done")
+
+    lines = iter([line, "/quit"])
+    run_session(lambda: next(lines), lambda _: None, root=tmp_path, config=config(),
+                start=fake_start)
+    assert calls == [(kind, task)]
+
+
+def test_help_lists_the_new_commands(tmp_path):
+    lines = iter(["/help", "/quit"])
+    shown = []
+    run_session(lambda: next(lines), shown.append, root=tmp_path, config=config())
+    text = "\n".join(shown)
+    for command in ("/plan", "/research", "/implement", "/triage"):
+        assert command in text
+
+
+def test_a_free_text_gate_takes_the_whole_line_without_listing_answers(tmp_path):
+    from k0ntrol.workflow import Outcome, Pending
+
+    decisions = []
+
+    def fake_start(kind, task, **kwargs):
+        return Pending(run="r1", gate="round", question="answer the round's questions in one line",
+                       answers=(), detail="1. Postgres? (recommended: yes)")
+
+    def fake_resume(run_id, decision, **kwargs):
+        decisions.append(decision)
+        return Outcome(run=run_id, outcome="done")
+
+    lines = iter(["/plan add billing", "1 no: use SQLite", "/quit"])
+    shown = []
+    run_session(lambda: next(lines), shown.append, root=tmp_path, config=config(),
+                start=fake_start, resume=fake_resume)
+    assert decisions == ["1 no: use SQLite"]
+    assert "answer the round's questions in one line" in shown

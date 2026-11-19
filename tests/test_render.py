@@ -442,6 +442,12 @@ def test_gate_panel_is_rounded_with_title_and_no_question() -> None:
         ("ci", "CI gate"),
         ("diff", "Diff gate"),
         ("limit_hit", "Limit hit"),
+        ("round", "Q&A round"),
+        ("question_limit", "Question limit"),
+        ("ticket", "Ticket gate"),
+        ("seam", "Seam gate"),
+        ("decision", "Decision gate"),
+        ("outcome", "Triage outcome"),
         ("custom_check", "Custom check"),
     ],
 )

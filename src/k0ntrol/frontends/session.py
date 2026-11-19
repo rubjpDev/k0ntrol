@@ -209,7 +209,10 @@ def _reconfigure(ui, show: Callable[[str], None], config: dict, root: Path) -> N
     config.update(fresh)
 
 
-_HELP = "commands: /ask, /fast, /full, /implement, /status, /klog, /quit"
+_HELP = (
+    "commands: /ask, /plan, /research, /implement, /triage, /fast, /full, "
+    "/status, /klog, /quit"
+)
 
 
 def _status_rows(config: dict, root: Path) -> list[tuple[str, str]]:
@@ -518,8 +521,10 @@ def _show_pending(pending: Pending, show: Callable[[str], None]) -> None:
     for part in (pending.detail, pending.diff):
         if part:
             show(part)
-    answers = "/".join(pending.answers)
-    show(f"{pending.question} [{answers}]")
+    if not pending.answers:
+        show(pending.question)
+        return
+    show(f"{pending.question} [{'/'.join(pending.answers)}]")
 
 
 def _gate_answer(
@@ -660,7 +665,10 @@ def _handle_command(
         "/ask": ask,
         "/fast": lambda task: work("fast", task),
         "/full": lambda task: work("full", task),
+        "/plan": lambda task: work("plan", task),
+        "/research": lambda task: work("research", task),
         "/implement": lambda task: work("implement", task),
+        "/triage": lambda task: work("triage", task),
     }
     handlers.update({name: lambda _arg, f=f: f() for name, f in commands.items()})
     handler = handlers.get(command)

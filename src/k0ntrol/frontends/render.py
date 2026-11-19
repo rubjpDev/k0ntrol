@@ -62,6 +62,12 @@ _GATE_TITLES = {
     "ci": "CI gate",
     "diff": "Diff gate",
     "limit_hit": "Limit hit",
+    "round": "Q&A round",
+    "question_limit": "Question limit",
+    "ticket": "Ticket gate",
+    "seam": "Seam gate",
+    "decision": "Decision gate",
+    "outcome": "Triage outcome",
 }
 
 _DECISIONS = {

@@ -35,7 +35,7 @@ from k0ntrol.frontends.editor import (
     utf8_length,
     wrap_segments,
 )
-from k0ntrol.frontends.theme import ACCENT, BRAND, WARN
+from k0ntrol.frontends.theme import ACCENT, BRAND, OK
 
 MODES = list(DEFAULT_MODES)
 COMMANDS = {"/help": "help", "/history": "history", "/quit": "quit", "/fast": "fast"}
@@ -214,14 +214,14 @@ def test_up_without_history_does_nothing():
 @pytest.mark.parametrize(
     ("buffer", "expected"),
     [
-        ("/fast fix it", "fast"),
-        ("/fast", "fast"),
-        ("/full build", "full"),
-        ("#123", "full"),
-        ("#123 now", "full"),
+        ("/plan add billing", "plan"),
+        ("/plan", "plan"),
+        ("/implement #12", "implement"),
         ("/ask why", "chat"),
-        ("/fastest", None),
-        ("#abc", None),
+        ("/fast fix it", None),
+        ("/full build", None),
+        ("#123", None),
+        ("/planner", None),
         ("hello #1", None),
         ("", None),
     ],
@@ -231,10 +231,11 @@ def test_prefix_mode_name(buffer, expected):
 
 
 def test_effective_mode_prefix_beats_selection():
-    assert effective_mode("/fast x", 0, MODES).name == "fast"
+    assert effective_mode("/plan x", 0, MODES).name == "plan"
     assert effective_mode("/ask x", 2, MODES).name == "chat"
-    assert effective_mode("hello", 2, MODES).name == "full"
-    assert effective_mode("/fast x", 0, [MODES[0]]).name == "chat"
+    assert effective_mode("hello", 2, MODES).name == "implement"
+    assert effective_mode("/fast x", 1, MODES).name == "plan"
+    assert effective_mode("/plan x", 0, [MODES[0]]).name == "chat"
 
 
 # --- rendering -------------------------------------------------------------
@@ -267,26 +268,26 @@ def test_empty_input_shows_the_mode_hint_as_placeholder():
 
 
 def test_mode_name_sits_in_the_top_border():
-    assert box(mode_index=1)[0].startswith("╭─ fast ")
-    assert box(mode_index=2)[0].startswith("╭─ full ")
+    assert box(mode_index=1)[0].startswith("╭─ plan ")
+    assert box(mode_index=2)[0].startswith("╭─ implement ")
 
 
 def test_prefix_recolours_border_and_name():
-    assert box("/fast x")[0].startswith("╭─ fast ")
-    assert box("#12")[0].startswith("╭─ full ")
+    assert box("/plan x")[0].startswith("╭─ plan ")
+    assert box("/implement #12")[0].startswith("╭─ implement ")
     assert box("/ask x", mode_index=1)[0].startswith("╭─ chat ")
 
 
 def test_border_is_painted_with_the_mode_colour():
-    state = EditorState(buffer="/fast x", cursor=7)
+    state = EditorState(buffer="/plan x", cursor=7)
     lines = render_box(state, width=40, status="s", modes=MODES, color=True)
-    red, green, blue = (int(WARN[i : i + 2], 16) for i in (1, 3, 5))
-    assert f"\x1b[38;2;{red};{green};{blue}m╭─ fast" in lines[0]
+    red, green, blue = (int(ACCENT[i : i + 2], 16) for i in (1, 3, 5))
+    assert f"\x1b[38;2;{red};{green};{blue}m╭─ plan" in lines[0]
     assert "\x1b[38;2;" in lines[1]
     chat = render_box(EditorState(), width=40, status="s", modes=MODES, color=True)
     assert f"{int(BRAND[1:3], 16)};" in chat[0]
-    full = render_box(EditorState(mode_index=2), width=40, status="s", modes=MODES)
-    assert f"{int(ACCENT[1:3], 16)};" in full[0]
+    implement = render_box(EditorState(mode_index=2), width=40, status="s", modes=MODES)
+    assert f"{int(OK[1:3], 16)};" in implement[0]
 
 
 def test_color_off_emits_no_colour_codes():
@@ -456,19 +457,19 @@ def test_submit_replaces_the_frame_with_one_dim_line():
 
 
 def test_prefix_decides_the_returned_mode():
-    line_editor, _ = make_editor([*typed("/fast x"), "enter"])
-    assert read(line_editor) == ("fast", "/fast x")
-    line_editor, _ = make_editor([*typed("#12"), "enter"])
-    assert read(line_editor) == ("full", "#12")
+    line_editor, _ = make_editor([*typed("/plan x"), "enter"])
+    assert read(line_editor) == ("plan", "/plan x")
+    line_editor, _ = make_editor(["shift_tab", *typed("/ask why"), "enter"])
+    assert read(line_editor) == ("chat", "/ask why")
 
 
 def test_shift_tab_changes_the_mode_and_it_persists_between_reads():
     line_editor, out = make_editor(["shift_tab", *typed("a"), "enter", *typed("b"), "enter"])
     assert line_editor.mode == "chat"
-    assert read(line_editor) == ("fast", "a")
-    assert line_editor.mode == "fast"
-    assert read(line_editor) == ("fast", "b")
-    assert "╭─ fast" in out.getvalue()
+    assert read(line_editor) == ("plan", "a")
+    assert line_editor.mode == "plan"
+    assert read(line_editor) == ("plan", "b")
+    assert "╭─ plan" in out.getvalue()
 
 
 def test_custom_modes_are_used():

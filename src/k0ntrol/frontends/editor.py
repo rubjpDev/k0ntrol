@@ -28,7 +28,7 @@ from typing import TextIO
 
 from rich.cells import cell_len
 
-from k0ntrol.frontends.theme import ACCENT, BRAND, DIM, OK, POINTER, WARN
+from k0ntrol.frontends.theme import ACCENT, BRAND, DIM, OK, POINTER
 
 try:
     import termios
@@ -61,17 +61,14 @@ class Mode:
 
 DEFAULT_MODES = (
     Mode("chat", BRAND, "ask about this repo"),
-    Mode("fast", WARN, "quick test-first change"),
-    Mode("full", ACCENT, "new work, spec first"),
-    Mode("implement", OK, "build a task in the working tree"),
+    Mode("plan", ACCENT, "new work: Q&A, then a spec and its tickets"),
+    Mode("implement", OK, "build #<ticket> or a task, test-first"),
 )
 _PREFIX_MODES = {
-    "/fast": "fast",
-    "/full": "full",
+    "/plan": "plan",
     "/implement": "implement",
     "/ask": "chat",
 }
-_ISSUE_REF = re.compile(r"#\d+")
 
 
 @dataclass(frozen=True)
@@ -118,12 +115,10 @@ Handler = Callable[[EditorState, Env], Outcome]
 
 
 def prefix_mode_name(buffer: str) -> str | None:
-    """The mode a typed prefix forces (``/fast``, ``/full``, ``#12``, ``/ask``)."""
+    """The mode a typed prefix forces (``/plan``, ``/implement``, ``/ask``)."""
     words = buffer.split(maxsplit=1)
     if not words:
         return None
-    if _ISSUE_REF.fullmatch(words[0]):
-        return "full"
     return _PREFIX_MODES.get(words[0])
 
 
