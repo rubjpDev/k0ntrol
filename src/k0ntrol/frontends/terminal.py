@@ -28,9 +28,12 @@ from k0ntrol.frontends.theme import ACCENT, BULLET, DIM, ERROR, WARN
 
 COMMANDS = {
     "/ask": "ask a question about this repo",
+    "/plan": "define new work: Q&A, then a spec and its tickets",
+    "/research": "chart a decision Map and work its decisions",
+    "/implement": "build #<ticket> or a task test-first, seams first",
+    "/triage": "prepare #<issue> for an agent",
     "/full": "take #<issue> or a task to a ready pull request",
     "/fast": "a quick test-first change in the working tree",
-    "/implement": "build a task in the working tree, seams first",
     "/status": "provider, models and project settings",
     "/klog": "open the event log in your browser",
     "/config": "change the models or this project's setup",
@@ -39,21 +42,40 @@ COMMANDS = {
 }
 
 # Each gate's answers in plain words, in the order the gate lists them.
-GATE_OPTIONS: dict[str, list[tuple[str, str]]] = {
-    "spec": [("ok", "Approve the brief"), ("redo", "Send back to SPEC with feedback")],
-    "seam": [("ok", "Approve the seams"), ("redo", "Send back to IMPLEMENTER with feedback")],
-    "test": [("ok", "Approve the tests"), ("redo", "Send back to TESTER with feedback")],
+_Options = list[tuple[str, str]]
+_LIMIT_END = ("end", "End the plan as is")
+_LIMIT_CONTINUE = ("continue", "Continue for 10 more")
+
+GATE_OPTIONS: dict[str, list[_Options]] = {
+    "spec": [[("ok", "Approve the spec"), ("redo", "Send back with feedback")]],
+    "ticket": [[("ok", "Approve: publish the tickets"), ("redo", "Recut them with feedback")]],
+    "seam": [[("ok", "Approve the seams"), ("redo", "Send back to IMPLEMENTER with feedback")]],
+    "test": [[("ok", "Approve the tests"), ("redo", "Send back to TESTER with feedback")]],
+    "outcome": [[("ok", "Apply the triage outcome"), ("redo", "Redraft it with feedback")]],
+    "question_limit": [
+        [_LIMIT_END, ("handoff", "Hand off the open questions to /research"), _LIMIT_CONTINUE],
+        [_LIMIT_END, _LIMIT_CONTINUE],
+    ],
     "review": [
-        ("ok", "Approve: mark the pull request ready"),
-        ("redo", "Send back to CODER with feedback"),
-        ("spec", "Send back to SPEC with feedback"),
+        [
+            ("ok", "Approve: mark the change ready"),
+            ("redo", "Send back to IMPLEMENTER with feedback"),
+            ("plan", "Send back to planning with feedback"),
+        ],
+        [
+            ("ok", "Approve: mark the pull request ready"),
+            ("redo", "Send back to CODER with feedback"),
+            ("spec", "Send back to SPEC with feedback"),
+        ],
     ],
-    "ci": [("ok", "Allow the .github/ change"), ("redo", "Send back to CODER with feedback")],
-    "diff": [("y", "Keep the change"), ("n", "Reject it")],
+    "ci": [[("ok", "Allow the .github/ change"), ("redo", "Send back to CODER with feedback")]],
+    "diff": [[("y", "Keep the change"), ("n", "Reject it")]],
     "limit_hit": [
-        ("retry", "Retry with fresh context (files are kept)"),
-        ("stop", "Stop the run"),
+        [("retry", "Retry with fresh context (files are kept)"), ("stop", "Stop the run")],
     ],
+}
+FREE_TEXT_LABELS = {
+    "round": "your answers, e.g. 1 yes, 2 no: use Postgres",
 }
 
 # Answers that carry the human's words to the agent that runs next.
@@ -216,6 +238,10 @@ class Terminal:
             detail=pending.detail,
             diff=pending.diff,
         )
+        if not pending.answers:
+            answer = self._prompt.ask_text(FREE_TEXT_LABELS.get(pending.gate, pending.question))
+            self._answered_gate = True
+            return answer
         key = self._prompt.choose(pending.question, gate_options(pending.gate, pending.answers))
         self._answered_gate = True
         return self._with_feedback(key)
@@ -303,9 +329,9 @@ def _editor(console: Console, history: Path | None) -> LineEditor | None:
 
 
 def as_command(mode: str, text: str) -> str:
-    """What Enter sends: plain text follows the mode; commands, ``#12`` and
+    """What Enter sends: plain text and ``#12`` follow the mode; commands and
     ``?`` go through as typed."""
-    if not text or text.startswith(("/", "#", "?")) or mode == "chat":
+    if not text or text.startswith(("/", "?")) or mode == "chat":
         return text
     return f"/{mode} {text}"
 
@@ -350,7 +376,7 @@ def line_style(text: str) -> str:
 
 def gate_options(gate: str, answers: tuple[str, ...]) -> list[tuple[str, str]]:
     """The gate's answers as ``(key, label)``; unknown gates show the keys."""
-    known = GATE_OPTIONS.get(gate)
-    if known and [key for key, _ in known] == list(answers):
-        return known
+    for known in GATE_OPTIONS.get(gate, []):
+        if [key for key, _ in known] == list(answers):
+            return known
     return [(answer, answer) for answer in answers]

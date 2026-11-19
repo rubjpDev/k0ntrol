@@ -3,6 +3,8 @@ and the session driving it instead of plain lines."""
 
 import io
 
+import pytest
+
 from rich.console import Console
 
 from k0ntrol.frontends.prompt import Prompt
@@ -203,10 +205,9 @@ def test_the_mode_turns_plain_text_into_its_command():
     from k0ntrol.frontends.terminal import as_command
 
     assert as_command("chat", "what is x?") == "what is x?"
-    assert as_command("fast", "fix the slug") == "/fast fix the slug"
-    assert as_command("full", "add is_even") == "/full add is_even"
-    assert as_command("fast", "#12") == "#12"
-    assert as_command("full", "/status") == "/status"
+    assert as_command("plan", "add is_even") == "/plan add is_even"
+    assert as_command("implement", "/status") == "/status"
+    assert as_command("plan", "/fast fix the slug") == "/fast fix the slug"
 
 
 def test_with_an_editor_the_prompt_is_the_box(tmp_path):
@@ -219,7 +220,7 @@ def test_with_an_editor_the_prompt_is_the_box(tmp_path):
     prompt = Prompt(console, commands=COMMANDS, tty=False, read_input=lambda _: "")
     ui = Terminal(console, prompt, LiveRenderer(console, spinner=False), editor=editor)
 
-    assert ui.read() == "/fast hola"
+    assert ui.read() == "/plan hola"
     assert "shift+tab mode" in ui.status_line()
 
 
@@ -283,3 +284,84 @@ def test_the_session_hands_the_project_services_to_the_welcome(tmp_path):
     run_session(lambda: "/quit", lambda line: None, root=tmp_path, ui=UI(),
                 config={"vcs": "github", "tracker": "github", "agents": {}})
     assert seen["vcs"] == "github" and seen["tracker"] == "github"
+
+
+def test_the_new_modes_turn_plain_text_and_refs_into_their_command():
+    from k0ntrol.frontends.terminal import as_command
+
+    assert as_command("plan", "add billing") == "/plan add billing"
+    assert as_command("implement", "add is_even") == "/implement add is_even"
+    assert as_command("plan", "#12") == "/plan #12"
+    assert as_command("implement", "#12") == "/implement #12"
+    assert as_command("chat", "#12") == "#12"
+    assert as_command("plan", "/research why") == "/research why"
+
+
+def test_shift_tab_cycles_chat_plan_and_implement_and_the_box_shows_it():
+    from k0ntrol.frontends.editor import LineEditor
+
+    keys = iter(["shift_tab", *"a", "enter", "shift_tab", *"b", "enter", "shift_tab", *"c", "enter"])
+    console = Console(file=io.StringIO(), record=True, width=80, color_system=None)
+    editor = LineEditor(console.file, read_key=lambda: next(keys), commands=COMMANDS,
+                        width=lambda: 80, color=False)
+    prompt = Prompt(console, commands=COMMANDS, tty=False, read_input=lambda _: "")
+    ui = Terminal(console, prompt, LiveRenderer(console, spinner=False), editor=editor)
+
+    assert [ui.read(), ui.read(), ui.read()] == ["/plan a", "/implement b", "c"]
+    drawn = console.file.getvalue()
+    assert "╭─ plan" in drawn and "╭─ implement" in drawn
+
+
+def test_completion_and_help_cover_the_new_commands():
+    from k0ntrol.frontends.prompt import complete_command
+
+    assert complete_command("/pl", COMMANDS) == ["/plan"]
+    assert complete_command("/re", COMMANDS) == ["/research"]
+    assert complete_command("/tr", COMMANDS) == ["/triage"]
+
+
+@pytest.mark.parametrize(
+    ("gate", "answers", "labels"),
+    [
+        ("spec", ("ok", "redo"), ["Approve the spec", "Send back with feedback"]),
+        ("ticket", ("ok", "redo"), ["Approve: publish the tickets", "Recut them with feedback"]),
+        ("seam", ("ok", "redo"), ["Approve the seams", "Send back to IMPLEMENTER with feedback"]),
+        ("outcome", ("ok", "redo"), ["Apply the triage outcome", "Redraft it with feedback"]),
+        ("question_limit", ("end", "handoff", "continue"),
+         ["End the plan as is", "Hand off the open questions to /research", "Continue for 10 more"]),
+        ("question_limit", ("end", "continue"), ["End the plan as is", "Continue for 10 more"]),
+        ("review", ("ok", "redo", "plan"),
+         ["Approve: mark the change ready", "Send back to IMPLEMENTER with feedback",
+          "Send back to planning with feedback"]),
+        ("review", ("ok", "redo", "spec"),
+         ["Approve: mark the pull request ready", "Send back to CODER with feedback",
+          "Send back to SPEC with feedback"]),
+    ],
+)
+def test_each_gate_shows_its_own_options(gate, answers, labels):
+    options = gate_options(gate, answers)
+    assert [key for key, _ in options] == list(answers)
+    assert [label for _, label in options] == labels
+
+
+@pytest.mark.parametrize(
+    ("gate", "label"),
+    [("round", "your answers, e.g. 1 yes, 2 no: use Postgres"),
+     ("decision", "#7: which queue? — type the decision")],
+)
+def test_a_free_text_gate_asks_for_a_line_instead_of_a_picker(gate, label):
+    labels = []
+    console = Console(file=io.StringIO(), record=True, width=100, color_system=None)
+
+    def read_input(prompt_text):
+        labels.append(prompt_text)
+        return "1 yes, 2 no"
+
+    prompt = Prompt(console, commands=COMMANDS, tty=False, read_input=read_input)
+    ui = Terminal(console, prompt, LiveRenderer(console, spinner=False))
+
+    question = "#7: which queue? — type the decision" if gate == "decision" else "q?"
+    answer = ui.gate(Pending(run="r1", gate=gate, question=question, answers=(), detail="1. a?"))
+
+    assert answer == "1 yes, 2 no"
+    assert labels == [f"{label} › "]
