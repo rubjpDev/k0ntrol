@@ -40,6 +40,14 @@ def git(root: Path, *args: str) -> str:
     ).stdout.strip()
 
 
+def repo_with_identity(root: Path) -> None:
+    """``git_repo`` plus a repo-local identity — a CI runner has no
+    ``user.email``/``user.name`` in its global config."""
+    git_repo(root)
+    git(root, "config", "user.email", "t@t")
+    git(root, "config", "user.name", "t")
+
+
 def to_ci_gate(tmp_path):
     """``/implement #<n>`` parked at the ci gate: IMPLEMENTER touched ``.github/``."""
     item_repo(tmp_path)
@@ -176,7 +184,7 @@ def test_push_refuses_a_head_the_gate_has_not_cleared(tmp_path):
     from k0ntrol.workflow.ci_gate import CiGateError, gated_push
     from k0ntrol.workflow.context import RunContext
 
-    git_repo(tmp_path)
+    repo_with_identity(tmp_path)
     tracker = FakeTracker()
     ctx = RunContext(root=tmp_path, cfg={}, kind="implement", tracker=tracker)
 
@@ -188,7 +196,7 @@ def test_push_refuses_a_head_the_gate_has_not_cleared(tmp_path):
 def test_without_a_base_branch_the_first_gate_shows_all_of_github(tmp_path):
     from k0ntrol.workflow.change import diff_since, merge_base
 
-    git_repo(tmp_path)
+    repo_with_identity(tmp_path)
     (tmp_path / ".github").mkdir()
     (tmp_path / ".github" / "ci.yml").write_text("name: ci\n")
     git(tmp_path, "add", "-A")
@@ -202,7 +210,7 @@ def test_without_a_base_branch_the_first_gate_shows_all_of_github(tmp_path):
 def test_the_gate_detail_is_capped(tmp_path):
     from k0ntrol.workflow.change import diff_since, head_sha
 
-    git_repo(tmp_path)
+    repo_with_identity(tmp_path)
     base = head_sha(tmp_path)
     (tmp_path / ".github").mkdir()
     (tmp_path / ".github" / "big.yml").write_text("x: 1\n" * 5000)
@@ -215,7 +223,7 @@ def test_the_gate_detail_is_capped(tmp_path):
 def test_a_diff_git_cannot_compute_is_an_error_not_an_empty_diff(tmp_path):
     from k0ntrol.workflow.change import DiffError, diff_since
 
-    git_repo(tmp_path)
+    repo_with_identity(tmp_path)
     (tmp_path / ".github").mkdir()
     (tmp_path / ".github" / "x.yml").write_text("name: x\n")
     git(tmp_path, "add", "-A")
@@ -230,7 +238,7 @@ def test_a_baseline_missing_from_the_repo_never_clears_head_for_a_push(tmp_path)
     from k0ntrol.workflow.ci_gate import CiGateError, gated_push, run_ci_gate
     from k0ntrol.workflow.context import RunContext
 
-    git_repo(tmp_path)
+    repo_with_identity(tmp_path)
     tracker = FakeTracker()
     ctx = RunContext(root=tmp_path, cfg={}, kind="implement", tracker=tracker)
     state = {"branch": "k0/1-x", "ci_approved_sha": "0" * 40}
