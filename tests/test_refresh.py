@@ -2,7 +2,7 @@
 
 It rescans the code graph (describing changed files through the
 ``bulk_read`` helper when given) and rebuilds the FTS index once — the
-seam ``/full``, ``/fast`` and ``/ask`` call before their agents run.
+seam the run commands and ``/ask`` call before their agents run.
 """
 
 import subprocess

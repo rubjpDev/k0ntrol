@@ -15,6 +15,7 @@ comment — the agent brief for ``ready-for-agent``, the triage notes for
 #129.
 """
 
+import re
 from collections.abc import Callable
 
 from langgraph.checkpoint.base import BaseCheckpointSaver
@@ -24,7 +25,6 @@ from langgraph.types import interrupt
 
 from k0ntrol.agents import TriageOutcome
 from k0ntrol.workflow.context import RunContext
-from k0ntrol.workflow.full import _BULLET as _LEADING_BULLET
 from k0ntrol.workflow.nodes import (
     _attempt_limit,
     _invoke_counted,
@@ -266,3 +266,4 @@ def _item(state: dict) -> str:
         f"Work item #{state['item_ref']}: {state.get('item_title', '')}"
         f"\n\n{state['task']}"
     )
+_LEADING_BULLET = re.compile(r"^[-*]\s+")

@@ -1,6 +1,6 @@
 """The once-per-run memory refresh seam.
 
-``/full``, ``/fast`` and ``/ask`` call this before their agents run:
+The run commands and ``/ask`` call this before their agents run:
 the hash-based rescan (describing changed files through the ``bulk_read``
 helper's one-shot ``invoke`` when given) plus one FTS index rebuild.
 ``search_memory`` then only queries the index — never rebuilds per call.

@@ -30,8 +30,8 @@ def pending(gate="spec", answers=("ok", "redo")):
 
 
 def test_known_gates_get_plain_word_options():
-    assert gate_options("review", ("ok", "redo", "spec"))[2] == (
-        "spec", "Send back to SPEC with feedback"
+    assert gate_options("review", ("ok", "redo", "plan"))[2] == (
+        "plan", "Send back to planning with feedback"
     )
     assert gate_options("custom", ("a", "b")) == [("a", "a"), ("b", "b")]
 
@@ -62,7 +62,7 @@ def test_a_streamed_answer_sits_behind_a_bullet_and_ends_its_line():
 
 
 def test_the_session_asks_gates_and_reports_through_the_ui(tmp_path):
-    ui, console = terminal(["/full add calc", "1", "/status", "/quit"])
+    ui, console = terminal(["/implement add calc", "1", "/status", "/quit"])
     pending_gate = pending()
 
     def fake_resume(run, answer, **kwargs):
@@ -71,7 +71,7 @@ def test_the_session_asks_gates_and_reports_through_the_ui(tmp_path):
 
     code = run_session(
         lambda: "unused", print, root=tmp_path,
-        config={"tracker": "github", "agents": {"spec": {"provider": "bedrock", "model": "m"}}},
+        config={"tracker": "github", "agents": {"implementer": {"provider": "bedrock", "model": "m"}}},
         start=lambda *a, **k: pending_gate, resume=fake_resume, ui=ui,
     )
 
@@ -79,7 +79,7 @@ def test_the_session_asks_gates_and_reports_through_the_ui(tmp_path):
     text = console.export_text()
     assert "Spec gate" in text
     assert "bedrock/m" in text  # /status
-    assert "vcs       github" in text  # a missing vcs reads as github
+    assert "vcs          github" in text  # a missing vcs reads as github
     assert "run done" not in text  # the renderer reports the outcome, not the session
 
 
@@ -91,7 +91,7 @@ def test_failures_read_red_and_pauses_amber():
 
 def test_the_resume_right_after_a_gate_answer_is_not_shown():
     ui, console = terminal(["1"])
-    resumed = {"kind": "run_start", "run_kind": "full", "branch": "k0/1-x", "resumed": True}
+    resumed = {"kind": "run_start", "run_kind": "implement", "branch": "k0/1-x", "resumed": True}
 
     ui.gate(pending())
     ui.event(resumed)
@@ -185,7 +185,7 @@ def test_plain_text_chats_with_memory_and_a_bare_issue_number_works_it(tmp_path)
 
     assert asked[0] == ("what does slugify do?", "")
     assert "Q: what does slugify do?\nA: it makes slugs" in asked[1][1]
-    assert worked == [("full", "#12")]
+    assert worked == [("implement", "#12")]
 
 
 def test_small_costs_keep_four_decimals_and_each_question_reprints_its_agent():
@@ -207,7 +207,7 @@ def test_the_mode_turns_plain_text_into_its_command():
     assert as_command("chat", "what is x?") == "what is x?"
     assert as_command("plan", "add is_even") == "/plan add is_even"
     assert as_command("implement", "/status") == "/status"
-    assert as_command("plan", "/fast fix the slug") == "/fast fix the slug"
+    assert as_command("plan", "/implement fix the slug") == "/implement fix the slug"
 
 
 def test_with_an_editor_the_prompt_is_the_box(tmp_path):
@@ -333,9 +333,6 @@ def test_completion_and_help_cover_the_new_commands():
         ("review", ("ok", "redo", "plan"),
          ["Approve: mark the change ready", "Send back to IMPLEMENTER with feedback",
           "Send back to planning with feedback"]),
-        ("review", ("ok", "redo", "spec"),
-         ["Approve: mark the pull request ready", "Send back to CODER with feedback",
-          "Send back to SPEC with feedback"]),
     ],
 )
 def test_each_gate_shows_its_own_options(gate, answers, labels):

@@ -32,8 +32,6 @@ COMMANDS = {
     "/research": "chart a decision Map and work its decisions",
     "/implement": "build #<ticket> or a task test-first, seams first",
     "/triage": "prepare #<issue> for an agent",
-    "/full": "take #<issue> or a task to a ready pull request",
-    "/fast": "a quick test-first change in the working tree",
     "/status": "provider, models and project settings",
     "/klog": "open the event log in your browser",
     "/config": "change the models or this project's setup",
@@ -50,7 +48,6 @@ GATE_OPTIONS: dict[str, list[_Options]] = {
     "spec": [[("ok", "Approve the spec"), ("redo", "Send back with feedback")]],
     "ticket": [[("ok", "Approve: publish the tickets"), ("redo", "Recut them with feedback")]],
     "seam": [[("ok", "Approve the seams"), ("redo", "Send back to IMPLEMENTER with feedback")]],
-    "test": [[("ok", "Approve the tests"), ("redo", "Send back to TESTER with feedback")]],
     "outcome": [[("ok", "Apply the triage outcome"), ("redo", "Redraft it with feedback")]],
     "question_limit": [
         [_LIMIT_END, ("handoff", "Hand off the open questions to /research"), _LIMIT_CONTINUE],
@@ -62,13 +59,8 @@ GATE_OPTIONS: dict[str, list[_Options]] = {
             ("redo", "Send back to IMPLEMENTER with feedback"),
             ("plan", "Send back to planning with feedback"),
         ],
-        [
-            ("ok", "Approve: mark the pull request ready"),
-            ("redo", "Send back to CODER with feedback"),
-            ("spec", "Send back to SPEC with feedback"),
-        ],
     ],
-    "ci": [[("ok", "Allow the .github/ change"), ("redo", "Send back to CODER with feedback")]],
+    "ci": [[("ok", "Allow the .github/ change"), ("redo", "Send back to IMPLEMENTER with feedback")]],
     "diff": [[("y", "Keep the change"), ("n", "Reject it")]],
     "limit_hit": [
         [("retry", "Retry with fresh context (files are kept)"), ("stop", "Stop the run")],
@@ -81,7 +73,6 @@ FREE_TEXT_LABELS = {
 # Answers that carry the human's words to the agent that runs next.
 FEEDBACK_LABELS = {
     "redo": "feedback",
-    "spec": "feedback for SPEC",
     "plan": "feedback for the work item",
     "retry": "feedback (enter to skip)",
 }

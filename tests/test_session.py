@@ -1,6 +1,8 @@
 import threading
 from pathlib import Path
 
+import pytest
+
 from k0ntrol.frontends.session import run_session
 from k0ntrol.memory.layout import MEM, RULES
 from k0ntrol.memory.session import add_mem_proposal, list_pending_mem_proposals
@@ -42,10 +44,11 @@ def test_help_stays_on_screen_and_quit_exits(tmp_path):
     text = "\n".join(shown)
     assert "› /help" in text
     assert "/ask" in text
-    assert "/fast" in text
-    assert "/full" in text
     assert "/implement" in text
+    assert "/plan" in text
     assert "/quit" in text
+    assert "/fast" not in text
+    assert "/full" not in text
     assert "\x1b[?1049h" not in text
 
 
@@ -62,32 +65,31 @@ def test_blank_and_unknown_stay_in_session(tmp_path):
     assert "unknown command: /nope" in "\n".join(shown)
 
 
-def test_full_routes_to_the_work_seam(tmp_path):
-    """/full drives the same start→Pending→resume loop as /fast."""
-    from k0ntrol.workflow import Outcome
-
+@pytest.mark.parametrize("command", ["/fast", "/full"])
+def test_retired_commands_print_a_hint_and_start_nothing(tmp_path, command):
+    """`/fast` and `/full` are retired: each prints a one-line hint naming
+    its replacement and never reaches the work seam."""
     calls = []
 
-    def fake_start(kind, task, **kwargs):
-        calls.append(("start", kind, task))
-        return Outcome(run="r1", outcome="done")
-
-    lines = iter(["/full add checkout", "/quit"])
+    lines = iter([f"{command} some work", "/quit"])
     shown = []
     code = run_session(
         lambda: next(lines),
         shown.append,
         root=tmp_path,
         config=config(),
-        start=fake_start,
+        start=lambda *a, **kw: calls.append(a),
     )
     assert code == 0
-    assert calls == [("start", "full", "add checkout")]
+    assert calls == []
+    hints = [line for line in shown if command in line and not line.startswith("›")]
+    assert len(hints) == 1
+    assert "/implement" in hints[0] and "/plan" in hints[0]
 
 
 def test_implement_routes_to_the_work_seam(tmp_path):
     """``/implement <task>`` drives the working-tree graph through the
-    same start→Pending→resume loop as ``/fast``."""
+    start→Pending→resume loop."""
     from k0ntrol.workflow import Outcome
 
     calls = []
@@ -109,7 +111,7 @@ def test_implement_routes_to_the_work_seam(tmp_path):
     assert calls == [("start", "implement", "add a calc module")]
 
 
-def test_fast_drives_the_pending_gate_to_done(tmp_path):
+def test_implement_drives_the_pending_gate_to_done(tmp_path):
     """The REPL renders Pending (question + answers + detail), reads the
     answer and calls resume until the run ends."""
     from k0ntrol.workflow import Outcome, Pending
@@ -130,7 +132,7 @@ def test_fast_drives_the_pending_gate_to_done(tmp_path):
         calls.append(("resume", run_id, decision))
         return Outcome(run=run_id, outcome="done")
 
-    lines = iter(["/fast add a calc module", "y", "/quit"])
+    lines = iter(["/implement add a calc module", "y", "/quit"])
     shown = []
     code = run_session(
         lambda: next(lines),
@@ -142,20 +144,20 @@ def test_fast_drives_the_pending_gate_to_done(tmp_path):
     )
     assert code == 0
     text = "\n".join(shown)
-    assert calls == [("start", "fast", "add a calc module"), ("resume", "r1", "y")]
+    assert calls == [("start", "implement", "add a calc module"), ("resume", "r1", "y")]
     assert "tests are green — keep the change?" in text
     assert "y/n" in text
     assert " M calc.py" in text
     assert "done" in text
 
 
-def test_fast_refusal_is_shown(tmp_path):
+def test_implement_refusal_is_shown(tmp_path):
     from k0ntrol.workflow import RunRefused
 
     def refusing(kind, task, **kwargs):
         raise RunRefused("a run is already open; use another git worktree")
 
-    lines = iter(["/fast fix bug", "/quit"])
+    lines = iter(["/implement fix bug", "/quit"])
     shown = []
     code = run_session(
         lambda: next(lines),
@@ -168,7 +170,7 @@ def test_fast_refusal_is_shown(tmp_path):
     assert "another git worktree" in "\n".join(shown)
 
 
-def test_fast_bad_gate_answer_reasks(tmp_path):
+def test_implement_bad_gate_answer_reasks(tmp_path):
     from k0ntrol.workflow import Outcome, Pending, RunRefused
 
     pending = Pending(run="r1", gate="diff", question="keep?", answers=("y", "n"))
@@ -180,7 +182,7 @@ def test_fast_bad_gate_answer_reasks(tmp_path):
             raise RunRefused(f"answer {decision!r} is not one of: y, n")
         return Outcome(run=run_id, outcome="done")
 
-    lines = iter(["/fast task", "maybe", "y", "/quit"])
+    lines = iter(["/implement task", "maybe", "y", "/quit"])
     shown = []
     code = run_session(
         lambda: next(lines),
@@ -234,7 +236,7 @@ def test_one_sitting_id_reaches_ask_start_and_resume(tmp_path):
         seen.append(("resume", kwargs.get("session")))
         return Outcome(run=run_id, outcome="done")
 
-    lines = iter(["/ask what is x?", "plain chat", "/fast fix it", "y", "/quit"])
+    lines = iter(["/ask what is x?", "plain chat", "/implement fix it", "y", "/quit"])
     run_session(
         lambda: next(lines),
         lambda text: None,
@@ -257,7 +259,7 @@ def test_one_sitting_id_reaches_ask_start_and_resume(tmp_path):
 def test_work_commands_do_not_touch_the_disk_beyond_the_transcript(tmp_path):
     from k0ntrol.workflow import Outcome
 
-    lines = iter(["/full add checkout", "/fast fix bug", "/ask what is x?", "/quit"])
+    lines = iter(["/implement add checkout", "/plan fix bug", "/ask what is x?", "/quit"])
     code = run_session(
         lambda: next(lines),
         lambda _line: None,
@@ -413,7 +415,7 @@ def test_an_ended_run_is_reflected_after_the_outcome(tmp_path):
 
     shown = []
     reflector = _RecordingReflector(shown)
-    lines = iter(["/fast fix bug", "/quit"])
+    lines = iter(["/implement fix bug", "/quit"])
     code = run_session(
         lambda: next(lines),
         shown.append,
@@ -442,7 +444,7 @@ def test_every_outcome_kind_is_reflected(tmp_path):
             Outcome(run="r3", outcome="rejected", reason="gate n"),
         ]
     )
-    lines = iter(["/fast a", "/fast b", "/fast c", "/quit"])
+    lines = iter(["/implement a", "/implement b", "/implement c", "/quit"])
     code = run_session(
         lambda: next(lines),
         lambda _line: None,
@@ -460,7 +462,7 @@ def test_a_paused_run_is_not_reflected(tmp_path):
     from k0ntrol.workflow import Pending
 
     reflector = _RecordingReflector()
-    inputs = iter(["/fast fix", KeyboardInterrupt(), "/quit"])
+    inputs = iter(["/implement fix", KeyboardInterrupt(), "/quit"])
 
     def read_line():
         item = next(inputs)
@@ -487,7 +489,7 @@ def test_a_refused_or_failed_start_is_not_reflected(tmp_path):
     def boom(*a, **k):
         raise RuntimeError("kaput")
 
-    lines = iter(["/fast fix", "/quit"])
+    lines = iter(["/implement fix", "/quit"])
     code = run_session(
         lambda: next(lines),
         lambda _line: None,
@@ -558,7 +560,7 @@ def test_quit_waits_for_a_running_reflect(tmp_path):
             super().finish()
 
     reflector = SlowReflector()
-    lines = iter(["/fast fix", "/quit"])
+    lines = iter(["/implement fix", "/quit"])
     done = []
 
     def session():
@@ -601,7 +603,7 @@ def _unfinished_session(tmp_path, answer):
     def fake_abandon(run_id, **kwargs):
         calls.append(("abandon", run_id))
 
-    lines = iter(["/full #7", answer, "/quit"])
+    lines = iter(["/implement #7", answer, "/quit"])
     shown = []
     run_session(
         lambda: next(lines), shown.append, root=tmp_path, config=config(),
@@ -610,23 +612,23 @@ def _unfinished_session(tmp_path, answer):
     return calls, "\n".join(shown)
 
 
-def test_full_y_at_the_unfinished_prompt_resumes_the_run(tmp_path):
+def test_implement_y_at_the_unfinished_prompt_resumes_the_run(tmp_path):
     calls, text = _unfinished_session(tmp_path, "y")
 
     assert "resume run r1 at review_gate? [y/n]" in text
-    assert calls == [("start", "full", "#7"), ("resume", "r1", None)]
+    assert calls == [("start", "implement", "#7"), ("resume", "r1", None)]
 
 
-def test_full_n_at_the_unfinished_prompt_abandons_and_starts_fresh(tmp_path):
+def test_implement_n_at_the_unfinished_prompt_abandons_and_starts_fresh(tmp_path):
     calls, text = _unfinished_session(tmp_path, "n")
 
     assert calls == [
-        ("start", "full", "#7"), ("abandon", "r1"), ("start", "full", "#7"),
+        ("start", "implement", "#7"), ("abandon", "r1"), ("start", "implement", "#7"),
     ]
     assert "run done" in text
 
 
-def test_full_n_with_a_dirty_tree_keeps_the_run_and_says_how_to_go_on(tmp_path):
+def test_implement_n_with_a_dirty_tree_keeps_the_run_and_says_how_to_go_on(tmp_path):
     from k0ntrol.workflow import RunRefused, Unfinished
 
     calls = []
@@ -638,10 +640,10 @@ def test_full_n_with_a_dirty_tree_keeps_the_run_and_says_how_to_go_on(tmp_path):
     def refusing_abandon(run_id, **kwargs):
         calls.append("abandon")
         raise RunRefused(
-            ["refusing to run /full on a dirty working tree:", "?? tests/t.py"]
+            ["refusing to run /implement on a dirty working tree:", "?? tests/t.py"]
         )
 
-    lines = iter(["/full #7", "n", "/quit"])
+    lines = iter(["/implement #7", "n", "/quit"])
     shown = []
     run_session(
         lambda: next(lines), shown.append, root=tmp_path, config=config(),
@@ -659,7 +661,7 @@ def test_plain_gate_prints_the_diff_after_the_detail(tmp_path):
 
     pending = Pending(run="r1", gate="review", question="approve?", answers=("ok",),
                       detail="the review", diff="diff --git a/x b/x\n+y\n")
-    lines = iter(["/fast task", "ok", "/quit"])
+    lines = iter(["/implement task", "ok", "/quit"])
     shown = []
     run_session(
         lambda: next(lines),
@@ -673,9 +675,6 @@ def test_plain_gate_prints_the_diff_after_the_detail(tmp_path):
     assert text.index("the review") < text.index("diff --git a/x b/x") < text.index("approve?")
 
 
-import pytest
-
-
 @pytest.mark.parametrize(
     ("line", "kind", "task"),
     [
@@ -685,6 +684,7 @@ import pytest
         ("/research #9", "research", "#9"),
         ("/triage #5", "triage", "#5"),
         ("/implement #12", "implement", "#12"),
+        ("#12", "implement", "#12"),  # a bare issue ref routes to /implement
     ],
 )
 def test_each_new_command_starts_its_graph_with_the_text_or_ref(tmp_path, line, kind, task):

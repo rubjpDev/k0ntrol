@@ -49,8 +49,8 @@ _TRACKER_NAMES = {
     "linear": "Linear",
     "jira": "Jira",
 }
-# Saved as given; only GitHub code + GitHub Issues work with /full in 0.1.0.
-_UNSHIPPED = "  coming soon: /full needs GitHub in 0.1.0; chat and /fast still work here"
+# Saved as given; the tracker commands need GitHub code + GitHub Issues in 0.1.0.
+_UNSHIPPED = "  coming soon: #<issue> runs need GitHub in 0.1.0; chat and /implement <task> still work here"
 _HOST_PATTERN = re.compile(r"^(?:\w+://)?(?:[^@/]+@)?([^/:]+)")
 _TEST_COMMANDS = (
     ("uv.lock", "uv run pytest -q"),

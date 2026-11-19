@@ -13,35 +13,15 @@ from typing import Any
 from langchain_core.messages import AIMessage, HumanMessage, ToolCall, ToolMessage
 from langgraph.types import interrupt
 
-from k0ntrol.tools.path_guard import is_test_path
 from k0ntrol.tools.slice_guard import SliceStart
 from k0ntrol.tools.runner import run_command
-from k0ntrol.workflow.change import changed_paths, diff_stat, worktree_summary
+from k0ntrol.workflow.change import diff_stat, worktree_summary
 from k0ntrol.workflow.context import RunContext
 
 _WRITE_TOOLS = ("write_file", "edit_file")
 
 # Chars of a failing output kept at the pause and in the retry context.
 _OUTPUT_TAIL = 2_000
-
-
-def make_agent_node(
-    ctx: RunContext, name: str, files_key: str, brief: Callable[[dict], str]
-) -> Callable[[dict], dict]:
-    """An agent node: fresh-context invoke, written files, limit flag.
-
-    The node counts the agent run (``<name>_attempts``), merges the files
-    the agent actually wrote into ``files_key`` and flags
-    ``model_call_limit`` when the agent hit its limit — a limited run
-    never falls through to a check and never uses up an attempt (#20).
-    """
-
-    def node(state: dict) -> dict:
-        result, updates = _invoke_counted(ctx, name, state, brief)
-        updates[files_key] = _merge(state.get(files_key), _written(result))
-        return updates
-
-    return node
 
 
 def _invoke_counted(
@@ -143,48 +123,13 @@ def _last_output(result) -> str:
     return ""
 
 
-def make_red_check(ctx: RunContext) -> Callable[[dict], dict]:
-    """The red check: ``test_cmd`` on TESTER's files must fail (ADR 0001).
-
-    TESTER's files are the ones its runs recorded plus the test files the
-    working tree changed: a TESTER run that stopped part-way leaves files
-    no later run writes again (#99).
-    """
-
-    def node(state: dict) -> dict:
-        candidates = set(state.get("test_files", [])) | set(changed_paths(ctx.root))
-        files = sorted(p for p in candidates if _test_file(ctx, p))
-        result = run_command(
-            ctx.cfg["test_cmd"],
-            root=ctx.root,
-            timeout=ctx.timeout,
-            extra_args=files,
-        )
-        red = bool(files) and not result.ok
-        ctx.writer.gate("red_check", "pass" if red else "fail")
-        return {"test_files": files, **_red_update(red, result, state)}
-
-    return node
-
-
-def _red_update(red: bool, result, state: dict) -> dict:
-    return {
-        "tests_red": red,
-        "red_check_output": result.output,
-        "limit": (
-            None if red else _attempt_limit(state, "red_check", "tester", result.output)
-        ),
-    }
-
-
 def make_validator(
-    ctx: RunContext, *, retry_node: str = "coder"
+    ctx: RunContext, *, retry_node: str = "implementer"
 ) -> Callable[[dict], dict]:
     """VALIDATOR: ``test_cmd`` plus the configured ``gates``, all in code.
 
     ``retry_node`` is the node a ``limit_hit`` ``retry`` reruns when the
-    loop runs dry — ``coder`` on ``/fast`` and ``/full``, ``implementer``
-    on ``/implement``.
+    loop runs dry — ``implementer`` on ``/implement``.
     """
 
     def node(state: dict) -> dict:
@@ -286,7 +231,7 @@ def _limit_detail(ctx: RunContext, limit: dict) -> str:
 
 
 def _retry_update(state: dict, limit: dict, feedback: str) -> dict:
-    retry_node = str(limit.get("retry_node") or "tester")
+    retry_node = str(limit.get("retry_node") or "implementer")
     return {
         "retries_granted": state.get("retries_granted", 0) + 1,
         "limit": None,
@@ -331,10 +276,6 @@ def _format(results: list[tuple[str, Any]]) -> str:
         f"$ {' '.join(result.argv)}\n{result.output}".rstrip()
         for _, result in results
     )
-
-
-def _test_file(ctx: RunContext, path: str) -> bool:
-    return is_test_path(path) and (ctx.root / path).is_file()
 
 
 def _merge(existing: list[str] | None, new: list[str]) -> list[str]:

@@ -53,11 +53,10 @@ _TOOL_NAMES = {
     "read_change_diff": "ReadDiff",
 }
 
-_CHECK_NAMES = {"red_check": "Red check", "validator": "Validator", "ci": "CI"}
+_CHECK_NAMES = {"validator": "Validator", "ci": "CI"}
 
 _GATE_TITLES = {
     "spec": "Spec gate",
-    "test": "Test gate",
     "review": "Review gate",
     "ci": "CI gate",
     "diff": "Diff gate",

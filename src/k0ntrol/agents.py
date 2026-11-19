@@ -60,13 +60,13 @@ from k0ntrol.tools.search_memory import make_search_memory
 from k0ntrol.tools.slice_guard import SliceGuard, SliceStart
 from k0ntrol.tools.tracker import tracker_read_tools
 from k0ntrol.tools.web_search import Fetch, make_web_search
-from k0ntrol.tools.write import WritePolicy, WriteScope, make_edit_file, make_write_file
+from k0ntrol.tools.write import WritePolicy, make_edit_file, make_write_file
 
 _PRIMARY_READ_TOOLS = ("read_file", "list_files", "grep")
 _HELPER_READ_TOOLS = ("bulk_read", "search_memory")
 _BASE_READ_TOOLS = _PRIMARY_READ_TOOLS + _HELPER_READ_TOOLS
 
-# Reads that need a tracker; ``/fast`` has no work item so they drop off.
+# Reads that need a tracker; a run without a work item drops them.
 _TRACKER_TOOLS = ("read_work_item", "read_change_diff")
 
 _NETWORK_TOOLS = ("fetch_url", "web_search")
@@ -81,16 +81,8 @@ ALLOWLISTS: dict[str, tuple[str, ...]] = {
     "implementer": _BASE_READ_TOOLS
     + ("write_file", "edit_file", "run_tests")
     + _TRACKER_TOOLS,
-    "spec": _BASE_READ_TOOLS + ("read_work_item",),
-    "tester": _BASE_READ_TOOLS
-    + ("read_work_item", "write_file", "edit_file", "run_tests"),
-    "coder": _BASE_READ_TOOLS
-    + ("read_work_item", "write_file", "edit_file", "run_tests"),
     "reviewer": _BASE_READ_TOOLS + ("read_work_item", "read_change_diff"),
 }
-
-# TESTER writes test paths only, CODER non-test paths only (spec story 9).
-_WRITE_SCOPES: dict[str, WriteScope] = {"tester": "test", "coder": "non_test"}
 
 # A model→tools round costs four super-steps in the compiled agent graph
 # (before_model, model, after_model, tools), plus start/end bookkeeping.
@@ -118,19 +110,6 @@ _CLEARED = "[cleared to save context; call the tool again if you need this]"
 # The tool names a provider accepts in the history (Bedrock's rule, the
 # strictest one k0 talks to).
 _TOOL_NAME = re.compile(r"[a-zA-Z0-9_-]{1,64}")
-
-
-class AgentBrief(BaseModel):
-    """SPEC's structured output: the contract the rest of the run works from."""
-
-    title: str
-    category: str
-    summary: str
-    current_behavior: str
-    desired_behavior: str
-    key_interfaces: str
-    acceptance_criteria: list[str]
-    out_of_scope: str
 
 
 class Review(BaseModel):
@@ -291,7 +270,6 @@ _PLANNER_OUTPUT = (
 _RESPONSE_FORMATS: dict[str, Any] = {
     "planner": ToolStrategy(_PLANNER_OUTPUT),
     "researcher": ResearchFinding,
-    "spec": AgentBrief,
     "reviewer": Review,
 }
 
@@ -308,7 +286,6 @@ class MissingStructuredOutput(Exception):
 _MISSING_OUTPUT = {
     "planner": "PLANNER returned no structured output",
     "researcher": "RESEARCHER returned no research finding",
-    "spec": "SPEC returned no agent brief",
     "reviewer": "REVIEWER returned no review",
 }
 
@@ -321,7 +298,7 @@ _SEAM_DROP = ("write_file", "edit_file", "run_tests")
 def allowlist_for(name: str, *, tracker: bool, read_only: bool = False) -> tuple[str, ...]:
     """Agent ``name``'s allowlist for this run.
 
-    Without a tracker (``/fast`` — there is no work item), the tracker
+    Without a tracker (no work item), the tracker
     reads drop off the allowlist; the agent can never see the tool.
     ``read_only`` drops the mutating tools for proposal phases.
     """
@@ -359,7 +336,7 @@ def agent_tools(
     helper models; ``resolve``/``transport``/``environ``/``fetch`` are the
     network tools' injected seams. Each is needed only by tools that use
     it, and only when the tool runs. With ``tracker=None`` the tracker
-    reads are left off entirely (``/fast``), matching
+    reads are left off entirely (a ``<task>`` run), matching
     ``allowlist_for(name, tracker=False)``. ``read_only`` matches
     ``allowlist_for(..., read_only=True)`` the same way. ``slice_start``
     is IMPLEMENTER's guard's start state — ``refactor`` for a run started
@@ -398,7 +375,7 @@ def build_agent(
     """Build agent ``name`` behind the fresh-context wrapper.
 
     ``tools`` must be exactly the agent's allowlist — ``allowlist``, or
-    ``ALLOWLISTS[name]`` when it is ``None`` (``/fast`` passes the
+    ``ALLOWLISTS[name]`` when it is ``None`` (a ``<task>`` run passes the
     tracker-less list). The model comes from the ``agents.<name>`` config
     entry, and the prompt from ``prompts/<name>.md`` plus the project's
     `Rules.md` and topology when someone has edited them.
@@ -606,9 +583,7 @@ def _tool_factories(
         "read_work_item": lambda: _tracker_tool("read_work_item", tracker),
         "read_change_diff": lambda: _tracker_tool("read_change_diff", tracker),
     }
-    policy: WritePolicy | None = (
-        guard if guard is not None else _WRITE_SCOPES.get(agent)
-    )
+    policy: WritePolicy | None = guard
     if policy is not None:
         factories["write_file"] = lambda: make_write_file(root, policy)
         factories["edit_file"] = lambda: make_edit_file(root, policy)

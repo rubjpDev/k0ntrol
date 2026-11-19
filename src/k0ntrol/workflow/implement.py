@@ -25,7 +25,9 @@ with the reviews and the feedback — its guard starting in refactor
 ``ready-for-agent`` and ends the run.
 """
 
+import re
 from collections.abc import Callable
+from datetime import UTC, datetime
 from typing import Literal
 
 from langgraph.checkpoint.base import BaseCheckpointSaver
@@ -34,29 +36,18 @@ from langgraph.graph.state import CompiledStateGraph
 from langgraph.types import interrupt
 
 from k0ntrol.tools.slice_guard import SliceStart
+from k0ntrol.tools.tracker import render_work_item
 from k0ntrol.workflow.change import (
     decider,
+    existing_branch,
+    remote_tip,
+    reset_scan_output,
     restore_worktree,
+    slugify,
     worktree_snapshot_dir,
 )
 from k0ntrol.workflow.ci_gate import gated_push, make_ci_gate
 from k0ntrol.workflow.context import RunContext
-from k0ntrol.workflow.full import (
-    brief_dict,
-    code_diff,
-    contract_brief,
-    gate_comment,
-    make_branch_setup,
-    make_ci_comment,
-    make_ci_reject_comment,
-    make_mark_ready,
-    make_publish,
-    reject_comment,
-    render_review,
-    round_suffix,
-    with_change,
-    with_work_item,
-)
 from k0ntrol.workflow.nodes import (
     _invoke_counted,
     _merge,
@@ -540,3 +531,220 @@ def _task_brief(state: dict) -> str:
         "write a failing test at a seam, run it red, then write only the "
         "code that makes it pass."
     )
+
+# --- tracker side effects -------------------------------------------------------
+
+
+def make_branch_setup(ctx: RunContext) -> Callable[[dict], dict]:
+    """Cut ``k0/<n>-<slug>`` from the base, rescan, commit ``.k0-mem/``.
+
+    A reused branch carries what an earlier run pushed: its remote tip is
+    the first push's CI-gate baseline, so ``.github/`` changes already
+    there are not asked about again.
+    """
+
+    def node(state: dict) -> dict:
+        ref = state["item_ref"]
+        branch = (
+            state.get("branch")
+            or existing_branch(ctx.root, ref)
+            or f"k0/{ref}-{slugify(state['item_title'])}"
+        )
+        reset_scan_output(ctx.root)
+        ctx.tracker.create_branch(branch, ctx.base_branch)
+        ctx.scan(ctx.root)
+        ctx.tracker.commit(f"#{ref}: update memory")
+        tip = None if state.get("ci_approved_sha") else remote_tip(ctx.root, branch)
+        return {"branch": branch, **({"ci_approved_sha": tip} if tip else {})}
+
+    return node
+
+
+def make_publish(ctx: RunContext) -> Callable[[dict], dict]:
+    """On green: commit, rescan + memory commit; the CI gate and push follow.
+
+    ``commit`` is whole-tree, so the title commit runs first — a memory
+    commit first would sweep the change into "update memory" and leave
+    ``#<n>: <title>`` empty (carrier contract, #13).
+    """
+
+    def node(state: dict) -> dict:
+        ref = state["item_ref"]
+        message = (
+            f"#{ref}: {state['item_title']}"
+            if not state.get("change_ref")
+            else f"#{ref}: address review"
+        )
+        ctx.tracker.commit(message)
+        ctx.scan(ctx.root)
+        ctx.tracker.commit(f"#{ref}: update memory")
+        return {}
+
+    return node
+
+
+def make_ci_comment(ctx: RunContext) -> Callable[[dict], dict]:
+    """The CI gate's pass record: on the PR once it exists, else the issue."""
+
+    def node(state: dict) -> dict:
+        body = gate_comment("ci", decider(ctx.root), state.get("ci_rejections", []))
+        _post_ci_comment(ctx, state, body, f"ci_gate_{state.get('ci_round', 1)}")
+        return {}
+
+    return node
+
+
+def make_ci_reject_comment(ctx: RunContext) -> Callable[[dict], dict]:
+    """The CI gate's reject record, with the human's feedback."""
+
+    def node(state: dict) -> dict:
+        rejections = state.get("ci_rejections", [])
+        body = reject_comment("ci", decider(ctx.root), rejections[-1])
+        _post_ci_comment(ctx, state, body, f"ci_gate_reject_{len(rejections)}")
+        return {}
+
+    return node
+
+
+def _post_ci_comment(
+    ctx: RunContext, state: dict, body: str, marker_node: str
+) -> None:
+    """On the PR once it exists, else on the issue (marker-idempotent)."""
+    if state.get("change_ref"):
+        ctx.tracker.comment_change(
+            state["change_ref"], body, run=ctx.run_id, node=marker_node
+        )
+    else:
+        ctx.tracker.comment_work_item(
+            state["item_ref"], body, run=ctx.run_id, node=marker_node
+        )
+
+
+def make_mark_ready(ctx: RunContext) -> Callable[[dict], dict]:
+    """``gh pr ready``: the draft leaves draft state; the run is done."""
+
+    def node(state: dict) -> dict:
+        ctx.tracker.mark_change_ready(state["change_ref"])
+        return {"outcome": "done"}
+
+    return node
+
+
+# --- comments, briefs and rendering ----------------------------------------------
+
+
+def brief_dict(response: object) -> dict | None:
+    if response is None:
+        return None
+    if hasattr(response, "model_dump"):
+        return response.model_dump()
+    return dict(response)
+
+
+def with_change(
+    ctx: RunContext, brief: Callable[[dict], str]
+) -> Callable[[dict], str]:
+    """``brief`` plus the change as an agent sees it: the PR rendered like
+    a work item, and its code diff — so REVIEWER never judges without
+    reading the change (#94)."""
+
+    def build(state: dict) -> str:
+        ref = state["change_ref"]
+        change = render_work_item(ctx.tracker.read_work_item(ref))
+        diff = code_diff(ctx.tracker.read_change_diff(ref))
+        return f"{brief(state)}\n\n{change}\n\n## Diff\n\n{diff}"
+
+    return build
+
+
+def code_diff(diff: str) -> str:
+    """``diff`` without its ``.k0-mem/`` files: the harness's memory commits
+    are derived data, not part of the change to judge (#84)."""
+    files = re.split(r"(?m)^(?=diff --git )", diff)
+    return "".join(f for f in files if not f.startswith("diff --git a/.k0-mem/"))
+
+
+def with_work_item(
+    ctx: RunContext, brief: Callable[[dict], str]
+) -> Callable[[dict], str]:
+    """``brief`` plus the run's work item, rendered as an agent sees it.
+
+    Agents get the request in their first message instead of depending on
+    the model to call ``read_work_item`` (#86); ``render_work_item`` keeps
+    the trusted-author filter and the untrusted-body refusal.
+    """
+
+    def build(state: dict) -> str:
+        text = brief(state)
+        if not state.get("item_ref"):
+            return text
+        item = ctx.tracker.read_work_item(state["item_ref"])
+        return f"{text}\n\n{render_work_item(item)}"
+
+    return build
+
+
+def contract_brief(state: dict) -> str:
+    """The Contract review's fresh context: the work item is the contract.
+
+    ``/implement #<n>``'s second review pass judges (#118): what the
+    contract asked that is missing, what the diff adds unasked, what
+    looks done but wrong.
+    """
+    return (
+        f"Work item #{state['item_ref']}: {state['item_title']} — shown "
+        "below; the latest ## Agent Brief comment is the contract.\n\n"
+        f"Review pull request {state['change_ref']} — this is a Contract "
+        "review: judge the change against the work item and quote it for "
+        "each finding — work the contract asks that is missing or "
+        "partial, work the diff adds that was never asked for, and work "
+        "that looks done but wrong. Its diff is below, without the "
+        ".k0-mem/ memory files. Read the files it touches with the read "
+        "tools. Call the Review tool exactly once with your summary and "
+        "findings."
+    )
+
+
+def render_review(review: dict | None, label: str = "Review") -> str:
+    """The ``## <label>`` markdown: PR review body and gate detail."""
+    if not review:
+        return "(REVIEWER produced no review)"
+    findings = "\n".join(f"- {item}" for item in review.get("findings", []))
+    return (
+        f"## {label}\n\n"
+        f"{review.get('summary', '')}\n\n"
+        f"### Findings\n{findings or '- none'}\n"
+    )
+
+
+def gate_comment(gate: str, who: str, rejections: list[str]) -> str:
+    """One comment per passed gate: gate, who, when, earlier rejections."""
+    lines = [
+        f"Gate passed: {gate}",
+        f"Decided by: {who}",
+        f"At: {datetime.now(UTC).isoformat(timespec='seconds')}",
+    ]
+    if rejections:
+        lines += ["", "Earlier rejection feedback:"] + [
+            f"- {item}" for item in rejections
+        ]
+    return "\n".join(lines)
+
+
+def reject_comment(gate: str, who: str, feedback: str) -> str:
+    """One comment per rejected gate: gate, who, when and the feedback."""
+    return "\n".join(
+        [
+            f"Gate rejected: {gate}",
+            f"Decided by: {who}",
+            f"At: {datetime.now(UTC).isoformat(timespec='seconds')}",
+            "",
+            f"Feedback: {feedback or '(none)'}",
+        ]
+    )
+
+
+def round_suffix(state: dict, key: str) -> str:
+    """``_<round>`` for a marker-idempotent node's second pass, "" first."""
+    round_ = state.get(key, 1)
+    return f"_{round_}" if round_ > 1 else ""

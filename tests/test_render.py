@@ -284,7 +284,6 @@ def test_check_gates(
     ("gate", "result", "line"),
     [
         ("spec", "approve", "⏺ Spec gate · approved"),
-        ("test", "reject", "⏺ Test gate · sent back"),
         ("review", "redo", "⏺ Review gate · sent back"),
         ("limit_hit", "retry", "⏺ Limit hit · retry"),
         ("diff", "stop", "⏺ Diff gate · stopped"),
@@ -437,7 +436,6 @@ def test_gate_panel_is_rounded_with_title_and_no_question() -> None:
     ("gate", "title"),
     [
         ("spec", "Spec gate"),
-        ("test", "Test gate"),
         ("review", "Review gate"),
         ("ci", "CI gate"),
         ("diff", "Diff gate"),
