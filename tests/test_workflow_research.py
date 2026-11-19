@@ -1,6 +1,6 @@
 """The /research graph through the run module seam.
 
-Same seams as the /fast, /full, /implement and /plan suites: a real temp
+Same seams as the implement and plan suites: a real temp
 git repo, scripted ``FakeChatModel``s behind the ``init`` seam and a
 ``FakeTracker``. ``/research <question>`` runs one PLANNER pass that
 charts a Map — destination, notes, one decision ticket per open question

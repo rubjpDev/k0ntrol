@@ -336,7 +336,7 @@ def agent_tools(
     helper models; ``resolve``/``transport``/``environ``/``fetch`` are the
     network tools' injected seams. Each is needed only by tools that use
     it, and only when the tool runs. With ``tracker=None`` the tracker
-    reads are left off entirely (``/fast``), matching
+    reads are left off entirely (a ``<task>`` run), matching
     ``allowlist_for(name, tracker=False)``. ``read_only`` matches
     ``allowlist_for(..., read_only=True)`` the same way. ``slice_start``
     is IMPLEMENTER's guard's start state — ``refactor`` for a run started
@@ -375,7 +375,7 @@ def build_agent(
     """Build agent ``name`` behind the fresh-context wrapper.
 
     ``tools`` must be exactly the agent's allowlist — ``allowlist``, or
-    ``ALLOWLISTS[name]`` when it is ``None`` (``/fast`` passes the
+    ``ALLOWLISTS[name]`` when it is ``None`` (a ``<task>`` run passes the
     tracker-less list). The model comes from the ``agents.<name>`` config
     entry, and the prompt from ``prompts/<name>.md`` plus the project's
     `Rules.md` and topology when someone has edited them.

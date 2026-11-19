@@ -339,7 +339,7 @@ def test_a_run_reflect_covers_earlier_ask_turns(tmp_path):
     calls = []
     reflector = Reflector(
         root=tmp_path,
-        transcript=_transcript(tmp_path, "/ask one\n/fast two\nrun done\n"),
+        transcript=_transcript(tmp_path, "/ask one\n/implement two\nrun done\n"),
         cfg={},
         reflect=_recording_reflect(calls),
     )

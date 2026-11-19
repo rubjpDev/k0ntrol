@@ -1,6 +1,6 @@
 """The /implement <task> working-tree graph through the run module seam.
 
-Same seams as the /fast and /full suites: a real temp git repo, a real
+Same seams as the other workflow suites: a real temp git repo, a real
 ``test_cmd``, scripted ``FakeChatModel``s behind the ``init`` seam and a
 ``FakeTracker`` the run must never touch — the working-tree path has no
 tracker, branch or pull request (spec #102, ticket #116).
@@ -139,7 +139,7 @@ def test_implement_hash_with_a_non_digit_is_refused(tmp_path):
 
 
 def test_bulk_read_doctor_error_refuses_the_run(tmp_path):
-    """The run roster gates on ``helpers.bulk_read`` like /fast does (#61)."""
+    """The run roster gates on ``helpers.bulk_read`` for a ``<task>`` run (#61)."""
     git_repo(tmp_path)
     captured = {}
 
@@ -628,7 +628,7 @@ def item_cfg(**overrides):
 
 def item_repo(root: Path) -> None:
     """The tracker path's repo: a ``main`` branch and ``.k0-mem/`` ignored, so
-    the run's commits hold only the change (the /full suite's fixture shape)."""
+    the run's commits hold only the change (the tracker-path fixture shape)."""
     subprocess.run(["git", "init", "-q", "-b", "main"], cwd=root, check=True)
     subprocess.run(["git", "config", "user.email", "t@t"], cwd=root, check=True)
     subprocess.run(["git", "config", "user.name", "t"], cwd=root, check=True)

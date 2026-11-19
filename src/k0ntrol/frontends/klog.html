@@ -330,7 +330,7 @@ function runRow(run, withSession) {
 
 function renderRuns() {
   const runs = DATA.runs;
-  if (!runs.length) { $("#runs").innerHTML = '<p class="empty">No runs or chats in the log yet. Start one with /fast, /full or a question.</p>'; return; }
+  if (!runs.length) { $("#runs").innerHTML = '<p class="empty">No runs or chats in the log yet. Start one with /implement, /plan or a question.</p>'; return; }
   const withSession = runs.some((r) => r.session);
   const shown = runs.slice(0, limits.runs);
   const headers = ["Started", "Kind", "Work item", "Branch", withSession ? "Session" : null, "Duration", "Outcome", "Calls", "Tokens in / out", "Cost", "Failures"];
@@ -661,7 +661,7 @@ function renderAnalytics() {
     card("Model latency", a.latency.length && legend(latencySegments) + chartSlot("latency"), "p50 and p95 of successful calls.", "No successful model calls yet."),
     card("Tool calls", a.tools.length && legend(toolSegments) + chartSlot("tools"), "", "No tool calls yet."),
     card("Gate outcomes", a.gates.length && legend(gateSegments) + chartSlot("gates"), "Approve or pass, against reject, retry, stop or fail.", "No gate has been decided yet."),
-    card("Run outcomes", outcomes.length && chartSlot("outcomes"), "", "No /fast or /full run has ended yet."),
+    card("Run outcomes", outcomes.length && chartSlot("outcomes"), "", "No run has ended yet."),
   ].join("")}</div>`;
   drawCharts("#analytics", {
     cost: (w) => barChart(w, a.by_agent.map((r) => ({ label: agentLabel(r), values: [r.cost], text: fmtCost(r.cost) })), [{ name: "cost", cls: "c-accent" }], "Cost per agent"),

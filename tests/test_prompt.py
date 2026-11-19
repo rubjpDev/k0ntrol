@@ -17,7 +17,7 @@ from k0ntrol.frontends.prompt import (
     terminal_key_reader,
 )
 
-COMMANDS = {"/full": "work item to PR", "/fast": "quick change", "/help": "list"}
+COMMANDS = {"/plan": "draft tickets", "/pack": "pack memory", "/help": "list"}
 OPTIONS = [("ok", "Approve"), ("redo", "Send back with feedback")]
 
 
@@ -69,8 +69,8 @@ def test_welcome_prints_banner_and_tips():
 
 
 def test_complete_command_matches_prefix_only_for_slash():
-    assert complete_command("/f", COMMANDS) == ["/fast", "/full"]
-    assert complete_command("/", COMMANDS) == ["/fast", "/full", "/help"]
+    assert complete_command("/p", COMMANDS) == ["/pack", "/plan"]
+    assert complete_command("/", COMMANDS) == ["/help", "/pack", "/plan"]
     assert complete_command("f", COMMANDS) == []
     assert complete_command("", COMMANDS) == []
 
@@ -250,7 +250,7 @@ def test_help_table_aligns_commands_and_lists_shortcuts():
     console, _ = make_console()
     make_prompt(console).help_table()
     lines = console.export_text().splitlines()
-    assert "  /fast  quick change" in lines
+    assert "  /pack  pack memory" in lines
     assert "  /help  list" in lines
     assert "ctrl-c pauses a run" in lines[-1]
     assert "tab completes /commands" in lines[-1]
@@ -259,9 +259,9 @@ def test_help_table_aligns_commands_and_lists_shortcuts():
 def test_complete_walks_the_matches():
     console, _ = make_console()
     prompt = make_prompt(console)
-    assert prompt.complete("/f", 0) == "/fast"
-    assert prompt.complete("/f", 1) == "/full"
-    assert prompt.complete("/f", 2) is None
+    assert prompt.complete("/p", 0) == "/pack"
+    assert prompt.complete("/p", 1) == "/plan"
+    assert prompt.complete("/p", 2) is None
 
 
 class FakeReadline:
