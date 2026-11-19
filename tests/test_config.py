@@ -174,32 +174,14 @@ def test_invalid_ticket_size_is_rejected(tmp_path, line):
         load_config(tmp_path, tmp_path / "home")
 
 
-def test_legacy_agent_keys_load_exactly_as_before(tmp_path):
+@pytest.mark.parametrize(
+    "name,replacement", [("spec", "planner"), ("tester", "implementer"), ("coder", "implementer")]
+)
+@pytest.mark.parametrize("location", [".k0-mem/config.yaml", "home/.k0ntrol/config.yaml"])
+def test_retired_agent_keys_name_their_replacement(tmp_path, name, replacement, location):
     home = tmp_path / "home"
-    write(
-        home / ".k0ntrol/config.yaml",
-        "agents:\n"
-        "  spec: {model: claude-old-spec}\n"
-        "  tester: {provider: openai, model: gpt-tester, effort: low, model_calls: 7}\n"
-        "  coder: {model_calls: 99}\n",
-    )
-    write(tmp_path / ".k0-mem/config.yaml", "agents:\n  coder: {model: claude-coder-proj}\n")
-    agents = load_config(tmp_path, home)["agents"]
-    assert agents["spec"] == {
-        "provider": "anthropic",
-        "model": "claude-old-spec",
-        "effort": "high",
-        "model_calls": 25,
-    }
-    assert agents["tester"] == {
-        "provider": "openai",
-        "model": "gpt-tester",
-        "effort": "low",
-        "model_calls": 7,
-    }
-    assert agents["coder"] == {
-        "provider": "anthropic",
-        "model": "claude-coder-proj",
-        "effort": "medium",
-        "model_calls": 99,
-    }
+    write(tmp_path / location, f"agents:\n  {name}: {{model: old-model}}\n")
+    message = f"agents.{name}: retired in 0.1.0; use agents.{replacement}"
+    with pytest.raises(ConfigError) as error:
+        load_config(tmp_path, home)
+    assert str(error.value) == message

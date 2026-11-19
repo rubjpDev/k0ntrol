@@ -54,8 +54,8 @@ _CLAUDE_TIER_MODELS = {
 
 # Default tiers: which roster entries share one model, and the Claude effort.
 _TIER_ROSTER = {
-    "strong": ("planner", "spec", "reviewer"),
-    "middle": ("researcher", "implementer", "tester", "coder"),
+    "strong": ("planner", "reviewer"),
+    "middle": ("researcher", "implementer"),
     "light": ("chatty", "bulk_read", "reflect"),
 }
 _TIER_EFFORT = {"strong": "high", "middle": "medium"}

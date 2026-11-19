@@ -162,8 +162,8 @@ _PROVIDERS = [
 ]
 _LOCAL_NAMES = {"ollama": "Ollama", "lmstudio": "LM Studio"}
 _TIER_QUESTION = {
-    "strong": "SPEC and REVIEWER",
-    "middle": "TESTER and CODER",
+    "strong": "PLANNER and REVIEWER",
+    "middle": "RESEARCHER and IMPLEMENTER",
     "light": "CHATTY and helpers",
 }
 _CLAUDE_NAMES = {"strong": "Opus", "middle": "Sonnet", "light": "Haiku"}

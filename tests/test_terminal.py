@@ -116,7 +116,7 @@ def test_first_run_is_a_git_repo_without_config_and_a_machine_without_models(tmp
     user.parent.mkdir(parents=True)
     user.write_text("max_attempts: 3\n")
     assert needs_provider_setup(home)
-    user.write_text("agents:\n  spec: {provider: ollama, model: m}\n")
+    user.write_text("agents:\n  planner: {provider: ollama, model: m}\n")
     assert not needs_provider_setup(home)
     user.write_text("agents: [\n")
     assert not needs_provider_setup(home)  # the loader reports bad YAML
@@ -250,9 +250,9 @@ def test_status_rows_show_the_effort_of_each_model():
 
     from k0ntrol.frontends.session import _status_rows
 
-    rows = dict(_status_rows({"agents": {"spec": {"provider": "anthropic", "model": "m", "effort": "high"},
+    rows = dict(_status_rows({"agents": {"planner": {"provider": "anthropic", "model": "m", "effort": "high"},
                                          "chatty": {"provider": "anthropic", "model": "h"}}}, Path("/r")))
-    assert rows["spec"] == "anthropic/m · high"
+    assert rows["planner"] == "anthropic/m · high"
     assert rows["chatty"] == "anthropic/h"
 
 
