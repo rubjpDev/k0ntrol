@@ -256,6 +256,44 @@ def test_seam_gate_redo_reruns_the_proposal_with_the_feedback(tmp_path):
     assert not list(tmp_path.rglob("test_*.py"))
 
 
+QUESTIONS = "1. what should `n` do when the tree was already dirty?"
+SEAMS_WITH_QUESTIONS = f"{SEAMS}\n\nOpen design questions:\n{QUESTIONS}"
+
+
+def test_the_seam_brief_asks_for_the_open_design_questions(tmp_path):
+    git_repo(tmp_path)
+    seams = seams_model()
+
+    run_implement(tmp_path, implement_cfg(), seams)
+
+    assert "Open design questions:" in seams.invocations[0][-1].content
+
+
+def test_the_seam_gate_shows_the_open_design_questions_apart(tmp_path):
+    """The forks IMPLEMENTER would settle alone reach the human at the
+    gate under their own heading, not mixed into the seams (#148)."""
+    git_repo(tmp_path)
+    proposal = FakeChatModel(messages=[AIMessage(content=SEAMS_WITH_QUESTIONS)])
+
+    pending = run_implement(tmp_path, implement_cfg(), proposal)
+
+    assert isinstance(pending, Pending) and pending.gate == "seam"
+    seams, _, questions = pending.detail.partition("Open design questions:")
+    assert SEAMS in seams and QUESTIONS not in seams
+    assert questions.strip() == QUESTIONS
+
+
+def test_the_seam_gate_says_when_there_are_no_open_design_questions(tmp_path):
+    git_repo(tmp_path)
+
+    pending = run_implement(tmp_path, implement_cfg(), seams_model())
+
+    assert isinstance(pending, Pending) and pending.gate == "seam"
+    seams, _, questions = pending.detail.partition("Open design questions:")
+    assert SEAMS in seams
+    assert questions.strip() == "(none)"
+
+
 # --- build → VALIDATOR → diff gate ----------------------------------------------
 
 
@@ -289,6 +327,41 @@ def to_diff_gate(tmp_path, cfg=None, builder=None):
         tracker=tracker,
     )
     return tracker, builder, result
+
+
+def build_after_seam_gate(tmp_path, answer):
+    """The build brief IMPLEMENTER gets after ``answer`` at a seam gate
+    that listed open design questions."""
+    proposal = FakeChatModel(messages=[AIMessage(content=SEAMS_WITH_QUESTIONS)])
+    pending = run_implement(tmp_path, implement_cfg(), proposal)
+    assert isinstance(pending, Pending) and pending.gate == "seam"
+    builder = builder_model()
+    result = resume(
+        pending.run, answer, root=tmp_path, cfg=implement_cfg(),
+        init=models_init(builder),
+    )
+    assert isinstance(result, Pending) and result.gate == "diff"
+    return builder.invocations[0][-1].content
+
+
+def test_ok_with_answers_puts_them_in_the_build_brief(tmp_path):
+    """``ok <answers>`` makes each fork a human decision (#148)."""
+    git_repo(tmp_path)
+
+    brief = build_after_seam_gate(tmp_path, "ok 1: keep the human's dirty edits")
+
+    assert QUESTIONS in brief
+    assert "1: keep the human's dirty edits" in brief
+
+
+def test_a_bare_ok_builds_as_before(tmp_path):
+    git_repo(tmp_path)
+
+    brief = build_after_seam_gate(tmp_path, "ok")
+
+    assert SEAMS in brief
+    assert QUESTIONS not in brief
+    assert "design questions" not in brief.lower()
 
 
 def test_implement_runs_to_the_diff_gate_and_done(tmp_path):

@@ -164,7 +164,9 @@ def make_seam_node(ctx: RunContext) -> Callable[[dict], dict]:
             limit_node="seam",
         )
         if not result.limit_hit:
-            updates["seam_proposal"] = result.text
+            seams, questions = split_proposal(result.text)
+            updates["seam_proposal"] = seams
+            updates["seam_questions"] = questions
         return updates
 
     return node
@@ -179,19 +181,47 @@ def make_seam_gate(ctx: RunContext) -> Callable[[dict], dict]:
                 "gate": "seam",
                 "question": "approve these seams?",
                 "answers": ["ok", "redo"],
-                "detail": state.get("seam_proposal")
-                or "(IMPLEMENTER proposed no seams)",
+                "detail": seam_gate_detail(state),
             }
         )
         word, _, feedback = str(decision).strip().partition(" ")
         if word.lower() == "ok":
-            return {"seam_approved": True, "seam_feedback": None}
+            return {
+                "seam_approved": True,
+                "seam_feedback": None,
+                "seam_answers": feedback.strip() or None,
+            }
         return {
             "seam_approved": False,
             "seam_feedback": feedback.strip(),
+            "seam_answers": None,
         }
 
     return node
+
+
+QUESTIONS_HEADING = "Open design questions:"
+_QUESTIONS_LINE = re.compile(r"^\W*open design questions\W*$", re.IGNORECASE | re.MULTILINE)
+_NO_QUESTIONS = {"", "none", "(none)"}
+
+
+def split_proposal(text: str) -> tuple[str, str]:
+    """IMPLEMENTER's proposal as its seams and its open design questions
+    — ``""`` when it lists none (#148)."""
+    match = _QUESTIONS_LINE.search(text)
+    if match is None:
+        return text.strip(), ""
+    questions = text[match.end():].strip()
+    if questions.lower().rstrip(".") in _NO_QUESTIONS:
+        questions = ""
+    return text[: match.start()].strip(), questions
+
+
+def seam_gate_detail(state: dict) -> str:
+    """The seams, then the open design questions under their own heading."""
+    seams = state.get("seam_proposal") or "(IMPLEMENTER proposed no seams)"
+    questions = state.get("seam_questions") or "(none)"
+    return f"{seams}\n\n{QUESTIONS_HEADING}\n{questions}"
 
 
 def _revert(ctx: RunContext) -> Callable[[], None]:
@@ -481,7 +511,10 @@ def seam_brief(state: dict) -> str:
         f"Task: {state['task']}\n\n"
         "Propose the seams to test this task at — the public boundaries "
         "tests may exercise. Read the repo first, then answer with the "
-        "seams. Do not write any files."
+        "seams. Do not write any files.\n\n"
+        f"After the seams, add a line `{QUESTIONS_HEADING}` and list each "
+        "design question the task leaves open — a fork you would otherwise "
+        "settle alone — or write `none`. The human answers them at the gate."
     )
     if state.get("seam_feedback"):
         text += (
@@ -527,9 +560,23 @@ def _task_brief(state: dict) -> str:
     return (
         f"Task: {state['task']}\n\n"
         f"Approved seams:\n{seams}\n\n"
+        f"{_seam_answers(state)}"
         "Build the task test-first, one red-to-green slice at a time: "
         "write a failing test at a seam, run it red, then write only the "
         "code that makes it pass."
+    )
+
+
+def _seam_answers(state: dict) -> str:
+    """The open design questions and the human's ``ok`` answers to them —
+    nothing on a bare ``ok``."""
+    if not state.get("seam_answers"):
+        return ""
+    questions = state.get("seam_questions") or "(none)"
+    return (
+        f"{QUESTIONS_HEADING}\n{questions}\n\n"
+        "The human's answers to them — decisions, not suggestions:\n"
+        f"{state['seam_answers']}\n\n"
     )
 
 # --- tracker side effects -------------------------------------------------------
