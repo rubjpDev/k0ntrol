@@ -196,12 +196,12 @@ def test_anthropic_provider_flag_writes_claude_defaults_to_user_config(tmp_path)
     code, lines = init_lines(tmp_path, tracker="github", provider="anthropic")
     assert code == 0
     cfg = read_user_config(home)
-    assert cfg["agents"]["spec"] == {
+    assert cfg["agents"]["planner"] == {
         "provider": "anthropic",
         "model": "claude-opus-5-5",
         "effort": "high",
     }
-    assert cfg["agents"]["coder"] == {
+    assert cfg["agents"]["implementer"] == {
         "provider": "anthropic",
         "model": "claude-sonnet-5-5",
         "effort": "medium",
@@ -216,10 +216,11 @@ def test_anthropic_provider_flag_writes_claude_defaults_to_user_config(tmp_path)
     assert all("model_calls" not in e for e in cfg["agents"].values())
 
 
-def test_init_maps_the_new_agents_onto_their_tiers(tmp_path):
+def test_init_maps_only_supported_agents_onto_their_tiers(tmp_path):
     code, _ = init_lines(tmp_path, tracker="github", provider="anthropic")
     assert code == 0
     cfg = read_user_config(tmp_path / "home")
+    assert set(cfg["agents"]) == {"planner", "researcher", "implementer", "reviewer", "chatty"}
     assert cfg["agents"]["planner"] == {
         "provider": "anthropic",
         "model": "claude-opus-5-5",
@@ -248,8 +249,8 @@ def test_openrouter_and_bedrock_get_claude_defaults_in_their_model_ids(tmp_path)
         )
         assert code == 0
         cfg = read_user_config(home)
-        assert cfg["agents"]["spec"]["model"].startswith(prefix)
-        assert cfg["agents"]["spec"]["effort"] == "high"
+        assert cfg["agents"]["planner"]["model"].startswith(prefix)
+        assert cfg["agents"]["planner"]["effort"] == "high"
         assert cfg["helpers"]["reflect"]["provider"] == provider
 
 
@@ -262,9 +263,9 @@ def test_openai_init_asks_one_model_per_tier(tmp_path):
     prompts = " ".join(answers.prompts)
     assert "strong" in prompts and "middle" in prompts and "light" in prompts
     cfg = read_user_config(tmp_path / "home")
-    for name in ("spec", "reviewer"):
+    for name in ("planner", "reviewer"):
         assert cfg["agents"][name]["model"] == "gpt-x-strong"
-    for name in ("tester", "coder"):
+    for name in ("researcher", "implementer"):
         assert cfg["agents"][name]["model"] == "gpt-x-mid"
     assert cfg["agents"]["chatty"]["model"] == "gpt-x-light"
     assert cfg["helpers"]["bulk_read"]["model"] == "gpt-x-light"
@@ -292,9 +293,9 @@ def test_ollama_init_offers_only_installed_tool_capable_models(tmp_path):
     assert "qwen3:8b" in out and "mistral" in out
     assert "llama3" not in out  # cannot call tools
     cfg = read_user_config(tmp_path / "home")
-    assert cfg["agents"]["spec"]["model"] == "qwen3:8b"
-    assert cfg["agents"]["coder"]["model"] == "mistral"
-    assert cfg["agents"]["coder"]["provider"] == "ollama"
+    assert cfg["agents"]["planner"]["model"] == "qwen3:8b"
+    assert cfg["agents"]["implementer"]["model"] == "mistral"
+    assert cfg["agents"]["implementer"]["provider"] == "ollama"
 
 
 def test_ollama_init_fails_when_the_server_cannot_be_reached(tmp_path):
@@ -328,7 +329,7 @@ def test_lmstudio_init_offers_only_tool_capable_models(tmp_path):
     assert "qwen3-8b" in out
     assert "embed-x" not in out and "plain-y" not in out
     cfg = read_user_config(tmp_path / "home")
-    assert cfg["agents"]["spec"]["model"] == "qwen3-8b"
+    assert cfg["agents"]["planner"]["model"] == "qwen3-8b"
 
 
 def test_provider_already_in_effect_is_reported_and_kept(tmp_path):
@@ -336,7 +337,7 @@ def test_provider_already_in_effect_is_reported_and_kept(tmp_path):
     user_dir = home / ".k0ntrol"
     user_dir.mkdir(parents=True)
     original = (
-        "agents:\n  coder: {provider: ollama, model: qwen3:8b}\n"
+        "agents:\n  implementer: {provider: ollama, model: qwen3:8b}\n"
         "providers:\n  ollama: {base_url: 'http://gpu-box:11434'}\n"
     )
     path = user_dir / "config.yaml"
@@ -359,7 +360,7 @@ def test_provider_question_runs_when_no_flag(tmp_path):
     for name in ("anthropic", "ollama", "openrouter", "vertex"):
         assert name in out
     cfg = read_user_config(tmp_path / "home")
-    assert cfg["agents"]["coder"]["provider"] == "bedrock"
+    assert cfg["agents"]["implementer"]["provider"] == "bedrock"
 
 
 def test_unknown_provider_flag_is_an_error_listing_the_registry(tmp_path):
@@ -441,7 +442,7 @@ def test_provider_write_preserves_other_user_config_keys(tmp_path):
     assert code == 0
     cfg = read_user_config(home)
     assert cfg["providers"]["ollama"]["params"]["num_ctx"] == 131072
-    assert cfg["agents"]["coder"]["provider"] == "anthropic"
+    assert cfg["agents"]["implementer"]["provider"] == "anthropic"
 
 
 def test_init_reports_a_broken_project_config(tmp_path):
@@ -485,7 +486,7 @@ def test_provider_prompt_retries_an_unknown_name(tmp_path):
     assert code == 0
     assert "unknown provider" in "\n".join(lines)
     cfg = read_user_config(tmp_path / "home")
-    assert cfg["agents"]["coder"]["provider"] == "anthropic"
+    assert cfg["agents"]["implementer"]["provider"] == "anthropic"
 
 
 def test_provider_prompt_empty_answer_picks_the_first(tmp_path):
@@ -493,7 +494,7 @@ def test_provider_prompt_empty_answer_picks_the_first(tmp_path):
     code, _ = init_lines(tmp_path, tracker="github", read_line=answers)
     assert code == 0
     cfg = read_user_config(tmp_path / "home")
-    assert cfg["agents"]["coder"]["provider"] == "anthropic"
+    assert cfg["agents"]["implementer"]["provider"] == "anthropic"
 
 
 def test_ollama_init_errors_when_no_tool_capable_models(tmp_path):
@@ -532,7 +533,7 @@ def test_text_model_question_requires_a_name(tmp_path):
     assert code == 0
     assert "a model name is required" in "\n".join(lines)
     cfg = read_user_config(tmp_path / "home")
-    assert cfg["agents"]["spec"]["model"] == "gpt-x"
+    assert cfg["agents"]["planner"]["model"] == "gpt-x"
 
 
 def test_init_eof_during_model_questions_fails(tmp_path):
@@ -553,14 +554,14 @@ def test_an_empty_user_config_file_counts_as_unset(tmp_path):
     code, _ = init_lines(tmp_path, tracker="github", provider="anthropic")
     assert code == 0
     cfg = read_user_config(tmp_path / "home")
-    assert cfg["agents"]["coder"]["provider"] == "anthropic"
+    assert cfg["agents"]["implementer"]["provider"] == "anthropic"
 
 
 def test_in_effect_provider_outside_the_registry_is_reported(tmp_path):
     user_dir = tmp_path / "home" / ".k0ntrol"
     user_dir.mkdir(parents=True)
     (user_dir / "config.yaml").write_text(
-        "agents:\n  coder: {provider: litellm, model: m}\n", encoding="utf-8"
+        "agents:\n  implementer: {provider: litellm, model: m}\n", encoding="utf-8"
     )
     code, lines = init_lines(tmp_path, tracker="github", provider="anthropic")
     assert code == 0

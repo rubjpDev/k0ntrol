@@ -24,9 +24,6 @@ def test_shipped_agent_defaults_match_the_spec(cfg):
         "planner": {"provider": "anthropic", "model": "claude-opus-5-5", "effort": "high", "model_calls": 25},
         "researcher": {"provider": "anthropic", "model": "claude-sonnet-5-5", "effort": "medium", "model_calls": 40},
         "implementer": {"provider": "anthropic", "model": "claude-sonnet-5-5", "effort": "medium", "model_calls": 100},
-        "spec": {"provider": "anthropic", "model": "claude-opus-5-5", "effort": "high", "model_calls": 25},
-        "tester": {"provider": "anthropic", "model": "claude-sonnet-5-5", "effort": "medium", "model_calls": 40},
-        "coder": {"provider": "anthropic", "model": "claude-sonnet-5-5", "effort": "medium", "model_calls": 60},
         "reviewer": {"provider": "anthropic", "model": "claude-opus-5-5", "effort": "high", "model_calls": 25},
         "chatty": {"provider": "anthropic", "model": "claude-haiku-5-5", "model_calls": 15},
     }
@@ -65,24 +62,24 @@ def test_roster_must_be_a_mapping(cfg, kind):
     ],
 )
 def test_agent_entry_fields_validate(cfg, key, value):
-    cfg["agents"]["coder"][key] = value
-    with pytest.raises(ConfigError, match=f"agents.coder.{key}"):
+    cfg["agents"]["implementer"][key] = value
+    with pytest.raises(ConfigError, match=f"agents.implementer.{key}"):
         validate_config(cfg)
 
 
 def test_agent_entry_must_be_a_mapping(cfg):
-    cfg["agents"]["coder"] = "claude-sonnet-5-5"
-    with pytest.raises(ConfigError, match="agents.coder"):
+    cfg["agents"]["implementer"] = "claude-sonnet-5-5"
+    with pytest.raises(ConfigError, match="agents.implementer"):
         validate_config(cfg)
 
 
 @pytest.mark.parametrize("value", [None, "60", 0, -1, True])
 def test_agents_require_model_calls(cfg, value):
     if value is None:
-        del cfg["agents"]["coder"]["model_calls"]
+        del cfg["agents"]["implementer"]["model_calls"]
     else:
-        cfg["agents"]["coder"]["model_calls"] = value
-    with pytest.raises(ConfigError, match="agents.coder.model_calls"):
+        cfg["agents"]["implementer"]["model_calls"] = value
+    with pytest.raises(ConfigError, match="agents.implementer.model_calls"):
         validate_config(cfg)
 
 
@@ -100,15 +97,15 @@ def test_unknown_roster_names_are_rejected(cfg, kind, name):
 
 
 def test_unknown_keys_in_an_entry_are_rejected(cfg):
-    cfg["agents"]["coder"]["temperature"] = 0.2
-    with pytest.raises(ConfigError, match="agents.coder.temperature"):
+    cfg["agents"]["implementer"]["temperature"] = 0.2
+    with pytest.raises(ConfigError, match="agents.implementer.temperature"):
         validate_config(cfg)
 
 
 def test_effort_levels_are_low_medium_high(cfg):
     for agent in cfg["agents"].values():
         agent.pop("effort", None)
-    cfg["agents"]["spec"]["effort"] = "low"
+    cfg["agents"]["planner"]["effort"] = "low"
     cfg["helpers"]["bulk_read"]["effort"] = "high"
     validate_config(cfg)
 
@@ -193,9 +190,9 @@ def test_secret_keys_are_rejected_at_the_top_level(cfg, key):
 @pytest.mark.parametrize(
     "patch",
     [
-        lambda cfg: cfg["agents"]["coder"].update({"api_key": "x"}),
-        lambda cfg: cfg["agents"]["coder"].update({"params": {"openai_api_key": "x"}}),
-        lambda cfg: cfg["agents"]["coder"].update({"params": {"auth": {"bearer_token": "x"}}}),
+        lambda cfg: cfg["agents"]["implementer"].update({"api_key": "x"}),
+        lambda cfg: cfg["agents"]["implementer"].update({"params": {"openai_api_key": "x"}}),
+        lambda cfg: cfg["agents"]["implementer"].update({"params": {"auth": {"bearer_token": "x"}}}),
         lambda cfg: cfg["helpers"]["reflect"].update({"params": {"aws_secret": "x"}}),
         lambda cfg: cfg.update({"providers": {"ollama": {"params": {"password_file": "x"}}}}),
         lambda cfg: cfg.update({"gates": [{"name": "g", "cmd": "c", "token": "x"}]}),
@@ -209,8 +206,8 @@ def test_secret_keys_are_rejected_at_any_level(cfg, patch):
 
 @pytest.mark.parametrize("key", ["tools", "tool_choice", "functions"])
 def test_tool_definitions_in_params_are_rejected(cfg, key):
-    cfg["agents"]["coder"]["params"] = {key: [{"name": "shell"}]}
-    with pytest.raises(ConfigError, match="agents.coder.params"):
+    cfg["agents"]["implementer"]["params"] = {key: [{"name": "shell"}]}
+    with pytest.raises(ConfigError, match="agents.implementer.params"):
         validate_config(cfg)
 
 
@@ -221,13 +218,13 @@ def test_tool_definitions_in_provider_params_are_rejected(cfg):
 
 
 def test_several_errors_are_collected_and_reported_together(cfg):
-    cfg["agents"]["coder"]["model"] = ""
+    cfg["agents"]["implementer"]["model"] = ""
     cfg["helpers"]["bulk_read"]["model_calls"] = 5
     cfg["max_retries"] = 3
     with pytest.raises(ConfigError) as exc:
         validate_config(cfg)
     message = str(exc.value)
-    assert "agents.coder.model" in message
+    assert "agents.implementer.model" in message
     assert "helpers.bulk_read.model_calls" in message
     assert "max_attempts" in message
 

@@ -10,7 +10,7 @@ class ConfigError(Exception):
     """Raised when configuration cannot be read or is invalid."""
 
 
-AGENTS = ("planner", "researcher", "implementer", "spec", "tester", "coder", "reviewer", "chatty")
+AGENTS = ("planner", "researcher", "implementer", "reviewer", "chatty")
 HELPERS = ("bulk_read", "reflect")
 
 _AGENT_KEYS = {"provider", "model", "effort", "params", "model_calls"}
@@ -34,6 +34,12 @@ _RETIRED_KEYS = {
     "validator": "VALIDATOR is a deterministic code gate now; use test_cmd and gates",
     "retrieval_gate": "the search_memory tool",
     "bulk_reader": "helpers.bulk_read",
+}
+
+_RETIRED_AGENT_KEYS = {
+    "agents.spec": "use agents.planner",
+    "agents.tester": "use agents.implementer",
+    "agents.coder": "use agents.implementer",
 }
 
 # Keys that must never appear in config: secrets belong in vendor env vars.
@@ -144,8 +150,12 @@ def _unknown_roster_names(kind: str, names: tuple, value: Mapping) -> list[str]:
     return [
         f"{kind}.{name}: unknown {kind} entry"
         for name in value
-        if name not in names and str(name).lower() not in _RETIRED_KEYS
+        if name not in names and _retired_key_hint(str(name), f"{kind}.{name}") is None
     ]
+
+
+def _retired_key_hint(key: str, path: str) -> str | None:
+    return _RETIRED_KEYS.get(key.lower()) or _RETIRED_AGENT_KEYS.get(path.lower())
 
 
 def _check_keys(node: object, path: str = "", in_params: bool = False) -> list[str]:
@@ -178,8 +188,8 @@ def _check_key(key: object, path: str, in_params: bool) -> list[str]:
     if not isinstance(key, str):
         return [f"{path}: keys must be strings"]
     lowered = key.lower()
-    if lowered in _RETIRED_KEYS:
-        return [f"{path}: retired in 0.1.0; {_RETIRED_KEYS[lowered]}"]
+    if hint := _retired_key_hint(key, path):
+        return [f"{path}: retired in 0.1.0; {hint}"]
     if any(marker in lowered for marker in _SECRET_MARKERS):
         return [f"{path}: secrets are not allowed in config; use the provider's env vars"]
     if in_params and any(marker in lowered for marker in _TOOL_MARKERS):
