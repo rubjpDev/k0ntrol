@@ -283,6 +283,21 @@ def test_the_seam_gate_shows_the_open_design_questions_apart(tmp_path):
     assert questions.strip() == QUESTIONS
 
 
+@pytest.mark.parametrize(
+    "heading", ["## Open design questions\nnone", "**Open design questions:** none"]
+)
+def test_a_decorated_none_heading_shows_no_open_design_questions(tmp_path, heading):
+    git_repo(tmp_path)
+    proposal = FakeChatModel(messages=[AIMessage(content=f"{SEAMS}\n\n{heading}")])
+
+    pending = run_implement(tmp_path, implement_cfg(), proposal)
+
+    assert isinstance(pending, Pending) and pending.gate == "seam"
+    seams, _, questions = pending.detail.partition("Open design questions:")
+    assert seams.strip() == SEAMS
+    assert questions.strip() == "(none)"
+
+
 def test_the_seam_gate_says_when_there_are_no_open_design_questions(tmp_path):
     git_repo(tmp_path)
 

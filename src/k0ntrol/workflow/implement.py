@@ -4,8 +4,8 @@
 ``implementer`` → ``validator`` → diff gate — no tracker, branch or pull
 request. IMPLEMENTER first proposes the seams in a fresh run — its own
 agent instance, so a stray proposal write can never leak slice-guard
-state into the build — and the human answers ``ok`` or
-``redo <feedback>``. The diff gate's ``n`` restores the working tree to
+state into the build — and lists the design questions the task leaves
+open; the human answers ``ok [answers]`` or ``redo <feedback>``. The diff gate's ``n`` restores the working tree to
 the snapshot ``start`` took before the run.
 
 ``/implement #<n>`` runs the tracker path on a ready work item:
@@ -173,7 +173,9 @@ def make_seam_node(ctx: RunContext) -> Callable[[dict], dict]:
 
 
 def make_seam_gate(ctx: RunContext) -> Callable[[dict], dict]:
-    """The seam gate: ``ok`` builds, ``redo [feedback]`` proposes again."""
+    """The seam gate: ``ok [answers]`` builds — the answers to the open
+    design questions reach the build brief — ``redo [feedback]`` proposes
+    again."""
 
     def node(state: dict) -> dict:
         decision = interrupt(
@@ -201,7 +203,9 @@ def make_seam_gate(ctx: RunContext) -> Callable[[dict], dict]:
 
 
 QUESTIONS_HEADING = "Open design questions:"
-_QUESTIONS_LINE = re.compile(r"^\W*open design questions\W*$", re.IGNORECASE | re.MULTILINE)
+_QUESTIONS_LINE = re.compile(
+    r"^[#*_\s]*open design questions[*_:\s]*", re.IGNORECASE | re.MULTILINE
+)
 _NO_QUESTIONS = {"", "none", "(none)"}
 
 
