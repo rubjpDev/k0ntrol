@@ -53,8 +53,10 @@ class RunState(TypedDict, total=False):
     files: list[str]  # paths IMPLEMENTER wrote (tests and code)
     seam_attempts: int  # IMPLEMENTER proposal runs so far
     seam_proposal: str  # the seams IMPLEMENTER proposed (gate detail, brief)
+    seam_questions: str  # the open design questions it listed with them
     seam_approved: bool  # the human ok'd the seams
     seam_feedback: str | None  # the feedback of the last seam-gate reject
+    seam_answers: str | None  # the human's answers in the seam gate's ok
     implementer_attempts: int  # IMPLEMENTER build runs so far (VALIDATOR loop)
 
     # /implement #<n> (#118): once the draft change is open, REVIEWER runs

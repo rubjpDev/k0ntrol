@@ -801,8 +801,10 @@ def _implement_state(item) -> dict:
         "files": [],
         "seam_attempts": 0,
         "seam_proposal": "",
+        "seam_questions": "",
         "seam_approved": False,
         "seam_feedback": None,
+        "seam_answers": None,
         "implementer_attempts": 0,
     }
     if item is not None:
