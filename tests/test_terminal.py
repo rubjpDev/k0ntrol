@@ -5,7 +5,10 @@ import io
 
 import pytest
 
+from langchain_core.messages import AIMessage
 from rich.console import Console
+
+from fakes import FakeChatModel, cfg_with
 
 from k0ntrol.frontends.prompt import Prompt
 from k0ntrol.frontends.render import LiveRenderer
@@ -81,6 +84,51 @@ def test_the_session_asks_gates_and_reports_through_the_ui(tmp_path):
     assert "bedrock/m" in text  # /status
     assert "vcs          github" in text  # a missing vcs reads as github
     assert "run done" not in text  # the renderer reports the outcome, not the session
+
+
+def _reflect_model(**environment):
+    model = FakeChatModel(messages=[AIMessage(content="", tool_calls=[{
+        "name": "reflect",
+        "args": {"facts": [], "mem": [], "environment": environment},
+        "id": "reflect-1",
+    }])])
+    cfg = cfg_with(helpers={"reflect": {"provider": "anthropic", "model": "m"}})
+    return cfg, lambda *a, **kw: model
+
+
+def test_a_stuck_run_shows_read_only_environment_proposals_even_at_quit(tmp_path):
+    ui, console = terminal(["/implement fix calc", "/quit"])
+    cfg, init = _reflect_model(
+        gate=["Check generated files in CI."],
+        rule=["Prefer decimal arithmetic for currency."],
+        hint=["Start at calc/dispatch.py for operation routing."],
+        unknown=["Do not show this."],
+    )
+    files = {
+        ".k0-mem/config.yaml": "gates: []\n",
+        ".k0-mem/General_mem/Rules.md": "# Rules\n",
+        "AGENTS.md": "# Navigation\n",
+    }
+    for name, contents in files.items():
+        path = tmp_path / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(contents)
+
+    code = run_session(
+        lambda: "unused", print, root=tmp_path, config=cfg, init=init, ui=ui,
+        start=lambda *a, **kw: Outcome(run="r1", outcome="stuck", reason="max_attempts"),
+    )
+
+    assert code == 0
+    text = console.export_text()
+    assert "Environment proposals (not applied):" in text
+    assert "[gate] Check generated files in CI." in text
+    assert "[rule] Prefer decimal arithmetic for currency." in text
+    assert "[hint] Start at calc/dispatch.py for operation routing." in text
+    assert "Do not show this." not in text
+    assert {name: (tmp_path / name).read_text() for name in files} == files
+    (transcript,) = (tmp_path / ".k0-mem" / "sessions").glob("*.txt")
+    assert "Check generated files in CI." not in transcript.read_text()
 
 
 def test_failures_read_red_and_pauses_amber():

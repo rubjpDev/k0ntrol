@@ -9,12 +9,14 @@ tracker, branch or pull request (spec #102, ticket #116).
 import json
 import os
 import subprocess
+from functools import partial
 from pathlib import Path
 
 import pytest
 from langchain_core.messages import AIMessage
 
 from fakes import STUB_TEST_CMD, FakeChatModel, FakeTracker, cfg_with
+from k0ntrol.frontends.session import run_session
 from k0ntrol.tracker import TrackerError
 from k0ntrol.workflow import (
     Outcome,
@@ -304,6 +306,37 @@ def test_implement_runs_to_the_diff_gate_and_done(tmp_path):
 
     assert isinstance(outcome, Outcome)
     assert outcome.outcome == "done"
+
+
+@pytest.mark.parametrize("redo", [False, True], ids=["clean", "redone"])
+def test_environment_advice_after_finishing_a_run_in_a_later_session(tmp_path, redo):
+    git_repo(tmp_path)
+    cfg = implement_cfg(helpers={"reflect": {"provider": "anthropic", "model": "m"}})
+    pending = run_implement(tmp_path, cfg, seams_model())
+    if redo:
+        pending = resume(
+            pending.run, "redo cover the module boundary", root=tmp_path,
+            cfg=cfg, init=models_init(seams_model()),
+        )
+    assert isinstance(pending, Pending) and pending.gate == "seam"
+
+    answers = iter(["/implement add a calc module that answers 42", "y", "ok", "y", "/quit"])
+    model = FakeChatModel(messages=[AIMessage(content="", tool_calls=[{
+        "name": "reflect",
+        "args": {"facts": [], "mem": [], "environment": {"hint": ["Start at calc.py."]}},
+        "id": "reflect-1",
+    }])])
+    shown = []
+    run_session(
+        lambda: next(answers), shown.append, root=tmp_path, config=cfg,
+        start=partial(start, check=lambda *a, **kw: [], scan=lambda root: None),
+        resume=partial(resume, init=models_init(builder_model())),
+        init=models_init(model),
+    )
+
+    assert "run done" in shown
+    assert shown.count("[hint] Start at calc.py.") == int(redo)
+    assert ("Environment proposals (not applied):" in shown) == redo
 
 
 def test_diff_gate_n_rejects_and_restores_the_working_tree(tmp_path):

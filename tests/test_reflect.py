@@ -514,6 +514,40 @@ def test_the_next_run_reflect_covers_the_failed_range(tmp_path):
     assert "second run" in prompts[1]
 
 
+def test_a_clean_run_does_not_swallow_advice_from_a_failed_rough_reflect(tmp_path):
+    transcript = _transcript(tmp_path, "stuck run marker\n")
+    failed = threading.Event()
+    shown = []
+
+    def invoke(prompt):
+        if not failed.is_set():
+            failed.set()
+            raise RuntimeError("temporary outage")
+        if "clean run marker" in prompt:
+            return {
+                "facts": ["clean run fact"], "mem": [],
+                "environment": {"hint": ["Do not show clean advice."]},
+            }
+        return {
+            "facts": [], "mem": [],
+            "environment": {"gate": ["Check generated files."]},
+        }
+
+    reflector = Reflector(
+        root=tmp_path, transcript=transcript, cfg={},
+        make_invoke=lambda callbacks: invoke, propose=shown.extend,
+    )
+    reflector.after_run("rough", stuck=True)
+    assert failed.wait(5)
+    with transcript.open("a", encoding="utf-8") as file:
+        file.write("clean run marker\n")
+    reflector.after_run("clean")
+    reflector.finish()
+
+    assert shown == ["[gate] Check generated files."]
+    assert [item["body"] for item in list_facts(tmp_path)] == ["clean run fact"]
+
+
 def test_a_retried_range_stores_each_fact_and_proposal_once(tmp_path):
     calls = []
 

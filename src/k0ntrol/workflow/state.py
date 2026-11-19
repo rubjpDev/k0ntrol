@@ -16,6 +16,7 @@ class RunState(TypedDict, total=False):
     task: str  # the run's task text (issue body for ``#<n>`` runs)
     start_ms: int  # epoch ms when the run started (run_end.ms)
     max_attempts: int  # agent runs allowed per loop (default 2)
+    redone: bool  # the human answered "redo" at a gate, possibly in an earlier sitting
 
     validator_ok: bool  # last VALIDATOR run: test_cmd + gates all green
     validator_output: str  # last VALIDATOR raw output (IMPLEMENTER retry input)

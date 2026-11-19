@@ -2,6 +2,7 @@ import re
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
+from queue import Empty, SimpleQueue
 from uuid import uuid4
 
 from langchain.chat_models import init_chat_model
@@ -60,15 +61,21 @@ def run_session(
     chat: list[tuple[str, str]] = []  # this session's questions and answers
     show = _transcript_writer(write, transcript, events=getattr(ui, "event", None))
     front = _ui_front(ui, show, transcript) if ui else _plain_front(read_line, show)
+    proposals: SimpleQueue[list[str]] = SimpleQueue()
     if reflector is None:
         reflector = Reflector(
             root=root, transcript=transcript, cfg=config, init=init,
-            write=_reflect_writer(ui, show, transcript),
+            write=_reflect_writer(ui, show, transcript), propose=proposals.put,
         )
+
+    def read_command() -> str:
+        _show_environment_proposals(proposals, write)
+        return read_line()
+
     _welcome(ui, show, config=config, root=root, color=color)
     try:
         return _session_loop(
-            read_line,
+            read_command,
             show,
             transcript,
             echo_input=echo_input,
@@ -104,6 +111,21 @@ def run_session(
     finally:
         _closing(ui)
         reflector.finish()
+        _show_environment_proposals(proposals, write)
+
+
+def _show_environment_proposals(
+    proposals: SimpleQueue[list[str]], write: Callable[[str], None],
+) -> None:
+    """Only print proposals between prompts or at quit; never transcribe them."""
+    while True:
+        try:
+            batch = proposals.get_nowait()
+        except Empty:
+            return
+        write("Environment proposals (not applied):")
+        for line in batch:
+            write(line)
 
 
 @dataclass(frozen=True)
@@ -398,7 +420,7 @@ def _run_work(
         if result is None:
             return
     front.report_outcome(result)
-    reflector.after_run(result.run)
+    reflector.after_run(result.run, stuck=result.outcome == "stuck", redone=result.redone)
 
 
 def _start_or_resume(

@@ -117,6 +117,7 @@ class Outcome:
     outcome: str
     reason: str | None = None
     node: str | None = None
+    redone: bool = False
 
 
 @dataclass(frozen=True)
@@ -927,9 +928,9 @@ def _advance(
         _check_decision(payload, decision)
         # A gate with no listed answers takes a free line (the Q&A round):
         # the event records that it was answered, never the line itself.
-        result = _gate_result(decision) if payload.get("answers") else "answered"
-        ctx.writer.gate(payload["gate"], result)
-        graph.invoke(Command(resume=decision), config=config, durability="sync")
+        verb = _decision_verb(decision) if payload.get("answers") else "answered"
+        ctx.writer.gate(payload["gate"], _DECISIONS.get(verb, verb))
+        graph.invoke(_gate_command(decision, verb), config=config, durability="sync")
         return
     # Paused between nodes (crash or kill): continue from the checkpoint.
     graph.invoke(None, config=config, durability="sync")
@@ -964,8 +965,10 @@ _DECISIONS = {
 }
 
 
-def _gate_result(decision: str) -> str:
-    return _DECISIONS.get(_decision_verb(decision), _decision_verb(decision))
+def _gate_command(decision: str, verb: str) -> Command:
+    """Checkpoint a redo with the accepted gate answer, across sittings."""
+    update = {"redone": True} if verb == "redo" else None
+    return Command(resume=decision, update=update)
 
 
 def _finish(ctx: RunContext, graph, run_id: str, config: RunnableConfig) -> Result:
@@ -994,6 +997,7 @@ def _finish(ctx: RunContext, graph, run_id: str, config: RunnableConfig) -> Resu
         outcome=outcome,
         reason=values.get("reason"),
         node=values.get("node"),
+        redone=values.get("redone", False),
     )
 
 
