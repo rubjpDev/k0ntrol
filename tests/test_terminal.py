@@ -347,7 +347,7 @@ def test_each_gate_shows_its_own_options(gate, answers, labels):
 @pytest.mark.parametrize(
     ("gate", "label"),
     [("round", "your answers, e.g. 1 yes, 2 no: use Postgres"),
-     ("decision", "your decision, or ok to take the proposal")],
+     ("decision", "#7: which queue? — type the decision")],
 )
 def test_a_free_text_gate_asks_for_a_line_instead_of_a_picker(gate, label):
     labels = []
@@ -360,7 +360,8 @@ def test_a_free_text_gate_asks_for_a_line_instead_of_a_picker(gate, label):
     prompt = Prompt(console, commands=COMMANDS, tty=False, read_input=read_input)
     ui = Terminal(console, prompt, LiveRenderer(console, spinner=False))
 
-    answer = ui.gate(Pending(run="r1", gate=gate, question="q?", answers=(), detail="1. a?"))
+    question = "#7: which queue? — type the decision" if gate == "decision" else "q?"
+    answer = ui.gate(Pending(run="r1", gate=gate, question=question, answers=(), detail="1. a?"))
 
     assert answer == "1 yes, 2 no"
     assert labels == [f"{label} › "]

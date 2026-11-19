@@ -76,7 +76,6 @@ GATE_OPTIONS: dict[str, list[_Options]] = {
 }
 FREE_TEXT_LABELS = {
     "round": "your answers, e.g. 1 yes, 2 no: use Postgres",
-    "decision": "your decision, or ok to take the proposal",
 }
 
 # Answers that carry the human's words to the agent that runs next.
