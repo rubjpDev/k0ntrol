@@ -5,8 +5,10 @@
 request. IMPLEMENTER first proposes the seams in a fresh run — its own
 agent instance, so a stray proposal write can never leak slice-guard
 state into the build — and lists the design questions the task leaves
-open; the human answers ``ok [answers]`` or ``redo <feedback>``. The diff gate's ``n`` restores the working tree to
-the snapshot ``start`` took before the run.
+open; the human answers ``ok [answers]`` or ``redo <feedback>``. The diff gate lists
+the pre-run files the run modified or deleted, apart from the files it
+added, all against the snapshot ``start`` took before the run (#149);
+its ``n`` restores the working tree to that snapshot.
 
 ``/implement #<n>`` runs the tracker path on a ready work item:
 ``branch_setup`` cuts ``k0/<n>-<slug>``, IMPLEMENTER builds test-first on
