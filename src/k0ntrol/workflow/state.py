@@ -125,3 +125,10 @@ class RunState(TypedDict, total=False):
     outcome: str  # "done" | "stuck" | "rejected", set at the run's end
     reason: str | None  # "model_call_limit" | "max_attempts" on stuck
     node: str | None  # the node a stuck run came from
+
+    # The run's cost, recorded on ``run_end`` (#150): agent runs per
+    # node — never reset by a limit retry, unlike the ``*_attempts``
+    # counters — and VALIDATOR reds. Model calls are counted off the
+    # event log at the end.
+    agent_runs: dict[str, int]
+    validator_reds: int

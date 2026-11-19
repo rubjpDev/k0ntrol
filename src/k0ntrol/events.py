@@ -276,10 +276,22 @@ class EventWriter:
         *,
         reason: str | None = None,
         node: str | None = None,
+        agent_runs: dict[str, int] | None = None,
+        validator_reds: int | None = None,
+        model_calls: int | None = None,
     ) -> dict:
-        """Emit `run_end`. `reason`/`node` only for `stuck` from a limit."""
+        """Emit `run_end`. `reason`/`node` only for `stuck` from a limit;
+        the rest is the run's cost: agent runs per node, VALIDATOR reds
+        and model calls (#150)."""
         return self.emit(
-            "run_end", outcome=outcome, ms=ms, reason=reason, node=node
+            "run_end",
+            outcome=outcome,
+            ms=ms,
+            reason=reason,
+            node=node,
+            agent_runs=agent_runs,
+            validator_reds=validator_reds,
+            model_calls=model_calls,
         )
 
 
@@ -630,12 +642,64 @@ def _render_gate(e: dict) -> str:
     return line
 
 
+def cost_parts(
+    agent_runs: Mapping[str, int] | None,
+    validator_reds: int | None,
+    model_calls: int | None,
+) -> list[str]:
+    """The run's cost as summary parts — ``implementer ×2``,
+    ``validator red ×1``, ``37 model calls`` — for the one line a
+    finished run shows (#150)."""
+    parts = [
+        f"{name} ×{count}" for name, count in (agent_runs or {}).items()
+    ]
+    if validator_reds:
+        parts.append(f"validator red ×{validator_reds}")
+    if model_calls:
+        parts.append(f"{model_calls} model calls")
+    return parts
+
+
+def run_model_calls(path: Path, run: str) -> int:
+    """The `model` events the run logged — helpers and failed calls
+    included — over the live file and the rotated ones."""
+    return sum(
+        1
+        for event in _log_events(path)
+        if event.get("run") == run and event.get("kind") == "model"
+    )
+
+
+def _log_events(path: Path) -> Iterable[dict]:
+    for log in sorted(path.parent.glob(f"{path.stem}*.jsonl")):
+        yield from _log_lines(log)
+
+
+def _log_lines(log: Path) -> Iterable[dict]:
+    try:
+        lines = log.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return
+    for line in lines:
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(event, dict):
+            yield event
+
+
 def _render_run_end(e: dict) -> str:
     line = f"run ended {e.get('outcome', '?')} ({e.get('ms', 0)}ms)"
     if e.get("reason"):
         line += f" {e['reason']}"
         if e.get("node"):
             line += f" at {e['node']}"
+    cost = cost_parts(
+        e.get("agent_runs"), e.get("validator_reds"), e.get("model_calls")
+    )
+    if cost:
+        line += " · " + " · ".join(cost)
     return line
 
 

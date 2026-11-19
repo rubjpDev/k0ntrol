@@ -52,6 +52,9 @@ def _invoke_counted(
     """
     key = attempts_key or f"{name}_attempts"
     attempt = state.get(key, 0) + 1
+    agent_runs = dict(state.get("agent_runs") or {})
+    label = key.removesuffix("_attempts")
+    agent_runs[label] = agent_runs.get(label, 0) + 1
     result = ctx.agent(
         name, slot=slot, read_only=read_only, slice_start=slice_start
     ).invoke(
@@ -60,6 +63,7 @@ def _invoke_counted(
     )
     updates: dict[str, Any] = {
         key: attempt,
+        "agent_runs": agent_runs,
         "limit": None,
         "retry_node": None,
         "retry_context": None,
@@ -143,6 +147,7 @@ def make_validator(
         return {
             "validator_ok": ok,
             "validator_output": _format(results),
+            "validator_reds": state.get("validator_reds", 0) + (0 if ok else 1),
             "limit": (
                 None
                 if ok

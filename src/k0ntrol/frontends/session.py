@@ -10,9 +10,10 @@ from langchain.chat_models import init_chat_model
 from k0ntrol import __version__
 from k0ntrol.frontends.ask import answer_ask
 from k0ntrol.config import ConfigError, load_config
-from k0ntrol.events import render_event
+from k0ntrol.events import cost_parts, render_event
 from k0ntrol.frontends.banner import render_banner
 from k0ntrol.frontends.klog import Klog
+from k0ntrol.frontends.render import format_elapsed
 from k0ntrol.memory.reflect import (
     Reflector,
     apply_mem_decision,
@@ -575,13 +576,22 @@ def _show_refusal(error: RunRefused, show: Callable[[str], None]) -> None:
 
 
 def _outcome_text(result: Outcome) -> str:
-    text = f"run {result.outcome}"
-    if result.reason:
-        text += f" ({result.reason}"
-        if result.node:
-            text += f" at {result.node}"
-        text += ")"
-    return text
+    """``done in 4m 12s · implementer ×2 · validator red ×1 · 37 model
+    calls`` — the run's one-line cost (#150); a run the broken log ended
+    (no ``ms``) keeps the bare ``run done``."""
+    where = _reason_at(result.reason, result.node)
+    if result.ms is None:
+        return f"run {result.outcome}{where}"
+    cost = cost_parts(result.agent_runs, result.validator_reds, result.model_calls)
+    tail = " · " + " · ".join(cost) if cost else ""
+    return f"{result.outcome} in {format_elapsed(result.ms / 1000)}{where}{tail}"
+
+
+def _reason_at(reason: str | None, node: str | None) -> str:
+    """`` (reason at node)`` — the stuck detail, parenthesised."""
+    if not reason:
+        return ""
+    return f" ({reason}{f' at {node}' if node else ''})"
 
 
 def _read_session_line(

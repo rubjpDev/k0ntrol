@@ -24,7 +24,7 @@ import os
 import sqlite3
 import time
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal, cast
 
@@ -45,6 +45,7 @@ from k0ntrol.events import (  # noqa: E402
     ProgressRenderer,
     events_path,
     new_run_id,
+    run_model_calls,
 )
 from k0ntrol.memory.refresh import refresh_memory  # noqa: E402
 from k0ntrol.tools.tracker import latest_agent_brief  # noqa: E402
@@ -111,13 +112,22 @@ class RunRefused(Exception):
 
 @dataclass(frozen=True)
 class Outcome:
-    """A finished run: ``done``, ``stuck`` or ``rejected``."""
+    """A finished run: ``done``, ``stuck`` or ``rejected``.
+
+    ``ms`` and the counts are what the ``run_end`` event recorded — the
+    one-line cost the session shows (#150); a run a broken log ended has
+    none.
+    """
 
     run: str
     outcome: str
     reason: str | None = None
     node: str | None = None
     redone: bool = False
+    ms: int | None = None
+    agent_runs: dict[str, int] = field(default_factory=dict)
+    validator_reds: int = 0
+    model_calls: int = 0
 
 
 @dataclass(frozen=True)
@@ -985,11 +995,18 @@ def _finish(ctx: RunContext, graph, run_id: str, config: RunnableConfig) -> Resu
         )
     values = state.values
     outcome = values.get("outcome", "stuck")
+    ms = _now_ms() - values.get("start_ms", _now_ms())
+    agent_runs = values.get("agent_runs") or {}
+    validator_reds = values.get("validator_reds", 0)
+    model_calls = run_model_calls(events_path(ctx.root), run_id)
     ctx.writer.run_end(
         outcome,
-        _now_ms() - values.get("start_ms", _now_ms()),
+        ms,
         reason=values.get("reason"),
         node=values.get("node"),
+        agent_runs=agent_runs or None,
+        validator_reds=validator_reds,
+        model_calls=model_calls,
     )
     _trace_finish(ctx, outcome, _session_id(ctx, values), values)
     if ctx.kind == "implement":
@@ -1000,6 +1017,10 @@ def _finish(ctx: RunContext, graph, run_id: str, config: RunnableConfig) -> Resu
         reason=values.get("reason"),
         node=values.get("node"),
         redone=values.get("redone", False),
+        ms=ms,
+        agent_runs=agent_runs,
+        validator_reds=validator_reds,
+        model_calls=model_calls,
     )
 
 
