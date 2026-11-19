@@ -14,6 +14,7 @@ import re
 import shutil
 import stat
 import subprocess
+from collections.abc import Iterable
 from pathlib import Path
 
 # Cap on the diff text shown at a gate.
@@ -491,16 +492,12 @@ def _entry_diff(
     )
     old = _read_lines(old_path)
     new = [] if mark == "D" else _read_lines(root / relative)
-    if old is None or new is None:
-        return header + meta + "binary or unreadable file changed\n"
-    return header + meta + "".join(
-        difflib.unified_diff(
-            old,
-            new,
-            fromfile=f"a/{relative}",
-            tofile="/dev/null" if mark == "D" else f"b/{relative}",
-        )
+    body = _unified(
+        old, new, f"a/{relative}", "/dev/null" if mark == "D" else f"b/{relative}"
     )
+    if body is None:
+        return header + meta + "binary or unreadable file changed\n"
+    return header + meta + body
 
 
 def _mode_lines(old_path: Path, new_path: Path) -> str:
@@ -519,10 +516,28 @@ def _added_diff(root: Path, relative: str) -> str:
     lines = _read_lines(root / relative)
     if lines is None:
         return header + "binary or unreadable file\n"
-    return header + "".join(
-        difflib.unified_diff(
-            [], lines, fromfile="/dev/null", tofile=f"b/{relative}"
-        )
+    return header + _terminated(
+        difflib.unified_diff([], lines, fromfile="/dev/null", tofile=f"b/{relative}")
+    )
+
+
+def _unified(
+    old: list[str] | None, new: list[str] | None, fromfile: str, tofile: str
+) -> str | None:
+    """The unified-diff body, ``None`` when either side is unreadable."""
+    if old is None or new is None:
+        return None
+    return _terminated(
+        difflib.unified_diff(old, new, fromfile=fromfile, tofile=tofile)
+    )
+
+
+def _terminated(lines: Iterable[str]) -> str:
+    """Join diff lines; an unterminated last line gets git's ``\\ No
+    newline`` marker so it never glues onto the next diff line."""
+    return "".join(
+        line if line.endswith("\n") else f"{line}\n\\ No newline at end of file\n"
+        for line in lines
     )
 
 

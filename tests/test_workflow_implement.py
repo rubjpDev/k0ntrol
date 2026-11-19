@@ -696,6 +696,31 @@ def test_a_mode_only_change_lists_the_file_as_modified(tmp_path):
     assert "new mode" in result.diff
 
 
+def test_an_unterminated_last_line_diffs_cleanly(tmp_path):
+    """Without a trailing newline the old and new last lines must not
+    glue into one diff line — git's ``\\ No newline`` marker splits them."""
+    git_repo(tmp_path)
+    (tmp_path / "unterminated.py").write_text("a = 1\nold_last", encoding="utf-8")
+    commit_all(tmp_path, "unterminated.py")
+    builder = FakeChatModel(
+        messages=[
+            write_call("tests/test_calc.py", TEST_SRC),
+            run_tests_call(),
+            write_call("calc.py", CALC_SRC, "w2"),
+            write_call("unterminated.py", "a = 1\nnew_last", "w3"),
+            run_tests_call("r2"),
+            AIMessage(content="edited the unterminated file"),
+        ]
+    )
+
+    _, _, result = to_diff_gate(tmp_path, builder=builder)
+
+    assert isinstance(result, Pending) and result.gate == "diff"
+    assert "-old_last\n" in result.diff
+    assert "+new_last" in result.diff
+    assert "\\ No newline at end of file" in result.diff
+
+
 def test_validator_red_sends_implementer_back_with_the_output(tmp_path):
     """A red VALIDATOR reruns IMPLEMENTER with its raw output (#116)."""
     git_repo(tmp_path)
