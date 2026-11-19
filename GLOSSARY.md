@@ -55,7 +55,7 @@ A one-shot model call made by the harness or by a tool, with no tools of its own
 _Avoid_: Mode, stage, agent
 
 **Run**:
-One execution of the workflow graph for one work item, or for one `/fast` task, from start to its outcome: `done`, `stuck` or `rejected`.
+One execution of the workflow graph for a work item or a task entered at the prompt, from start to its outcome: `done`, `stuck` or `rejected`.
 _Avoid_: Job, session, attempt
 
 **Limit**:
