@@ -12,6 +12,7 @@ import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 from pathlib import Path
 
@@ -369,7 +370,7 @@ def gate_change(root: Path, snapshot: Path) -> tuple[str, str]:
     the frontend draws file by file.
     """
     recorded = _snapshot_manifest(snapshot)
-    changed = _changed_entries(root, recorded)
+    changed = _changed_entries(root, snapshot, recorded)
     added = _added_paths(root, recorded)
     detail = _change_lines(changed, added)
     chunks = [_entry_diff(snapshot, root, entry) for entry in changed]
@@ -382,12 +383,15 @@ def _snapshot_manifest(snapshot: Path) -> dict:
 
 
 def _changed_entries(
-    root: Path, recorded: dict
+    root: Path, snapshot: Path, recorded: dict
 ) -> list[tuple[str, str, str]]:
     """``(path, mark, kind)`` for each snapshot path the run touched."""
     entries: list[tuple[str, str, str]] = []
     for relative, digest in recorded["files"].items():
-        _note(entries, relative, _file_mark(root / relative, digest), "file")
+        mark = _file_mark(
+            root / relative, snapshot / _PAYLOAD / relative, digest
+        )
+        _note(entries, relative, mark, "file")
     for relative, target in recorded.get("links", {}).items():
         _note(entries, relative, _link_mark(root / relative, target), "link")
     for relative in recorded.get("dirs", []):
@@ -405,13 +409,28 @@ def _note(
         entries.append((relative, mark, kind))
 
 
-def _file_mark(path: Path, digest: str) -> str | None:
-    """``D`` gone, ``M`` different bytes or kind, ``None`` untouched."""
+def _file_mark(path: Path, payload: Path, digest: str) -> str | None:
+    """``D`` gone, ``M`` different bytes, kind or mode, ``None`` untouched.
+
+    The exec bit is compared against the backed-up copy — ``copy2``
+    preserves it, so a mode-only change still marks the file.
+    """
     if path.is_symlink() or path.is_dir():
         return "M"  # a file became a link or a dir
     if not path.is_file():
         return "D"
-    return None if _sha256(path) == digest else "M"
+    if _sha256(path) != digest or _executable(path) != _executable(payload):
+        return "M"
+    return None
+
+
+def _executable(path: Path) -> bool:
+    return bool(path.stat().st_mode & stat.S_IXUSR)
+
+
+def _git_mode(path: Path) -> int:
+    """The ``100644``/``100755`` git reports in a diff's mode lines."""
+    return 0o100755 if _executable(path) else 0o100644
 
 
 def _link_mark(path: Path, target: str) -> str | None:
@@ -464,15 +483,34 @@ def _entry_diff(
     header = f"diff --git a/{relative} b/{relative}\n"
     if kind != "file":
         return header + f"{kind} changed\n"
-    old = _read_lines(snapshot / _PAYLOAD / relative)
+    old_path = snapshot / _PAYLOAD / relative
+    meta = (
+        f"deleted file mode {_git_mode(old_path):06o}\n"
+        if mark == "D"
+        else _mode_lines(old_path, root / relative)
+    )
+    old = _read_lines(old_path)
     new = [] if mark == "D" else _read_lines(root / relative)
     if old is None or new is None:
-        return header + "binary or unreadable file changed\n"
-    return header + "".join(
+        return header + meta + "binary or unreadable file changed\n"
+    return header + meta + "".join(
         difflib.unified_diff(
-            old, new, fromfile=f"a/{relative}", tofile=f"b/{relative}"
+            old,
+            new,
+            fromfile=f"a/{relative}",
+            tofile="/dev/null" if mark == "D" else f"b/{relative}",
         )
     )
+
+
+def _mode_lines(old_path: Path, new_path: Path) -> str:
+    """git's ``old mode``/``new mode`` pair when the exec bit moved."""
+    if not new_path.is_file():
+        return ""
+    old_mode, new_mode = _git_mode(old_path), _git_mode(new_path)
+    if old_mode == new_mode:
+        return ""
+    return f"old mode {old_mode:06o}\nnew mode {new_mode:06o}\n"
 
 
 def _added_diff(root: Path, relative: str) -> str:

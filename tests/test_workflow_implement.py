@@ -676,6 +676,26 @@ def test_a_file_deleted_before_the_run_is_not_listed_as_added(tmp_path):
     assert "pre_deleted.py" not in result.diff
 
 
+def test_a_mode_only_change_lists_the_file_as_modified(tmp_path):
+    """Same bytes, new exec bit: the file the run chmod'ed is a change —
+    the old ``git diff``-based detail showed it, the snapshot must too."""
+    git_repo(tmp_path)
+    (tmp_path / "script.sh").write_text("#!/bin/sh\n", encoding="utf-8")
+    commit_all(tmp_path, "script.sh")
+
+    pending = run_implement(tmp_path, implement_cfg(), seams_model())
+    assert isinstance(pending, Pending) and pending.gate == "seam"
+    (tmp_path / "script.sh").chmod(0o755)  # changed while the run is live
+    result = resume(
+        pending.run, "ok", root=tmp_path, cfg=implement_cfg(),
+        init=models_init(builder_model()),
+    )
+
+    assert isinstance(result, Pending) and result.gate == "diff"
+    assert " M script.sh" in result.detail
+    assert "new mode" in result.diff
+
+
 def test_validator_red_sends_implementer_back_with_the_output(tmp_path):
     """A red VALIDATOR reruns IMPLEMENTER with its raw output (#116)."""
     git_repo(tmp_path)
