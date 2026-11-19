@@ -15,7 +15,11 @@ from langgraph.types import interrupt
 
 from k0ntrol.tools.slice_guard import SliceStart
 from k0ntrol.tools.runner import run_command
-from k0ntrol.workflow.change import diff_stat, worktree_summary
+from k0ntrol.workflow.change import (
+    diff_stat,
+    gate_change,
+    worktree_snapshot_dir,
+)
 from k0ntrol.workflow.context import RunContext
 
 _WRITE_TOOLS = ("write_file", "edit_file")
@@ -158,19 +162,25 @@ def _emit_gate_events(ctx: RunContext, results: list[tuple[str, Any]], ok: bool)
 def make_diff_gate(
     ctx: RunContext, *, on_reject: Callable[[], None] | None = None
 ) -> Callable[[dict], dict]:
-    """The diff gate: show the working tree, ``y`` done / ``n`` rejected.
+    """The diff gate: show what the run changed, ``y`` done / ``n`` rejected.
 
     ``on_reject`` runs on ``n`` before the outcome lands — ``/implement``'s
     working-tree path uses it to restore the pre-run snapshot (#116).
+    The detail lists the pre-run files the run modified or deleted, apart
+    from the files it added, all measured against that snapshot (#149).
     """
 
     def node(state: dict) -> dict:
+        detail, diff = gate_change(
+            ctx.root, worktree_snapshot_dir(ctx.root, ctx.run_id)
+        )
         decision = interrupt(
             {
                 "gate": "diff",
                 "question": "tests are green — keep the change?",
                 "answers": ["y", "n"],
-                "detail": worktree_summary(ctx.root),
+                "detail": detail,
+                "diff": diff,
             }
         )
         approved = str(decision).strip().lower() in ("y", "yes")

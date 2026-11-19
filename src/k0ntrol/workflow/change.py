@@ -6,12 +6,15 @@ working-tree summary the diff gate shows. #44/#45 add the write side
 as marker-idempotent nodes through this module.
 """
 
+import difflib
 import hashlib
 import json
 import os
 import re
 import shutil
+import stat
 import subprocess
+from collections.abc import Iterable
 from pathlib import Path
 
 # Cap on the diff text shown at a gate.
@@ -150,10 +153,7 @@ def diff_since(root: Path, since: str, path: str) -> str:
     if proc.returncode != 0:
         detail = proc.stderr.strip() or f"git diff exited {proc.returncode}"
         raise DiffError(f"cannot diff {path} since {since}: {detail}")
-    text = proc.stdout.rstrip()
-    if len(text) > _SUMMARY_MAX_CHARS:
-        text = text[:_SUMMARY_MAX_CHARS] + "\n... diff truncated ..."
-    return text
+    return _truncate(proc.stdout.rstrip())
 
 
 def diff_stat(root: Path) -> str:
@@ -179,37 +179,6 @@ def _new_files(root: Path) -> list[str]:
 def _status(root: Path) -> str:
     """``git status --porcelain`` with ``-uall``: every untracked file."""
     return _git(root, "status", "--porcelain", "-uall").stdout
-
-
-def worktree_summary(root: Path) -> str:
-    """Status plus the tracked diff and excerpts of new untracked files.
-
-    ``git diff`` never shows untracked files — which is exactly what
-    agents write — so new files get a ``--- /dev/null``-style excerpt.
-    """
-    status = _status(root)
-    parts = [status.rstrip(), _git(root, "diff", "HEAD", "--").stdout.rstrip()]
-    for path in _untracked(status):
-        parts.append(_new_file_excerpt(root, path))
-    text = "\n".join(part for part in parts if part)
-    if len(text) > _SUMMARY_MAX_CHARS:
-        text = text[:_SUMMARY_MAX_CHARS] + "\n... diff truncated ..."
-    return text
-
-
-def _untracked(status: str) -> list[str]:
-    return [
-        line[3:] for line in status.splitlines() if line.startswith("?? ")
-    ]
-
-
-def _new_file_excerpt(root: Path, path: str, *, lines: int = 60) -> str:
-    try:
-        text = (root / path).read_text(encoding="utf-8")
-    except (OSError, UnicodeError):
-        return f"--- /dev/null\n+++ b/{path} (binary or unreadable)"
-    body = "\n".join("+" + line for line in text.splitlines()[:lines])
-    return f"--- /dev/null\n+++ b/{path}\n{body}"
 
 
 def _git(root: Path, *args: str) -> subprocess.CompletedProcess:
@@ -290,9 +259,7 @@ def restore_worktree(root: Path, snapshot: Path) -> None:
     edited or removed are copied back from the snapshot. ``.k0-mem/`` is
     never in the file set, so events and checkpoints survive.
     """
-    recorded = json.loads(
-        (snapshot / "manifest.json").read_text(encoding="utf-8")
-    )
+    recorded = _snapshot_manifest(snapshot)
     manifest: dict[str, str] = recorded["files"]
     links: dict[str, str] = recorded.get("links", {})
     dirs: list[str] = recorded.get("dirs", [])
@@ -388,3 +355,200 @@ def _ensure_snapshot_ignored(root: Path) -> None:
     prefix = "" if not text or text.endswith("\n") else "\n"
     with open(gitignore, "a", encoding="utf-8") as fh:
         fh.write(f"{prefix}snapshots/\n")
+
+
+# --- the diff gate's run-change listing (#149) ---------------------------------
+
+
+def gate_change(root: Path, snapshot: Path) -> tuple[str, str]:
+    """The diff gate's ``(detail, diff)`` against the pre-run snapshot.
+
+    The baseline is the tree as the run found it, not ``HEAD``: the
+    detail lists the pre-run files the run modified or deleted, apart
+    from the files it added, so edits to shared code stand out — a file
+    already uncommitted before the run and untouched by it matches the
+    snapshot and is never listed. The diff is a git-style unified diff
+    the frontend draws file by file.
+    """
+    recorded = _snapshot_manifest(snapshot)
+    changed = _changed_entries(root, snapshot, recorded)
+    added = _added_paths(root, recorded)
+    detail = _change_lines(changed, added)
+    chunks = [_entry_diff(snapshot, root, entry) for entry in changed]
+    chunks += [_added_diff(root, path) for path in added]
+    return detail, _truncate("\n".join(chunks).rstrip())
+
+
+def _snapshot_manifest(snapshot: Path) -> dict:
+    return json.loads((snapshot / "manifest.json").read_text(encoding="utf-8"))
+
+
+def _changed_entries(
+    root: Path, snapshot: Path, recorded: dict
+) -> list[tuple[str, str, str]]:
+    """``(path, mark, kind)`` for each snapshot path the run touched."""
+    entries: list[tuple[str, str, str]] = []
+    for relative, digest in recorded["files"].items():
+        mark = _file_mark(
+            root / relative, snapshot / _PAYLOAD / relative, digest
+        )
+        _note(entries, relative, mark, "file")
+    for relative, target in recorded.get("links", {}).items():
+        _note(entries, relative, _link_mark(root / relative, target), "link")
+    for relative in recorded.get("dirs", []):
+        _note(entries, relative, _dir_mark(root / relative), "dir")
+    return sorted(entries)
+
+
+def _note(
+    entries: list[tuple[str, str, str]],
+    relative: str,
+    mark: str | None,
+    kind: str,
+) -> None:
+    if mark:
+        entries.append((relative, mark, kind))
+
+
+def _file_mark(path: Path, payload: Path, digest: str) -> str | None:
+    """``D`` gone, ``M`` different bytes, kind or mode, ``None`` untouched.
+
+    The exec bit is compared against the backed-up copy — ``copy2``
+    preserves it, so a mode-only change still marks the file.
+    """
+    if path.is_symlink() or path.is_dir():
+        return "M"  # a file became a link or a dir
+    if not path.is_file():
+        return "D"
+    if _sha256(path) != digest or _executable(path) != _executable(payload):
+        return "M"
+    return None
+
+
+def _executable(path: Path) -> bool:
+    return bool(path.stat().st_mode & stat.S_IXUSR)
+
+
+def _git_mode(path: Path) -> int:
+    """The ``100644``/``100755`` git reports in a diff's mode lines."""
+    return 0o100755 if _executable(path) else 0o100644
+
+
+def _link_mark(path: Path, target: str) -> str | None:
+    """``None`` while the symlink still points at ``target``."""
+    if not path.is_symlink():
+        return "M" if path.exists() else "D"
+    return None if os.readlink(path) == target else "M"
+
+
+def _dir_mark(path: Path) -> str | None:
+    """A gitlink's checkout: ``None`` while it is still a directory."""
+    if path.is_dir():
+        return None
+    return "M" if path.exists() else "D"
+
+
+def _added_paths(root: Path, recorded: dict) -> list[str]:
+    """Worktree files the snapshot does not know: what the run added.
+
+    ``git ls-files`` still names a tracked file deleted before the run,
+    but its absent bytes never reached the manifest — only paths that
+    exist can be run additions.
+    """
+    known = (
+        set(recorded["files"])
+        | set(recorded.get("links", {}))
+        | set(recorded.get("dirs", []))
+    )
+    return [
+        p
+        for p in _worktree_files(root)
+        if p not in known and os.path.lexists(root / p)
+    ]
+
+
+def _change_lines(
+    changed: list[tuple[str, str, str]], added: list[str]
+) -> str:
+    """Porcelain-style lines: the pre-run files first, then the adds."""
+    lines = [f" {mark} {path}" for path, mark, _ in changed]
+    lines += [f"?? {path}" for path in added]
+    return "\n".join(lines) or "no changes"
+
+
+def _entry_diff(
+    snapshot: Path, root: Path, entry: tuple[str, str, str]
+) -> str:
+    """One ``diff --git`` chunk for a changed pre-run path."""
+    relative, mark, kind = entry
+    header = f"diff --git a/{relative} b/{relative}\n"
+    if kind != "file":
+        return header + f"{kind} changed\n"
+    old_path = snapshot / _PAYLOAD / relative
+    meta = (
+        f"deleted file mode {_git_mode(old_path):06o}\n"
+        if mark == "D"
+        else _mode_lines(old_path, root / relative)
+    )
+    old = _read_lines(old_path)
+    new = [] if mark == "D" else _read_lines(root / relative)
+    body = _unified(
+        old, new, f"a/{relative}", "/dev/null" if mark == "D" else f"b/{relative}"
+    )
+    if body is None:
+        return header + meta + "binary or unreadable file changed\n"
+    return header + meta + body
+
+
+def _mode_lines(old_path: Path, new_path: Path) -> str:
+    """git's ``old mode``/``new mode`` pair when the exec bit moved."""
+    if not new_path.is_file():
+        return ""
+    old_mode, new_mode = _git_mode(old_path), _git_mode(new_path)
+    if old_mode == new_mode:
+        return ""
+    return f"old mode {old_mode:06o}\nnew mode {new_mode:06o}\n"
+
+
+def _added_diff(root: Path, relative: str) -> str:
+    """One ``diff --git`` chunk for a file the run added."""
+    header = f"diff --git a/{relative} b/{relative}\nnew file\n"
+    lines = _read_lines(root / relative)
+    if lines is None:
+        return header + "binary or unreadable file\n"
+    return header + _terminated(
+        difflib.unified_diff([], lines, fromfile="/dev/null", tofile=f"b/{relative}")
+    )
+
+
+def _unified(
+    old: list[str] | None, new: list[str] | None, fromfile: str, tofile: str
+) -> str | None:
+    """The unified-diff body, ``None`` when either side is unreadable."""
+    if old is None or new is None:
+        return None
+    return _terminated(
+        difflib.unified_diff(old, new, fromfile=fromfile, tofile=tofile)
+    )
+
+
+def _terminated(lines: Iterable[str]) -> str:
+    """Join diff lines; an unterminated last line gets git's ``\\ No
+    newline`` marker so it never glues onto the next diff line."""
+    return "".join(
+        line if line.endswith("\n") else f"{line}\n\\ No newline at end of file\n"
+        for line in lines
+    )
+
+
+def _read_lines(path: Path) -> list[str] | None:
+    try:
+        return path.read_text(encoding="utf-8").splitlines(keepends=True)
+    except (OSError, UnicodeError):
+        return None
+
+
+def _truncate(text: str) -> str:
+    if len(text) > _SUMMARY_MAX_CHARS:
+        text = text[:_SUMMARY_MAX_CHARS] + "\n... diff truncated ..."
+    return text

@@ -574,6 +574,153 @@ def test_diff_gate_y_keeps_the_change_and_drops_the_snapshot(tmp_path):
     assert not worktree_snapshot_dir(tmp_path, outcome.run).exists()
 
 
+# --- the diff gate's run-change listing (ticket #149) ---------------------------
+
+
+def commit_all(root: Path, *paths: str) -> None:
+    subprocess.run(["git", "add", *paths], cwd=root, check=True)
+    subprocess.run(
+        ["git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "add"],
+        cwd=root,
+        check=True,
+    )
+
+
+def test_the_diff_gate_lists_the_pre_run_files_the_run_changed(tmp_path):
+    """Files that existed at run start and the run modified or deleted
+    are listed apart from the files it added — the baseline is the
+    pre-run snapshot, not ``HEAD`` (#149)."""
+    git_repo(tmp_path)
+    (tmp_path / "shared.py").write_text("SHARED\n", encoding="utf-8")
+    (tmp_path / "gone.py").write_text("GONE\n", encoding="utf-8")
+    commit_all(tmp_path, "shared.py", "gone.py")
+
+    pending = run_implement(tmp_path, implement_cfg(), seams_model())
+    assert isinstance(pending, Pending) and pending.gate == "seam"
+    (tmp_path / "gone.py").unlink()  # deleted while the run is live
+    builder = FakeChatModel(
+        messages=[
+            write_call("tests/test_calc.py", TEST_SRC),
+            run_tests_call(),
+            write_call("calc.py", CALC_SRC, "w2"),
+            write_call("shared.py", "SHARED EDITED\n", "w3"),
+            run_tests_call("r2"),
+            AIMessage(content="built calc"),
+        ]
+    )
+    result = resume(
+        pending.run, "ok", root=tmp_path, cfg=implement_cfg(),
+        init=models_init(builder),
+    )
+
+    assert isinstance(result, Pending) and result.gate == "diff"
+    assert " M shared.py" in result.detail
+    assert " D gone.py" in result.detail
+    assert "?? calc.py" in result.detail
+    assert "?? tests/test_calc.py" in result.detail
+    # the diff is drawn against the snapshot, one file at a time
+    assert "diff --git a/shared.py b/shared.py" in result.diff
+    assert "+SHARED EDITED" in result.diff
+    assert "-GONE" in result.diff
+    assert "+def answer" in result.diff  # the added files' diffs too
+
+
+def test_a_run_that_only_adds_files_lists_no_pre_run_changes(tmp_path):
+    git_repo(tmp_path)
+
+    _, _, result = to_diff_gate(tmp_path)
+
+    assert isinstance(result, Pending) and result.gate == "diff"
+    assert not [
+        line
+        for line in result.detail.splitlines()
+        if line.startswith((" M", " D"))
+    ]
+    assert "?? calc.py" in result.detail
+    assert "?? tests/test_calc.py" in result.detail
+    assert "README.md" not in result.detail
+
+
+def test_an_untouched_uncommitted_file_is_not_a_run_change(tmp_path):
+    """Already uncommitted before the run and untouched by it: matching
+    the snapshot byte for byte, it is not listed as a run change (#149)."""
+    git_repo(tmp_path)
+    (tmp_path / "dirty.py").write_text("committed\n", encoding="utf-8")
+    commit_all(tmp_path, "dirty.py")
+    (tmp_path / "dirty.py").write_text("HUMAN EDIT\n", encoding="utf-8")
+    (tmp_path / "scratch.txt").write_text("keep me\n", encoding="utf-8")
+
+    _, _, result = to_diff_gate(tmp_path)
+
+    assert isinstance(result, Pending) and result.gate == "diff"
+    assert "dirty.py" not in result.detail
+    assert "dirty.py" not in result.diff
+    assert "HUMAN EDIT" not in result.diff
+    assert "scratch.txt" not in result.detail
+    assert "scratch.txt" not in result.diff
+
+
+def test_a_file_deleted_before_the_run_is_not_listed_as_added(tmp_path):
+    """A tracked path deleted before the run stays in ``git ls-files``
+    but has no bytes to snapshot — absent from the manifest, it must
+    not come back as a file the run added."""
+    git_repo(tmp_path)
+    (tmp_path / "pre_deleted.py").write_text("gone before the run\n", encoding="utf-8")
+    commit_all(tmp_path, "pre_deleted.py")
+    (tmp_path / "pre_deleted.py").unlink()  # unstaged deletion, still in the index
+
+    _, _, result = to_diff_gate(tmp_path)
+
+    assert isinstance(result, Pending) and result.gate == "diff"
+    assert "pre_deleted.py" not in result.detail
+    assert "pre_deleted.py" not in result.diff
+
+
+def test_a_mode_only_change_lists_the_file_as_modified(tmp_path):
+    """Same bytes, new exec bit: the file the run chmod'ed is a change —
+    the old ``git diff``-based detail showed it, the snapshot must too."""
+    git_repo(tmp_path)
+    (tmp_path / "script.sh").write_text("#!/bin/sh\n", encoding="utf-8")
+    commit_all(tmp_path, "script.sh")
+
+    pending = run_implement(tmp_path, implement_cfg(), seams_model())
+    assert isinstance(pending, Pending) and pending.gate == "seam"
+    (tmp_path / "script.sh").chmod(0o755)  # changed while the run is live
+    result = resume(
+        pending.run, "ok", root=tmp_path, cfg=implement_cfg(),
+        init=models_init(builder_model()),
+    )
+
+    assert isinstance(result, Pending) and result.gate == "diff"
+    assert " M script.sh" in result.detail
+    assert "new mode" in result.diff
+
+
+def test_an_unterminated_last_line_diffs_cleanly(tmp_path):
+    """Without a trailing newline the old and new last lines must not
+    glue into one diff line — git's ``\\ No newline`` marker splits them."""
+    git_repo(tmp_path)
+    (tmp_path / "unterminated.py").write_text("a = 1\nold_last", encoding="utf-8")
+    commit_all(tmp_path, "unterminated.py")
+    builder = FakeChatModel(
+        messages=[
+            write_call("tests/test_calc.py", TEST_SRC),
+            run_tests_call(),
+            write_call("calc.py", CALC_SRC, "w2"),
+            write_call("unterminated.py", "a = 1\nnew_last", "w3"),
+            run_tests_call("r2"),
+            AIMessage(content="edited the unterminated file"),
+        ]
+    )
+
+    _, _, result = to_diff_gate(tmp_path, builder=builder)
+
+    assert isinstance(result, Pending) and result.gate == "diff"
+    assert "-old_last\n" in result.diff
+    assert "+new_last" in result.diff
+    assert "\\ No newline at end of file" in result.diff
+
+
 def test_validator_red_sends_implementer_back_with_the_output(tmp_path):
     """A red VALIDATOR reruns IMPLEMENTER with its raw output (#116)."""
     git_repo(tmp_path)
