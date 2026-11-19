@@ -660,6 +660,22 @@ def test_an_untouched_uncommitted_file_is_not_a_run_change(tmp_path):
     assert "scratch.txt" not in result.diff
 
 
+def test_a_file_deleted_before_the_run_is_not_listed_as_added(tmp_path):
+    """A tracked path deleted before the run stays in ``git ls-files``
+    but has no bytes to snapshot — absent from the manifest, it must
+    not come back as a file the run added."""
+    git_repo(tmp_path)
+    (tmp_path / "pre_deleted.py").write_text("gone before the run\n", encoding="utf-8")
+    commit_all(tmp_path, "pre_deleted.py")
+    (tmp_path / "pre_deleted.py").unlink()  # unstaged deletion, still in the index
+
+    _, _, result = to_diff_gate(tmp_path)
+
+    assert isinstance(result, Pending) and result.gate == "diff"
+    assert "pre_deleted.py" not in result.detail
+    assert "pre_deleted.py" not in result.diff
+
+
 def test_validator_red_sends_implementer_back_with_the_output(tmp_path):
     """A red VALIDATOR reruns IMPLEMENTER with its raw output (#116)."""
     git_repo(tmp_path)

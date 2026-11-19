@@ -429,13 +429,22 @@ def _dir_mark(path: Path) -> str | None:
 
 
 def _added_paths(root: Path, recorded: dict) -> list[str]:
-    """Worktree files the snapshot does not know: what the run added."""
+    """Worktree files the snapshot does not know: what the run added.
+
+    ``git ls-files`` still names a tracked file deleted before the run,
+    but its absent bytes never reached the manifest — only paths that
+    exist can be run additions.
+    """
     known = (
         set(recorded["files"])
         | set(recorded.get("links", {}))
         | set(recorded.get("dirs", []))
     )
-    return [p for p in _worktree_files(root) if p not in known]
+    return [
+        p
+        for p in _worktree_files(root)
+        if p not in known and os.path.lexists(root / p)
+    ]
 
 
 def _change_lines(
