@@ -706,10 +706,18 @@ def _work_item(input_text: str, tracker, root: Path, kind: str):
     if item.author_association not in TRUSTED_ASSOCIATIONS:
         raise RunRefused(
             f"work item #{ref} was written by {item.author} "
-            f"({item.author_association}), not a trusted author — restate "
-            f"the work yourself: /{kind} <task>"
+            f"({item.author_association}), not a trusted author — "
+            f"{_untrusted_next_step(kind)}"
         )
     return item
+
+
+def _untrusted_next_step(kind: str) -> str:
+    """The refile step an untrusted refusal names: ``/triage`` takes only
+    ``#<n>``, so it routes through a new trusted-author issue (#180)."""
+    if kind == "triage":
+        return "restate the work yourself as a new issue, then /triage #<new-issue>"
+    return f"restate the work yourself: /{kind} <task>"
 
 
 def _refuse_ended_work(item, tracker, root: Path) -> None:
