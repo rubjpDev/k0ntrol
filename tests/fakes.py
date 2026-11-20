@@ -41,6 +41,7 @@ from k0ntrol.tracker import (
     TrackerError,
     WorkItem,
     comment_marker,
+    local_files,
 )
 
 
@@ -390,13 +391,11 @@ class FakeTracker:
         self.calls.append(("commit", message))
         if self.git_runner is None:
             return True
-        if not self._git(["git", "status", "--porcelain"]).stdout.strip():
-            return False
-        self._git(["git", "add", "-A"])
-        self._git(["git", "commit", "-m", message])
-        return True
+        return local_files.commit(self.git_runner, message)
 
     def push(self, branch: str) -> None:
+        if self.git_runner is not None:
+            local_files.checked_push(self.git_runner, branch)
         self.calls.append(("push", branch))
 
     def open_change(self, branch: str, base: str, title: str, body: str) -> Change:
