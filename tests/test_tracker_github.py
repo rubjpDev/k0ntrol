@@ -452,7 +452,12 @@ def test_create_branch_checks_out_existing_branch():
 def test_commit_stages_all_and_returns_whether_it_committed():
     runner = FakeRunner()
     runner.script(["git", "status", "--porcelain"], stdout=" M x.py\n")
+    runner.script(["git", "ls-files", "-u"], stdout="")
+    runner.script(["git", "rev-parse", "--verify", "--quiet", "HEAD"])
+    runner.script(["git", "ls-tree"], stdout="")
+    runner.script(["git", "diff", "--cached", "--name-only"], stdout="")
     runner.script(["git", "add", "-A"])
+    runner.script(["git", "diff", "--cached", "--quiet"], returncode=1)
     runner.script(["git", "commit", "-m", "#42: add login"])
     tracker = GhTracker(runner)
 
@@ -465,6 +470,8 @@ def test_commit_stages_all_and_returns_whether_it_committed():
 
 def test_push_uses_upstream_tracking():
     runner = FakeRunner()
+    runner.script(["git", "ls-remote"], stdout="")
+    runner.script(["git", "rev-list"], stdout="")
     runner.script(["git", "push"])
     tracker = GhTracker(runner)
 
