@@ -546,8 +546,7 @@ def make_post_axis_review(
                 state.get(f"{axis}_review"), f"{axis.capitalize()} review"
             ),
             run=ctx.run_id,
-            node=f"post_{axis}{round_suffix(state, f'{axis}_review_round')}"
-            f"_{_post_head(ctx, state, axis)}",
+            node=f"post_{axis}_{_post_head(ctx, state, axis)}",
         )
         return {}
 
@@ -556,8 +555,8 @@ def make_post_axis_review(
 
 def _post_head(ctx: RunContext, state: dict, axis: str) -> str:
     """The head an axis's post binds to — the reviewed head, else the
-    published one — keyed into the post's marker so a fresh run's post of
-    the same head dedupes and a moved head does not (#178)."""
+    published one — keyed into the post's marker so any run's post of the
+    same revision dedupes and a moved head does not (#178)."""
     review = state.get(f"{axis}_review") or {}
     head = review.get("head_sha") or _published_head(ctx, state)
     return head[:12] if head else "unpublished"

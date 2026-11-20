@@ -1901,8 +1901,41 @@ def test_review_gate_redo_reruns_implementer_in_refactor_then_reviews(tmp_path):
     change = tracker.read_change("k0/1-calc-answers-42")
     reviews = tracker.reviews_on(change.ref)
     assert len(reviews) == 4
-    assert any("node=post_conventions_2" in r for r in reviews)
-    assert any("node=post_contract_2" in r for r in reviews)
+    # the second round's posts are keyed to the new published head
+    head = change.head_sha[:12]
+    assert sum(f"node=post_conventions_{head}" in r for r in reviews) == 1
+    assert sum(f"node=post_contract_{head}" in r for r in reviews) == 1
+
+
+def test_a_fresh_run_after_a_redo_does_not_repost_the_reviews(tmp_path):
+    """#178: the redo round's posts are keyed to the reviewed head — a
+    fresh run reconciling the same revision dedupes them rather than
+    reposting under a reset round."""
+    tracker, pending = to_review_gate(tmp_path)
+    refactor = FakeChatModel(
+        messages=[
+            write_call("calc.py", "def answer():\n    return 42\n", "w9"),
+            run_tests_call("r9"),
+            AIMessage(content="addressed the findings"),
+        ]
+    )
+    again = resume(
+        pending.run,
+        "redo tighten the answer",
+        root=tmp_path,
+        cfg=item_cfg(),
+        init=models_init(refactor, passing_reviewer()),
+        tracker=tracker,
+    )
+    assert isinstance(again, Pending) and again.gate == "review"
+    change = tracker.read_change("k0/1-calc-answers-42")
+    assert len(tracker.reviews_on(change.ref)) == 4  # both axes, both heads
+    abandon(again.run, root=tmp_path)
+
+    once_more = run_item(tmp_path, item_cfg(), tracker, passing_reviewer())
+
+    assert isinstance(once_more, Pending) and once_more.gate == "review"
+    assert len(tracker.reviews_on(change.ref)) == 4
 
 
 def test_review_gate_plan_returns_the_item_to_planning(tmp_path):

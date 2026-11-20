@@ -381,9 +381,10 @@ def test_a_missing_axis_is_not_re_reviewed_behind_the_human(tmp_path):
     change = tracker.read_change("k0/1-calc-answers-42")
     assert change.is_draft
     reviews = tracker.reviews_on(change.ref)
-    # contract re-posted once (new round marker), conventions was not re-run
+    # neither axis reposts on the unchanged head — posts key to the
+    # reviewed revision, not the run's round (#178)
     assert sum("post_conventions" in review for review in reviews) == 1
-    assert sum("post_contract" in review for review in reviews) == 2
+    assert sum("post_contract" in review for review in reviews) == 1
 
 
 def test_a_legacy_checkpoint_at_review_comment_posts_no_pass(tmp_path):
