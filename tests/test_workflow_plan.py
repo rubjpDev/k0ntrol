@@ -12,14 +12,12 @@ drafting run then writes the Spec and the spec gate takes ``ok`` or
 
 import json
 import subprocess
-from functools import partial
 from pathlib import Path
 
 import pytest
 from langchain_core.messages import AIMessage
 
-from fakes import FakeChatModel, FakeTracker, cfg_with
-from k0ntrol.providers import free_checks
+from fakes import FakeChatModel, FakeTracker, cfg_with, doctor_seam
 from k0ntrol.tracker import TrackerError
 from k0ntrol.workflow import (
     Outcome,
@@ -270,15 +268,8 @@ def test_an_idea_run_refuses_a_missing_search_credential(tmp_path):
     git_repo(tmp_path)
     cfg = plan_cfg()
     cfg["search"] = {"provider": "brave"}
-    check = partial(
-        free_checks,
-        init=lambda model, *, model_provider=None, **kwargs: FakeChatModel(
-            profile={"tool_calling": True}
-        ),
-        importable=lambda module: True,
-        run=lambda argv, root: (0, ""),
-        environ={"ANTHROPIC_API_KEY": "x"},  # no BRAVE_SEARCH_API_KEY
-    )
+    # the seam's stubbed environ has no BRAVE_SEARCH_API_KEY
+    check = doctor_seam()
 
     with pytest.raises(RunRefused, match="BRAVE_SEARCH_API_KEY"):
         run_plan(

@@ -196,8 +196,7 @@ def start(
         cfg,
         root,
         tracker,
-        required=kind in ("research", "triage")
-        or (kind in ("implement", "plan") and input_text.startswith("#")),
+        required=_tracker_required(kind, input_text),
     )
     conn, saver = _open_checkpoints(root)
     try:
@@ -444,9 +443,7 @@ def _services_for(
     agents.
     """
     services = []
-    if kind in ("research", "triage") or (
-        kind in ("implement", "plan") and input_text.startswith("#")
-    ):
+    if _tracker_required(kind, input_text):
         services.append("github")
     if _roster_searches(roster):
         services.append("search")
@@ -458,6 +455,15 @@ def _roster_searches(roster: tuple[str, ...]) -> bool:
     return any(
         "web_search" in ALLOWLISTS.get(label.split(".", 1)[-1], ())
         for label in roster
+    )
+
+
+def _tracker_required(kind: str, input_text: str) -> bool:
+    """The paths that cannot run trackerless — and so need GitHub auth and
+    an ``origin`` remote (#179): every ``/research`` and ``/triage`` run,
+    and the ``#<n>`` forms of ``/implement`` and ``/plan``."""
+    return kind in ("research", "triage") or (
+        kind in ("implement", "plan") and input_text.startswith("#")
     )
 
 

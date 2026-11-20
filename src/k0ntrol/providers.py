@@ -226,7 +226,7 @@ def report_lines(checks: Iterable[Check]) -> list[str]:
 
 # The non-model services a command path can ask the doctor to gate on
 # (#179). ``k0 doctor`` checks them all; ``None`` means the same.
-SERVICES = frozenset({"github", "search"})
+ALL_SERVICES = frozenset({"github", "search"})
 
 
 def free_checks(
@@ -263,11 +263,11 @@ def free_checks(
     return checks
 
 
-def _wanted_services(services: Iterable[str] | None) -> frozenset:
+def _wanted_services(services: Iterable[str] | None) -> frozenset[str]:
     """The service subset to check; an unknown name refuses loudly rather
     than silently under-checking the path."""
-    wanted = SERVICES if services is None else frozenset(services)
-    unknown = wanted - SERVICES
+    wanted = ALL_SERVICES if services is None else frozenset(services)
+    unknown = wanted - ALL_SERVICES
     if unknown:
         raise ValueError(f"unknown service: {', '.join(sorted(unknown))}")
     return wanted

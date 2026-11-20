@@ -3,14 +3,13 @@
 
 import json
 import subprocess
-from functools import partial
 
 import pytest
 from langchain_core.messages import AIMessage
 
-from fakes import FakeChatModel, cfg_with
+from fakes import FakeChatModel, cfg_with, doctor_seam
 from k0ntrol.frontends.ask import answer_ask
-from k0ntrol.providers import Check, free_checks
+from k0ntrol.providers import Check
 
 
 def _repo(root, files=None):
@@ -428,15 +427,7 @@ def test_ask_answers_in_a_local_repo_without_gh_or_a_search_key(tmp_path):
     _repo(tmp_path)
     config = _cfg()
     config["search"] = {"provider": "brave"}
-    check = partial(
-        free_checks,
-        init=lambda model, *, model_provider=None, **kwargs: FakeChatModel(
-            profile={"tool_calling": True}
-        ),
-        importable=lambda module: True,
-        run=lambda argv, root: (None, "gh is not on PATH"),
-        environ={"ANTHROPIC_API_KEY": "x"},
-    )
+    check = doctor_seam(run=lambda argv, root: (None, "gh is not on PATH"))
     model = FakeChatModel(messages=[AIMessage(content="an answer")])
 
     result = answer_ask(
