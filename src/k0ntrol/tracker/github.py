@@ -5,6 +5,7 @@ so contract tests replay recorded output. `gh` reuses the user's auth;
 a non-zero exit raises TrackerError (exit 4 means auth, for `k0 doctor`).
 """
 
+from collections.abc import Iterable
 import json
 import os
 import subprocess
@@ -40,9 +41,14 @@ def subprocess_runner(cwd: Path) -> CommandRunner:
 class GhTracker:
     """Tracker over the `gh` CLI and local git, bound to the checkout's repo."""
 
-    def __init__(self, runner: CommandRunner):
+    def __init__(
+        self, runner: CommandRunner, trusted_authors: Iterable[str] = ()
+    ) -> None:
         self._runner = runner
         self._login: str | None = None
+        # Config-allowlisted App logins whose content is trusted on read
+        # (#176, ADR 0016).
+        self.trusted_authors = tuple(trusted_authors)
 
     # -- work items ------------------------------------------------------
 

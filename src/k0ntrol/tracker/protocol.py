@@ -5,12 +5,26 @@ Agents never see it directly; they get read-only tools built on it.
 There is no merge method: the human merges.
 """
 
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 import re
 from typing import Protocol, runtime_checkable
 
 #: Tracker authors whose content may reach an agent (ADR 0006).
 TRUSTED_ASSOCIATIONS = frozenset({"OWNER", "MEMBER", "COLLABORATOR"})
+
+
+def is_trusted_author(
+    author: str, author_association: str, trusted_authors: Iterable[str] = ()
+) -> bool:
+    """Whether this author's content may reach an agent.
+
+    A trusted association, or a login the repo's config expressly lists
+    in ``trusted_authors`` — GitHub-verified provenance for GitHub App
+    identities, which post as ``NONE`` under a ``<app-slug>[bot]`` login
+    only the App itself can use (#176, ADR 0016).
+    """
+    return author_association in TRUSTED_ASSOCIATIONS or author in trusted_authors
 
 #: The marker ``ensure_work_item`` appends to a work item k0 creates.
 _K0_ITEM_MARKER = re.compile(r"<!-- k0:run=\S+ node=\S+ -->\s*$")
@@ -191,3 +205,6 @@ class Changes(Protocol):
 @runtime_checkable
 class Tracker(WorkItems, Changes, Protocol):
     """The full tracker: work items plus, for code hosts, changes."""
+
+    #: Extra author logins whose content is trusted on read (#176).
+    trusted_authors: tuple[str, ...]

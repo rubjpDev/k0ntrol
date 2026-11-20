@@ -23,7 +23,7 @@ git-worktree hint.
 import os
 import sqlite3
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal, cast
@@ -57,6 +57,7 @@ from k0ntrol.tracker import (  # noqa: E402
     TRUSTED_ASSOCIATIONS,
     TrackerError,
     is_k0_work_item,
+    is_trusted_author,
 )
 from k0ntrol.tracker.github import GhTracker, subprocess_runner  # noqa: E402
 from k0ntrol.workflow.change import (  # noqa: E402
@@ -226,7 +227,13 @@ def start(
                 session=session,
             )
             graph.invoke(
-                _initial_state(kind, input_text, cfg, item),
+                _initial_state(
+                    kind,
+                    input_text,
+                    cfg,
+                    item,
+                    tracker.trusted_authors if tracker else (),
+                ),
                 config=config,
                 durability="sync",
             )
@@ -570,7 +577,9 @@ def _optional_tracker(kind: str, cfg: dict, root: Path):
     """The tracker a run may use but needn't: a configured GitHub tracker
     joins ``/plan`` runs so the hand off can publish (#127)."""
     if kind == "plan" and cfg.get("tracker") == "github":
-        return GhTracker(subprocess_runner(root))
+        return GhTracker(
+            subprocess_runner(root), trusted_authors=_trusted_authors(cfg)
+        )
     return None
 
 
@@ -583,7 +592,14 @@ def _required_tracker(kind: str, cfg: dict, root: Path):
         raise RunRefused(f"/{kind} only works with GitHub in 0.1.0, not {unshipped}")
     if cfg.get("tracker") is None:
         raise RunRefused(f"/{kind} needs a tracker; run k0 init --tracker github")
-    return GhTracker(subprocess_runner(root))
+    return GhTracker(
+        subprocess_runner(root), trusted_authors=_trusted_authors(cfg)
+    )
+
+
+def _trusted_authors(cfg: dict) -> tuple[str, ...]:
+    """The config's expressly trusted author logins (#176, ADR 0016)."""
+    return tuple(cfg.get("trusted_authors") or ())
 
 
 def _log_failed(
@@ -703,7 +719,9 @@ def _work_item(input_text: str, tracker, root: Path, kind: str):
         _refuse_ended_work(item, tracker, root)
     except TrackerError as error:
         raise RunRefused(str(error)) from error
-    if item.author_association not in TRUSTED_ASSOCIATIONS:
+    if not is_trusted_author(
+        item.author, item.author_association, tracker.trusted_authors
+    ):
         raise RunRefused(
             f"work item #{ref} was written by {item.author} "
             f"({item.author_association}), not a trusted author — "
@@ -732,7 +750,13 @@ def _refuse_ended_work(item, tracker, root: Path) -> None:
         )
 
 
-def _initial_state(kind: str, input_text: str, cfg: dict, item=None) -> dict:
+def _initial_state(
+    kind: str,
+    input_text: str,
+    cfg: dict,
+    item=None,
+    trusted_authors: Iterable[str] = (),
+) -> dict:
     state = {
         "kind": kind,
         "task": str(input_text).strip(),
@@ -741,14 +765,16 @@ def _initial_state(kind: str, input_text: str, cfg: dict, item=None) -> dict:
         "validator_ok": False,
         "limit": None,
     }
-    state.update(_kind_state(kind, state["task"], cfg, item))
+    state.update(_kind_state(kind, state["task"], cfg, item, trusted_authors))
     return state
 
 
-def _kind_state(kind: str, task: str, cfg: dict, item) -> dict:
+def _kind_state(
+    kind: str, task: str, cfg: dict, item, trusted_authors: Iterable[str] = ()
+) -> dict:
     """The per-kind fields layered over the shared run state."""
     if kind == "implement":
-        return _implement_state(item)
+        return _implement_state(item, trusted_authors)
     if kind == "plan":
         return _plan_state(cfg, item)
     if kind == "research":
@@ -852,7 +878,7 @@ def _plan_state(cfg: dict, item) -> dict:
     return state
 
 
-def _implement_state(item) -> dict:
+def _implement_state(item, trusted_authors: Iterable[str] = ()) -> dict:
     """The ``/implement`` fields layered over the shared run state.
 
     For ``/implement #<n>`` the run's task is the item's latest agent
@@ -871,7 +897,7 @@ def _implement_state(item) -> dict:
     if item is not None:
         state.update(
             {
-                "task": latest_agent_brief(item) or item.body,
+                "task": latest_agent_brief(item, trusted_authors) or item.body,
                 "item_ref": item.ref,
                 "item_title": item.title,
                 "conventions_review_attempts": 0,

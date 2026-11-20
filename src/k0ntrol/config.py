@@ -90,6 +90,7 @@ def _validate_top_level(cfg: dict) -> list[str]:
     errors.extend(_validate_optional_text("vcs", cfg.get("vcs")))
     errors.extend(_validate_optional_text("tracker", cfg.get("tracker")))
     errors.extend(_validate_vcs_tracker(cfg.get("vcs"), cfg.get("tracker")))
+    errors.extend(_validate_trusted_authors(cfg.get("trusted_authors")))
     errors.extend(_validate_optional_text("base_branch", cfg.get("base_branch")))
     errors.extend(_validate_integer("max_attempts", cfg.get("max_attempts"), 1))
     errors.extend(_validate_integer("test_timeout", cfg.get("test_timeout"), 1))
@@ -100,6 +101,27 @@ def _validate_top_level(cfg: dict) -> list[str]:
     errors.extend(_validate_roster("helpers", cfg.get("helpers")))
     errors.extend(_validate_providers(cfg.get("providers")))
     return errors
+
+
+def _validate_trusted_authors(value: object) -> list[str]:
+    """``trusted_authors``: a list of GitHub App logins (``name[bot]``),
+    the expressly trusted App identities of #176 (ADR 0016)."""
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        return ["trusted_authors: must be a list"]
+    errors = []
+    for index, login in enumerate(value):
+        errors.extend(_trusted_author_error(index, login))
+    return errors
+
+
+def _trusted_author_error(index: int, login: object) -> list[str]:
+    if not isinstance(login, str) or not login.strip():
+        return [f"trusted_authors[{index}]: must be a non-empty string"]
+    if not login.endswith("[bot]"):
+        return [f"trusted_authors[{index}]: only App logins, ending in '[bot]'"]
+    return []
 
 
 def _validate_vcs_tracker(vcs: object, tracker: object) -> list[str]:

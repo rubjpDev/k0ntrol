@@ -41,7 +41,7 @@ from k0ntrol.tools.errors import SliceRecoveryNeeded
 from k0ntrol.tools.slice_guard import MAX_SLICE_DENIALS, SliceStart
 from k0ntrol.tools.slice_journal import restore_slice
 from k0ntrol.tools.tracker import render_work_item
-from k0ntrol.tracker import TRUSTED_ASSOCIATIONS, TrackerError
+from k0ntrol.tracker import TrackerError, is_trusted_author
 from k0ntrol.workflow.change import (
     decider,
     existing_branch,
@@ -481,7 +481,9 @@ def _axis_refusal(ctx: RunContext, state: dict, name: str) -> dict | None:
     REVIEWER is never asked, and its verdict could never pass anyway
     (#175). ``None`` on a trusted change."""
     item = ctx.tracker.read_work_item(state["change_ref"])
-    if item.author_association in TRUSTED_ASSOCIATIONS:
+    if is_trusted_author(
+        item.author, item.author_association, ctx.tracker.trusted_authors
+    ):
         return None
     return {
         name: {
@@ -991,7 +993,9 @@ def with_change(
 
     def build(state: dict) -> str:
         ref = state["change_ref"]
-        change = render_work_item(ctx.tracker.read_work_item(ref))
+        change = render_work_item(
+            ctx.tracker.read_work_item(ref), ctx.tracker.trusted_authors
+        )
         diff = code_diff(ctx.tracker.read_change_diff(ref))
         return f"{brief(state)}\n\n{change}\n\n## Diff\n\n{diff}"
 
@@ -1020,7 +1024,7 @@ def with_work_item(
         if not state.get("item_ref"):
             return text
         item = ctx.tracker.read_work_item(state["item_ref"])
-        return f"{text}\n\n{render_work_item(item)}"
+        return f"{text}\n\n{render_work_item(item, ctx.tracker.trusted_authors)}"
 
     return build
 

@@ -1009,3 +1009,41 @@ def test_research_public_functions_have_complete_annotations():
             parameter.annotation is not inspect.Parameter.empty
             for parameter in signature.parameters.values()
         ), name
+
+
+# --- trusted GitHub App identities (#176) -------------------------------------
+
+APP = "acme-k0[bot]"
+
+
+def test_an_app_authored_map_runs_when_the_app_is_trusted(tmp_path):
+    """#176: an allowlisted App's Map feeds the decision intake again."""
+    git_repo(tmp_path)
+    tracker = FakeTracker(trusted_authors=(APP,))
+    map_item = tracker.create_work_item(
+        "Auth library map", MAP_BODY, author=APP, author_association="NONE"
+    )
+    seed_decision(tracker, map_item.ref, "budget cap?")
+
+    result = run_research(
+        tmp_path, research_cfg(tracker="github"), tracker=tracker, input="#1"
+    )
+
+    assert isinstance(result, Pending)
+    assert result.gate == "decision"
+    assert "budget cap?" in result.question
+
+
+def test_an_unlisted_app_map_is_still_refused(tmp_path):
+    git_repo(tmp_path)
+    tracker = FakeTracker(trusted_authors=(APP,))
+    item = tracker.create_work_item(
+        "Map", MAP_BODY, author="other-app[bot]", author_association="NONE"
+    )
+    with pytest.raises(RunRefused, match="restate"):
+        run_research(
+            tmp_path,
+            research_cfg(tracker="github"),
+            tracker=tracker,
+            input=f"#{item.ref}",
+        )

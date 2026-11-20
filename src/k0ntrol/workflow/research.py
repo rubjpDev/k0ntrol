@@ -18,7 +18,7 @@ human's own decision: the ticket closes with it and the map's Decisions
 so far gains its one-line gist and link. The REPL command is #129.
 """
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.graph import END, START, StateGraph
@@ -27,11 +27,11 @@ from langgraph.types import interrupt
 
 from k0ntrol.agents import ChartedMap, DecisionProposal
 from k0ntrol.tracker import (
-    TRUSTED_ASSOCIATIONS,
     ChildWorkItem,
     WorkItem,
     comment_marker,
     is_k0_work_item,
+    is_trusted_author,
 )
 from k0ntrol.workflow.context import RunContext
 from k0ntrol.workflow.nodes import (
@@ -235,7 +235,11 @@ def make_pick_decision(ctx: RunContext) -> Callable[[dict], dict]:
             if child.state != "open" or _blocked(ctx, child.ref):
                 continue
             item = ctx.tracker.read_work_item(child.ref)
-            return {"decision": _decision_dict(child, item)}
+            return {
+                "decision": _decision_dict(
+                    child, item, ctx.tracker.trusted_authors
+                )
+            }
         return {"decision": None, "outcome": "done"}
 
     return node
@@ -247,11 +251,13 @@ def _blocked(ctx: RunContext, ref: str) -> bool:
     )
 
 
-def _decision_dict(child: ChildWorkItem, item: WorkItem) -> dict:
+def _decision_dict(
+    child: ChildWorkItem, item: WorkItem, trusted_authors: Iterable[str] = ()
+) -> dict:
     return {
         "ref": child.ref,
         "question": item.title,
-        "type": _decision_type(item),
+        "type": _decision_type(item, trusted_authors),
         "url": item.url,
     }
 
@@ -259,16 +265,15 @@ def _decision_dict(child: ChildWorkItem, item: WorkItem) -> dict:
 _DECISION_TYPES = ("research", "Q&A", "human")
 
 
-def _decision_type(item: WorkItem) -> str:
+def _decision_type(item: WorkItem, trusted_authors: Iterable[str] = ()) -> str:
     """The ticket's ``## Type``: who answers it.
 
     A child with no readable type — or one an untrusted author filed —
     is worked as a human decision: only a gate ever reads its content,
     never an agent (ADR 0006).
     """
-    trusted = (
-        is_k0_work_item(item)
-        or item.author_association in TRUSTED_ASSOCIATIONS
+    trusted = is_k0_work_item(item) or is_trusted_author(
+        item.author, item.author_association, trusted_authors
     )
     lines = _section(item.body, "Type").splitlines()
     type_ = lines[0].strip() if lines else ""
