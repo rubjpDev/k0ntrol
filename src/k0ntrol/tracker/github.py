@@ -260,7 +260,9 @@ class GhTracker:
         reviews = self._gh_json(
             ["gh", "api", f"repos/{{owner}}/{{repo}}/pulls/{ref}/reviews"]
         )
-        if any(marker in (review.get("body") or "") for review in reviews):
+        # the marker's node token keys the dedupe — it carries the reviewed
+        # head, so another run's post of the same revision does not repeat
+        if any(f"node={node} -->" in (review.get("body") or "") for review in reviews):
             return
         self._run(
             ["gh", "pr", "review", ref, "--comment", "--body", f"{marker}\n\n{body}"]

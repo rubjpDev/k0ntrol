@@ -52,6 +52,12 @@ def route_implement_start(state: dict) -> str:
     return "branch_setup" if state.get("item_ref") else "seam"
 
 
+def route_after_branch_setup(state: dict) -> str:
+    """A change already published under review re-enters at its reviews —
+    build, validation and push are not rerun (#178)."""
+    return "conventions_review" if state.get("change_ref") else "implementer"
+
+
 def route_after_seam(state: dict) -> str:
     """A proposal run that hit its model-call limit never reaches the gate."""
     if state.get("limit"):

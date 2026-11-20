@@ -455,7 +455,7 @@ class FakeTracker:
     def post_review(self, ref: str, body: str, *, run: str, node: str) -> None:
         marker = comment_marker(run, node)
         self.calls.append(("post_review", ref))
-        if any(marker in r for r in self._change(ref)["reviews"]):
+        if any(f"node={node} -->" in r for r in self._change(ref)["reviews"]):
             return
         self._change(ref)["reviews"].append(f"{marker}\n\n{body}")
 
@@ -493,6 +493,10 @@ class FakeTracker:
 
     def reviews_on(self, ref: str) -> list[str]:
         return list(self._change(ref)["reviews"])
+
+    def set_change_head(self, ref: str, head_sha: str) -> None:
+        """Move the change's published head, as another push on the PR would."""
+        self._change(ref)["head_sha"] = head_sha
 
     def change_body(self, ref: str) -> str:
         return self._change(ref)["body"]

@@ -1594,7 +1594,7 @@ class _FlakyPostTracker(FakeTracker):
 
     def post_review(self, ref, body, *, run, node):
         super().post_review(ref, body, run=run, node=node)
-        if node == "post_conventions" and not self._flaked:
+        if node.startswith("post_conventions") and not self._flaked:
             self._flaked = True
             raise TrackerError("the post's answer was lost")
 
@@ -2076,3 +2076,82 @@ def test_abandoning_an_app_run_leaves_trust_and_artifacts_unchanged(tmp_path):
             init=models_init(),
             tracker=tracker,
         )
+
+
+def test_a_fresh_run_on_a_reviewed_change_reenters_at_the_reviews(tmp_path):
+    """#178: a fresh ``/implement #<n>`` on an item whose branch already
+    carries a published, reviewed change re-enters at its reviews — no
+    second build, commit, push or Conventions post."""
+    item_repo(tmp_path)
+    tracker = FakeTracker(git_runner=git_runner_for(tmp_path))
+    ready_item(tracker)
+    first = run_item(
+        tmp_path, item_cfg(), tracker, builder_model(), passing_reviewer()
+    )
+    assert isinstance(first, Pending) and first.gate == "review"
+    change = tracker.read_change("k0/1-calc-answers-42")
+    assert len(tracker.reviews_on(change.ref)) == 2
+    abandon(first.run, root=tmp_path)
+    tracker.calls.clear()
+    reviewer = passing_reviewer()
+    # agents build lazily in node order: the reviewer is the only model a
+    # reconciled run constructs — build, validation and push never run
+    again = run_item(tmp_path, item_cfg(), tracker, reviewer)
+
+    assert isinstance(again, Pending) and again.gate == "review"
+    assert "ok" in again.answers  # the same reviewed head stays approvable
+    assert not [c for c in tracker.calls if c[0] == "commit"]
+    assert not [c for c in tracker.calls if c[0] in ("push", "open_change")]
+    assert len(tracker.reviews_on(change.ref)) == 2
+    assert len(reviewer.invocations) == 2  # both axes re-judged the head
+
+
+def test_a_moved_published_head_re_reviews_and_keeps_ok_shut(tmp_path):
+    """#178: when the published head moved since the earlier reviews, the
+    resumed run reviews the moved head and a stale review cannot approve."""
+    item_repo(tmp_path)
+    tracker = FakeTracker(git_runner=git_runner_for(tmp_path))
+    ready_item(tracker)
+    first = run_item(
+        tmp_path, item_cfg(), tracker, builder_model(), passing_reviewer()
+    )
+    assert isinstance(first, Pending) and first.gate == "review"
+    change = tracker.read_change("k0/1-calc-answers-42")
+    abandon(first.run, root=tmp_path)
+    tracker.set_change_head(change.ref, "b" * 40)
+    tracker.calls.clear()
+
+    again = run_item(
+        tmp_path, item_cfg(), tracker, passing_reviewer()
+    )
+
+    assert isinstance(again, Pending) and again.gate == "review"
+    assert "ok" not in again.answers
+    assert sum("b" * 12 in r for r in tracker.reviews_on(change.ref)) == 2
+
+
+def test_abandoning_a_reconciled_run_keeps_the_draft_and_posts_no_gate(tmp_path):
+    """#178 abandon seam: the draft change and branch stay; no passing
+    gate is posted."""
+    item_repo(tmp_path)
+    tracker = FakeTracker(git_runner=git_runner_for(tmp_path))
+    ready_item(tracker)
+    first = run_item(
+        tmp_path, item_cfg(), tracker, builder_model(), passing_reviewer()
+    )
+    assert isinstance(first, Pending) and first.gate == "review"
+    abandon(first.run, root=tmp_path)
+    tracker.calls.clear()
+    again = run_item(
+        tmp_path, item_cfg(), tracker, passing_reviewer()
+    )
+    assert isinstance(again, Pending) and again.gate == "review"
+
+    abandon(again.run, root=tmp_path)
+
+    change = tracker.read_change("k0/1-calc-answers-42")
+    assert change.state == "open" and change.is_draft
+    assert tracker.find_change_comment(change.ref, "node=review_gate") is None
+    assert not any(
+        "Gate passed" in c.body for c in tracker.read_work_item("1").comments
+    )
