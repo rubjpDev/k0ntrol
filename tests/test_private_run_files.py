@@ -205,7 +205,12 @@ def review_call(summary, findings, call_id):
         tool_calls=[
             {
                 "name": "Review",
-                "args": {"summary": summary, "findings": findings},
+                "args": {
+                    "status": "completed",
+                    "summary": summary,
+                    "findings": findings,
+                    "reason": "",
+                },
                 "id": call_id,
             }
         ],

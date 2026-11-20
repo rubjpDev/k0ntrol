@@ -337,8 +337,16 @@ def review_call(summary, call_id):
     return AIMessage(
         content="",
         tool_calls=[
-            {"name": "Review", "args": {"summary": summary, "findings": []},
-             "id": call_id}
+            {
+                "name": "Review",
+                "args": {
+                    "status": "completed",
+                    "summary": summary,
+                    "findings": [],
+                    "reason": "",
+                },
+                "id": call_id,
+            }
         ],
     )
 
