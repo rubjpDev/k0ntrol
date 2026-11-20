@@ -1996,6 +1996,41 @@ def test_an_app_agent_brief_is_the_contract_when_trusted(tmp_path):
     assert "BODY TEXT" not in first
 
 
+@pytest.mark.parametrize("revoked", [APP, "issue-app[bot]", "unused-app[bot]"])
+def test_resume_checks_app_trust_for_the_cached_contract(tmp_path, revoked):
+    item_repo(tmp_path)
+    issue_app = "issue-app[bot]"
+    allowlist = (APP, issue_app, "unused-app[bot]")
+    tracker = FakeTracker(
+        git_runner=git_runner_for(tmp_path), trusted_authors=allowlist
+    )
+    item = ready_item(tracker, author=issue_app, author_association="NONE")
+    tracker.add_comment(
+        item.ref, "## Agent Brief\n\napp brief", author=APP, author_association="NONE"
+    )
+    cfg = item_cfg(max_attempts=1)
+    builder = FakeChatModel(messages=[AIMessage(content="no changes yet")])
+    pending = run_item(tmp_path, cfg, tracker, builder)
+    assert isinstance(pending, Pending) and pending.gate == "limit_hit"
+    assert "app brief" in builder.invocations[0][-1].content
+
+    tracker.trusted_authors = tuple(login for login in allowlist if login != revoked)
+    retry = FakeChatModel(messages=[AIMessage(content="still no changes")])
+    continue_run = partial(
+        resume, pending.run, root=tmp_path, cfg=cfg, init=models_init(retry), tracker=tracker
+    )
+    if revoked == "unused-app[bot]":
+        again = continue_run("retry")
+        assert isinstance(again, Pending) and again.gate == "limit_hit"
+        assert "app brief" in retry.invocations[0][-1].content
+    else:
+        calls = list(tracker.calls)
+        with pytest.raises(RunRefused, match="no longer trusted"):
+            continue_run("retry")
+        assert retry.invocations == []
+        assert tracker.calls == calls
+
+
 def test_provenance_changed_between_runs_fails_closed(tmp_path):
     """#176 resume seam: the allowlist is read at run time — drop or change
     the entry and the same item fails closed on the next run."""

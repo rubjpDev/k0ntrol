@@ -58,14 +58,21 @@ def latest_agent_brief(item: WorkItem, trusted_authors: Iterable[str] = ()) -> s
     ``/implement #<n>`` runs IMPLEMENTER on this brief when there is one,
     else on the work item's body (#117, ADR 0012).
     """
+    brief = latest_agent_brief_comment(item, trusted_authors)
+    return brief.body if brief is not None else None
+
+
+def latest_agent_brief_comment(
+    item: WorkItem, trusted_authors: Iterable[str] = ()
+) -> Comment | None:
+    """Select the latest trusted brief with its author provenance intact."""
     allowlist = frozenset(trusted_authors)
-    briefs = [
-        comment.body
-        for comment in item.comments
-        if is_trusted_author(comment.author, comment.author_association, allowlist)
-        and _BRIEF_HEADING.search(comment.body)
-    ]
-    return briefs[-1] if briefs else None
+    for comment in reversed(item.comments):
+        if _BRIEF_HEADING.search(comment.body) and is_trusted_author(
+            comment.author, comment.author_association, allowlist
+        ):
+            return comment
+    return None
 
 
 def tracker_read_tools(tracker: Tracker) -> list[BaseTool]:

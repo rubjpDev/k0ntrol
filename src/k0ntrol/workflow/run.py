@@ -23,7 +23,7 @@ git-worktree hint.
 import os
 import sqlite3
 import time
-from collections.abc import Callable, Iterable
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal, cast
@@ -49,13 +49,16 @@ from k0ntrol.events import (  # noqa: E402
     run_cost,
 )
 from k0ntrol.memory.refresh import refresh_memory  # noqa: E402
-from k0ntrol.tools.tracker import latest_agent_brief  # noqa: E402
+from k0ntrol.tools.tracker import latest_agent_brief_comment  # noqa: E402
 from k0ntrol.memory.scan import ScanError  # noqa: E402
 from k0ntrol.otel import build_run_trace, otel_callbacks  # noqa: E402
 from k0ntrol.providers import free_checks, has_errors, report_lines  # noqa: E402
 from k0ntrol.tracker import (  # noqa: E402
+    Comment,
     TRUSTED_ASSOCIATIONS,
+    Tracker,
     TrackerError,
+    WorkItem,
     is_k0_work_item,
     is_trusted_author,
 )
@@ -286,6 +289,7 @@ def resume(
         graph = _BUILDERS[kind](ctx, saver)
         state = graph.get_state(_thread(run_id))
         _refuse_finished(state, run_id)
+        _refuse_revoked_app_authors(state.values, tracker)
         _bind_events(ctx, root, run_id, write)
         ctx.trace = tracing(run_id)
         session_id = _session_id(ctx, state.values)
@@ -754,9 +758,14 @@ def _initial_state(
     kind: str,
     input_text: str,
     cfg: dict,
-    item=None,
-    trusted_authors: Iterable[str] = (),
+    item: WorkItem | None = None,
+    trusted_authors: tuple[str, ...] = (),
 ) -> dict:
+    brief = (
+        latest_agent_brief_comment(item, trusted_authors)
+        if kind == "implement" and item is not None
+        else None
+    )
     state = {
         "kind": kind,
         "task": str(input_text).strip(),
@@ -764,17 +773,27 @@ def _initial_state(
         "max_attempts": cfg.get("max_attempts", 2),
         "validator_ok": False,
         "limit": None,
+        "required_app_authors": _required_app_authors(item, brief),
     }
-    state.update(_kind_state(kind, state["task"], cfg, item, trusted_authors))
+    state.update(_kind_state(kind, cfg, item, brief))
     return state
 
 
+def _required_app_authors(*sources: WorkItem | Comment | None) -> list[str]:
+    """Authors of cached intake content admitted solely by the App allowlist."""
+    return sorted({
+        source.author
+        for source in sources
+        if source is not None and source.author_association not in TRUSTED_ASSOCIATIONS
+    })
+
+
 def _kind_state(
-    kind: str, task: str, cfg: dict, item, trusted_authors: Iterable[str] = ()
+    kind: str, cfg: dict, item: WorkItem | None, brief: Comment | None
 ) -> dict:
     """The per-kind fields layered over the shared run state."""
     if kind == "implement":
-        return _implement_state(item, trusted_authors)
+        return _implement_state(item, brief)
     if kind == "plan":
         return _plan_state(cfg, item)
     if kind == "research":
@@ -878,7 +897,7 @@ def _plan_state(cfg: dict, item) -> dict:
     return state
 
 
-def _implement_state(item, trusted_authors: Iterable[str] = ()) -> dict:
+def _implement_state(item: WorkItem | None, brief: Comment | None) -> dict:
     """The ``/implement`` fields layered over the shared run state.
 
     For ``/implement #<n>`` the run's task is the item's latest agent
@@ -897,7 +916,7 @@ def _implement_state(item, trusted_authors: Iterable[str] = ()) -> dict:
     if item is not None:
         state.update(
             {
-                "task": latest_agent_brief(item, trusted_authors) or item.body,
+                "task": brief.body if brief is not None else item.body,
                 "item_ref": item.ref,
                 "item_title": item.title,
                 "conventions_review_attempts": 0,
@@ -1004,6 +1023,16 @@ def _refuse_finished(state, run_id: str) -> None:
         return
     outcome = state.values.get("outcome", "finished")
     raise RunRefused(f"run {run_id} already ended {outcome}")
+
+
+def _refuse_revoked_app_authors(values: dict, tracker: Tracker | None) -> None:
+    allowed = tracker.trusted_authors if tracker is not None else ()
+    missing = set(values.get("required_app_authors", ())).difference(allowed)
+    if missing:
+        raise RunRefused(
+            "cannot resume: checkpointed authors are no longer trusted: "
+            f"{', '.join(sorted(missing))}. Abandon the run and start it again."
+        )
 
 
 def _advance(

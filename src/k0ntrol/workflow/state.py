@@ -22,6 +22,7 @@ class RunState(TypedDict, total=False):
 
     kind: str  # "implement" | "plan" | "research" | "triage"
     task: str  # the run's task text (issue body for ``#<n>`` runs)
+    required_app_authors: list[str]  # allowlist entries required by cached intake
     start_ms: int  # epoch ms when the run started (run_end.ms)
     max_attempts: int  # agent runs allowed per loop (default 2)
     redone: bool  # the human answered "redo" at a gate, possibly in an earlier sitting
