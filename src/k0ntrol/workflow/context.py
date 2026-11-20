@@ -22,7 +22,8 @@ from k0ntrol.memory.scan import run_scan
 from k0ntrol.otel import otel_callbacks
 from k0ntrol.tools.run_tests import DEFAULT_TEST_TIMEOUT
 from k0ntrol.tools.slice_guard import SliceStart
-from k0ntrol.workflow.change import default_base_branch
+from k0ntrol.tools.slice_journal import SliceJournal
+from k0ntrol.workflow.change import default_base_branch, worktree_snapshot_dir
 
 
 @dataclass
@@ -98,6 +99,7 @@ class RunContext:
                 init=self.init,
                 read_only=read_only,
                 slice_start=slice_start,
+                journal=self._slice_journal(name),
             )
             self._agents[key] = build_agent(
                 name,
@@ -108,6 +110,16 @@ class RunContext:
                 allowlist=names,
             )
         return self._agents[key]
+
+    def _slice_journal(self, name: str) -> SliceJournal | None:
+        """IMPLEMENTER's slice journal: durable scratch under the run's
+        ``.k0-mem/snapshots/<run>/slice`` dir for the recovery gate (#174).
+        A new instance means a new slice id, so its first write reinitialises
+        whatever an earlier slice or restore left there."""
+        writer = self._writer
+        if name != "implementer" or writer is None or writer.run is None:
+            return None
+        return SliceJournal(worktree_snapshot_dir(self.root, writer.run) / "slice")
 
     def agent_config(self, attempt: int) -> dict:
         """The config for one agent run: handlers + attempt tag.

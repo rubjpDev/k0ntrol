@@ -62,6 +62,10 @@ _Avoid_: Job, session, attempt
 A cap the harness enforces on how many model calls one agent run may make, how many automatic attempts one loop of a run may take, or how many questions one Q&A definition may ask. Hitting one pauses the run until the human decides how it goes on.
 _Avoid_: Budget, quota
 
+**Slice journal**:
+The durable per-path record of what IMPLEMENTER wrote during one red-to-green slice, kept under `.k0-mem/snapshots/`. When a red slice's test-write refusals hit their bound the run pauses at the recovery gate, and `recover` restores exactly the journaled paths.
+_Avoid_: Backup, undo list, checkpoint (a checkpoint is the graph's own resume state)
+
 **Event**:
 One line of k0's event log recording a model call, a tool call, a gate, or the start or end of a run.
 _Avoid_: Log entry, span, trace
