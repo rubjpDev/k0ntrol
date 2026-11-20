@@ -1111,10 +1111,18 @@ def run_item(root, cfg, tracker, *models, input="#1", **kwargs):
     )
 
 
-def ready_item(tracker, title="Calc answers 42", body="build the calc module"):
+def ready_item(
+    tracker,
+    title="Calc answers 42",
+    body="build the calc module",
+    author="rubenjp",
+    author_association="OWNER",
+):
     """An open work item labelled ``ready-for-agent``; seed calls cleared."""
     tracker.ensure_label("ready-for-agent")
-    item = tracker.create_work_item(title, body)
+    item = tracker.create_work_item(
+        title, body, author=author, author_association=author_association
+    )
     tracker.add_label(item.ref, "ready-for-agent")
     tracker.calls.clear()
     return item
@@ -1934,3 +1942,137 @@ def test_implement_public_functions_have_complete_annotations():
             parameter.annotation is not inspect.Parameter.empty
             for parameter in signature.parameters.values()
         ), name
+
+
+# --- trusted GitHub App identities round-trip (#176) --------------------------
+
+APP = "acme-k0[bot]"
+
+
+def test_an_app_authored_item_is_refused_without_trust(tmp_path):
+    """The default boundary is unchanged: an unlisted App is untrusted."""
+    item_repo(tmp_path)
+    tracker = FakeTracker(git_runner=git_runner_for(tmp_path))
+    item = tracker.create_work_item(
+        "Calc answers 42", "build the calc module",
+        author=APP, author_association="NONE",
+    )
+    with pytest.raises(RunRefused, match="restate"):
+        run_item(tmp_path, item_cfg(), tracker, input=f"#{item.ref}")
+
+
+def test_an_app_authored_item_runs_when_the_app_is_trusted(tmp_path):
+    """#176: an allowlisted App's spec ticket enters the /implement intake."""
+    item_repo(tmp_path)
+    tracker = FakeTracker(
+        git_runner=git_runner_for(tmp_path), trusted_authors=(APP,)
+    )
+    item = ready_item(tracker, author=APP, author_association="NONE")
+    builder = builder_model()
+
+    result = run_item(tmp_path, item_cfg(), tracker, builder, passing_reviewer())
+
+    assert isinstance(result, Pending)
+    assert ("open_change", "k0/1-calc-answers-42") in tracker.calls
+    assert "build the calc module" in builder.invocations[0][-1].content
+
+
+def test_an_app_agent_brief_is_the_contract_when_trusted(tmp_path):
+    """The App's ``## Agent Brief`` comment counts like a trusted one."""
+    item_repo(tmp_path)
+    tracker = FakeTracker(
+        git_runner=git_runner_for(tmp_path), trusted_authors=(APP,)
+    )
+    item = ready_item(tracker, body="BODY TEXT")
+    tracker.add_comment(
+        item.ref, "## Agent Brief\n\napp brief", author=APP, author_association="NONE"
+    )
+    builder = builder_model()
+
+    run_item(tmp_path, item_cfg(), tracker, builder, passing_reviewer())
+
+    first = builder.invocations[0][-1].content
+    assert "app brief" in first
+    assert "BODY TEXT" not in first
+
+
+@pytest.mark.parametrize("revoked", [APP, "issue-app[bot]", "unused-app[bot]"])
+def test_resume_checks_app_trust_for_the_cached_contract(tmp_path, revoked):
+    item_repo(tmp_path)
+    issue_app = "issue-app[bot]"
+    allowlist = (APP, issue_app, "unused-app[bot]")
+    tracker = FakeTracker(
+        git_runner=git_runner_for(tmp_path), trusted_authors=allowlist
+    )
+    item = ready_item(tracker, author=issue_app, author_association="NONE")
+    tracker.add_comment(
+        item.ref, "## Agent Brief\n\napp brief", author=APP, author_association="NONE"
+    )
+    cfg = item_cfg(max_attempts=1)
+    builder = FakeChatModel(messages=[AIMessage(content="no changes yet")])
+    pending = run_item(tmp_path, cfg, tracker, builder)
+    assert isinstance(pending, Pending) and pending.gate == "limit_hit"
+    assert "app brief" in builder.invocations[0][-1].content
+
+    tracker.trusted_authors = tuple(login for login in allowlist if login != revoked)
+    retry = FakeChatModel(messages=[AIMessage(content="still no changes")])
+    continue_run = partial(
+        resume, pending.run, root=tmp_path, cfg=cfg, init=models_init(retry), tracker=tracker
+    )
+    if revoked == "unused-app[bot]":
+        again = continue_run("retry")
+        assert isinstance(again, Pending) and again.gate == "limit_hit"
+        assert "app brief" in retry.invocations[0][-1].content
+    else:
+        calls = list(tracker.calls)
+        with pytest.raises(RunRefused, match="no longer trusted"):
+            continue_run("retry")
+        assert retry.invocations == []
+        assert tracker.calls == calls
+
+
+def test_provenance_changed_between_runs_fails_closed(tmp_path):
+    """#176 resume seam: the allowlist is read at run time — drop or change
+    the entry and the same item fails closed on the next run."""
+    item_repo(tmp_path)
+    tracker = FakeTracker(
+        git_runner=git_runner_for(tmp_path), trusted_authors=(APP,)
+    )
+    item = ready_item(tracker, author=APP, author_association="NONE")
+
+    tracker.trusted_authors = ()
+    with pytest.raises(RunRefused, match="restate"):
+        run_item(tmp_path, item_cfg(), tracker, input=f"#{item.ref}")
+
+    tracker.trusted_authors = ("other-app[bot]",)
+    with pytest.raises(RunRefused, match="restate"):
+        run_item(tmp_path, item_cfg(), tracker, input=f"#{item.ref}")
+
+
+def test_abandoning_an_app_run_leaves_trust_and_artifacts_unchanged(tmp_path):
+    """#176 abandon seam: abandon deletes the run, not the App's artifacts."""
+    item_repo(tmp_path)
+    tracker = FakeTracker(
+        git_runner=git_runner_for(tmp_path), trusted_authors=(APP,)
+    )
+    item = ready_item(tracker, author=APP, author_association="NONE")
+    result = run_item(
+        tmp_path, item_cfg(), tracker, builder_model(), passing_reviewer()
+    )
+    assert isinstance(result, Pending)
+    calls = list(tracker.calls)
+
+    abandon(result.run, root=tmp_path)
+
+    assert tracker.calls == calls
+    assert tracker.trusted_authors == (APP,)
+    assert tracker.read_work_item(item.ref).comments == ()
+    with pytest.raises(RunRefused, match="no run"):
+        resume(
+            result.run,
+            None,
+            root=tmp_path,
+            cfg=item_cfg(),
+            init=models_init(),
+            tracker=tracker,
+        )

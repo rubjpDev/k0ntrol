@@ -893,3 +893,27 @@ def test_triage_public_functions_have_complete_annotations():
             parameter.annotation is not inspect.Parameter.empty
             for parameter in signature.parameters.values()
         ), name
+
+
+# --- trusted GitHub App identities (#176) -------------------------------------
+
+APP = "acme-k0[bot]"
+
+
+def test_an_app_authored_item_is_triaged_when_the_app_is_trusted(tmp_path):
+    """#176: an allowlisted App's triage item reaches PLANNER's gate."""
+    git_repo(tmp_path)
+    tracker = FakeTracker(trusted_authors=(APP,))
+    item = tracker.create_work_item(
+        ITEM_TITLE, ITEM_BODY, author=APP, author_association="NONE"
+    )
+
+    result = run_triage(
+        tmp_path,
+        triage_cfg(),
+        tracker,
+        planner_model(round_call([]), outcome_call()),
+        input=f"#{item.ref}",
+    )
+
+    assert isinstance(result, Pending) and result.gate == "outcome"

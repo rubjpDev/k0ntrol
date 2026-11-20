@@ -244,9 +244,16 @@ class FakeRunner:
 class FakeTracker:
     """In-memory Tracker for tests; see module docstring."""
 
-    def __init__(self, *, repo: str = "acme/widgets", git_runner=None):
+    def __init__(
+        self,
+        *,
+        repo: str = "acme/widgets",
+        git_runner=None,
+        trusted_authors: tuple[str, ...] = (),
+    ):
         self.repo = repo
         self.git_runner = git_runner
+        self.trusted_authors = trusted_authors
         self.calls: list[tuple] = []
         self._items: dict[str, dict] = {}
         self._labels: set[str] = set()

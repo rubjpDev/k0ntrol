@@ -12,6 +12,7 @@ from k0ntrol.tracker.protocol import (
     WorkItems,
     comment_marker,
     is_k0_work_item,
+    is_trusted_author,
 )
 
 __all__ = [
@@ -26,4 +27,5 @@ __all__ = [
     "WorkItems",
     "comment_marker",
     "is_k0_work_item",
+    "is_trusted_author",
 ]

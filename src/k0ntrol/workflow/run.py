@@ -49,14 +49,18 @@ from k0ntrol.events import (  # noqa: E402
     run_cost,
 )
 from k0ntrol.memory.refresh import refresh_memory  # noqa: E402
-from k0ntrol.tools.tracker import latest_agent_brief  # noqa: E402
+from k0ntrol.tools.tracker import latest_agent_brief_comment  # noqa: E402
 from k0ntrol.memory.scan import ScanError  # noqa: E402
 from k0ntrol.otel import build_run_trace, otel_callbacks  # noqa: E402
 from k0ntrol.providers import free_checks, has_errors, report_lines  # noqa: E402
 from k0ntrol.tracker import (  # noqa: E402
+    Comment,
     TRUSTED_ASSOCIATIONS,
+    Tracker,
     TrackerError,
+    WorkItem,
     is_k0_work_item,
+    is_trusted_author,
 )
 from k0ntrol.tracker.github import GhTracker, subprocess_runner  # noqa: E402
 from k0ntrol.workflow.change import (  # noqa: E402
@@ -226,7 +230,13 @@ def start(
                 session=session,
             )
             graph.invoke(
-                _initial_state(kind, input_text, cfg, item),
+                _initial_state(
+                    kind,
+                    input_text,
+                    cfg,
+                    item,
+                    tracker.trusted_authors if tracker else (),
+                ),
                 config=config,
                 durability="sync",
             )
@@ -279,6 +289,7 @@ def resume(
         graph = _BUILDERS[kind](ctx, saver)
         state = graph.get_state(_thread(run_id))
         _refuse_finished(state, run_id)
+        _refuse_revoked_app_authors(state.values, tracker)
         _bind_events(ctx, root, run_id, write)
         ctx.trace = tracing(run_id)
         session_id = _session_id(ctx, state.values)
@@ -570,7 +581,9 @@ def _optional_tracker(kind: str, cfg: dict, root: Path):
     """The tracker a run may use but needn't: a configured GitHub tracker
     joins ``/plan`` runs so the hand off can publish (#127)."""
     if kind == "plan" and cfg.get("tracker") == "github":
-        return GhTracker(subprocess_runner(root))
+        return GhTracker(
+            subprocess_runner(root), trusted_authors=_trusted_authors(cfg)
+        )
     return None
 
 
@@ -583,7 +596,14 @@ def _required_tracker(kind: str, cfg: dict, root: Path):
         raise RunRefused(f"/{kind} only works with GitHub in 0.1.0, not {unshipped}")
     if cfg.get("tracker") is None:
         raise RunRefused(f"/{kind} needs a tracker; run k0 init --tracker github")
-    return GhTracker(subprocess_runner(root))
+    return GhTracker(
+        subprocess_runner(root), trusted_authors=_trusted_authors(cfg)
+    )
+
+
+def _trusted_authors(cfg: dict) -> tuple[str, ...]:
+    """The config's expressly trusted author logins (#176, ADR 0016)."""
+    return tuple(cfg.get("trusted_authors") or ())
 
 
 def _log_failed(
@@ -703,7 +723,9 @@ def _work_item(input_text: str, tracker, root: Path, kind: str):
         _refuse_ended_work(item, tracker, root)
     except TrackerError as error:
         raise RunRefused(str(error)) from error
-    if item.author_association not in TRUSTED_ASSOCIATIONS:
+    if not is_trusted_author(
+        item.author, item.author_association, tracker.trusted_authors
+    ):
         raise RunRefused(
             f"work item #{ref} was written by {item.author} "
             f"({item.author_association}), not a trusted author — "
@@ -732,7 +754,18 @@ def _refuse_ended_work(item, tracker, root: Path) -> None:
         )
 
 
-def _initial_state(kind: str, input_text: str, cfg: dict, item=None) -> dict:
+def _initial_state(
+    kind: str,
+    input_text: str,
+    cfg: dict,
+    item: WorkItem | None = None,
+    trusted_authors: tuple[str, ...] = (),
+) -> dict:
+    brief = (
+        latest_agent_brief_comment(item, trusted_authors)
+        if kind == "implement" and item is not None
+        else None
+    )
     state = {
         "kind": kind,
         "task": str(input_text).strip(),
@@ -740,15 +773,27 @@ def _initial_state(kind: str, input_text: str, cfg: dict, item=None) -> dict:
         "max_attempts": cfg.get("max_attempts", 2),
         "validator_ok": False,
         "limit": None,
+        "required_app_authors": _required_app_authors(item, brief),
     }
-    state.update(_kind_state(kind, state["task"], cfg, item))
+    state.update(_kind_state(kind, cfg, item, brief))
     return state
 
 
-def _kind_state(kind: str, task: str, cfg: dict, item) -> dict:
+def _required_app_authors(*sources: WorkItem | Comment | None) -> list[str]:
+    """Authors of cached intake content admitted solely by the App allowlist."""
+    return sorted({
+        source.author
+        for source in sources
+        if source is not None and source.author_association not in TRUSTED_ASSOCIATIONS
+    })
+
+
+def _kind_state(
+    kind: str, cfg: dict, item: WorkItem | None, brief: Comment | None
+) -> dict:
     """The per-kind fields layered over the shared run state."""
     if kind == "implement":
-        return _implement_state(item)
+        return _implement_state(item, brief)
     if kind == "plan":
         return _plan_state(cfg, item)
     if kind == "research":
@@ -852,7 +897,7 @@ def _plan_state(cfg: dict, item) -> dict:
     return state
 
 
-def _implement_state(item) -> dict:
+def _implement_state(item: WorkItem | None, brief: Comment | None) -> dict:
     """The ``/implement`` fields layered over the shared run state.
 
     For ``/implement #<n>`` the run's task is the item's latest agent
@@ -871,7 +916,7 @@ def _implement_state(item) -> dict:
     if item is not None:
         state.update(
             {
-                "task": latest_agent_brief(item) or item.body,
+                "task": brief.body if brief is not None else item.body,
                 "item_ref": item.ref,
                 "item_title": item.title,
                 "conventions_review_attempts": 0,
@@ -978,6 +1023,16 @@ def _refuse_finished(state, run_id: str) -> None:
         return
     outcome = state.values.get("outcome", "finished")
     raise RunRefused(f"run {run_id} already ended {outcome}")
+
+
+def _refuse_revoked_app_authors(values: dict, tracker: Tracker | None) -> None:
+    allowed = tracker.trusted_authors if tracker is not None else ()
+    missing = set(values.get("required_app_authors", ())).difference(allowed)
+    if missing:
+        raise RunRefused(
+            "cannot resume: checkpointed authors are no longer trusted: "
+            f"{', '.join(sorted(missing))}. Abandon the run and start it again."
+        )
 
 
 def _advance(

@@ -345,3 +345,33 @@ def test_full_refuses_a_host_or_tracker_other_than_github(tmp_path, cfg, name):
 
     with pytest.raises(RunRefused, match=f"only works with GitHub in 0.1.0, not {name}"):
         _tracker_for("full", cfg, tmp_path, None, required=True)
+
+
+# --- trusted_authors: expressly trusted GitHub App logins (#176) --------------
+
+
+def test_trusted_authors_is_absent_by_default(cfg):
+    assert "trusted_authors" not in cfg
+
+
+def test_trusted_authors_accepts_app_logins(cfg):
+    cfg["trusted_authors"] = ["acme-k0[bot]", "other-app[bot]"]
+    validate_config(cfg)
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "acme-k0[bot]",
+        7,
+        ["acme-k0[bot]", 7],
+        ["acme-k0[bot]", ""],
+        ["acme-k0[bot]", None],
+        ["mallory"],  # a human login: only App identities belong (#176)
+        [" acme-k0[bot]"],  # padded: never matches a login, reject instead
+    ],
+)
+def test_trusted_authors_must_be_a_list_of_app_logins(cfg, value):
+    cfg["trusted_authors"] = value
+    with pytest.raises(ConfigError, match="trusted_authors"):
+        validate_config(cfg)
