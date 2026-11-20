@@ -177,6 +177,42 @@ def test_recover_restores_the_slice_and_retries_to_green(tmp_path):
     assert (tmp_path / "tests" / "test_calc.py").read_text() == TEST_SRC
 
 
+def test_recovery_preserves_docs_written_before_the_slice(tmp_path):
+    """Docs written while green — before the slice's first test write —
+    are pre-slice work, not the slice's: ``recover`` restores only the
+    journaled slice paths and leaves them standing (#174)."""
+    git_repo(tmp_path)
+    cfg = implement_cfg()
+    builder = FakeChatModel(
+        messages=[
+            write_call("docs/notes.md", "# pre-slice notes\n"),
+            write_call("tests/test_calc.py", BAD_TEST),
+            run_tests_call(),
+            write_call("tests/test_calc.py", "fix one\n"),
+            write_call("tests/test_calc.py", "fix two\n"),
+            write_call("tests/test_calc.py", "fix three\n"),
+        ]
+    )
+    pending = run_implement(tmp_path, cfg, seams_model())
+    assert isinstance(pending, Pending) and pending.gate == "seam"
+    result = resume(
+        pending.run, "ok", root=tmp_path, cfg=cfg, init=models_init(builder)
+    )
+    assert isinstance(result, Pending) and result.gate == "recovery"
+
+    recovered = resume(
+        result.run,
+        "recover",
+        root=tmp_path,
+        cfg=cfg,
+        init=models_init(green_builder()),
+    )
+
+    assert isinstance(recovered, Pending) and recovered.gate == "diff"
+    assert (tmp_path / "docs" / "notes.md").read_text() == "# pre-slice notes\n"
+    assert (tmp_path / "tests" / "test_calc.py").read_text() == TEST_SRC
+
+
 def test_stop_leaves_the_tree_untouched(tmp_path):
     """Declined recovery: the run ends stuck, the slice's files stay (#174)."""
     pending = to_recovery_gate(tmp_path)

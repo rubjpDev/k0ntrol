@@ -15,8 +15,10 @@ index is touched — when one is already staged, conflicted, or inside
 ``HEAD``'s tree. ``checked_push`` inspects every outgoing commit's tree
 (not just touched paths, so a merge or an add-then-remove still shows)
 against the live origin refs — a forged or stale remote-tracking ref
-cannot shrink the range. Refusals name paths, never contents, and k0
-never rewrites history, refs, or the developer's index.
+cannot shrink the range, and neither can a distinct push endpoint: when
+the effective push URL is not the fetch URL ``ls-remote`` asks, the
+whole branch counts as outgoing. Refusals name paths, never contents,
+and k0 never rewrites history, refs, or the developer's index.
 """
 
 import subprocess
@@ -94,8 +96,12 @@ def _refuse_unsafe(run: CommandRunner) -> None:
         raise _refuse(
             sorted(head),
             "commit refused: local-only run files already in HEAD's tree",
-            "the new commit would keep them — untrack them yourself: "
-            "git rm --cached <path>",
+            "the new commit would keep them — untrack and commit the "
+            "removal yourself (git rm --cached <path>, then git commit): "
+            "k0 refuses even the staged untrack, so that cleanup commit "
+            "is yours by hand. If the commit that leaked them is still "
+            "outgoing the push refuses it too — k0 never rewrites "
+            "history, untangle it by hand",
         )
     staged = _staged_local_only(run)
     if staged:
@@ -178,7 +184,8 @@ def _outgoing_shas(run: CommandRunner, branch: str) -> list[str]:
 
     ``refs/remotes/origin/*`` is local state a human or a stale fetch
     can fake, so the baseline is ``git ls-remote``: when it cannot be
-    verified the whole branch counts as outgoing — fail closed.
+    verified — or when push may land somewhere it never asked — the
+    whole branch counts as outgoing. Fail closed.
     """
     remote = _remote_shas(run)
     argv = ["git", "rev-list", branch]
@@ -189,7 +196,10 @@ def _outgoing_shas(run: CommandRunner, branch: str) -> list[str]:
 
 def _remote_shas(run: CommandRunner) -> list[str]:
     """Commit shas the real ``origin`` advertises, filtered to objects
-    held locally; empty when the remote cannot be asked."""
+    held locally; empty when the remote cannot be asked or its answer
+    says nothing about the push destination."""
+    if _push_targets_differ(run):
+        return []
     out = run(["git", "ls-remote", "origin"])
     if out.returncode != 0:
         return []
@@ -203,6 +213,22 @@ def _remote_shas(run: CommandRunner) -> list[str]:
         for sha in sorted(shas)
         if run(["git", "cat-file", "-e", f"{sha}^{{commit}}"]).returncode == 0
     ]
+
+
+def _push_targets_differ(run: CommandRunner) -> bool:
+    """Whether push may land somewhere ``ls-remote origin`` never asked.
+
+    ``ls-remote`` reads the fetch endpoint; configured ``pushurl``s can
+    send the history elsewhere, and an endpoint's advertised refs cannot
+    prove a commit is already at a destination it is not. Anything that
+    cannot be verified counts as different — a missing or unreadable
+    answer must never shrink the outgoing range.
+    """
+    fetch = run(["git", "remote", "get-url", "origin"])
+    push = run(["git", "remote", "get-url", "--push", "--all", "origin"])
+    if fetch.returncode != 0 or push.returncode != 0:
+        return True
+    return push.stdout.split() != fetch.stdout.split()[:1]
 
 
 def _must(run: CommandRunner, argv: list[str]) -> subprocess.CompletedProcess:

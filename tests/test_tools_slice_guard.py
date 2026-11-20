@@ -6,6 +6,7 @@ written, test writes are refused. A green result moves back. Markdown under
 ``docs/`` and ``GLOSSARY.md`` pass in either state.
 """
 
+import json
 import subprocess
 import sys
 import threading
@@ -17,7 +18,7 @@ from k0ntrol.tools.errors import SliceRecoveryNeeded, ToolError
 from k0ntrol.tools.run_tests import make_run_tests
 from k0ntrol.tools.runner import CommandResult
 from k0ntrol.tools.slice_guard import SliceGuard
-from k0ntrol.tools.slice_journal import SliceJournal
+from k0ntrol.tools.slice_journal import SliceJournal, restore_slice
 from k0ntrol.tools.write import make_edit_file, make_write_file
 
 RED_CMD = f'{sys.executable} -c "import sys; sys.exit(1)"'
@@ -442,6 +443,99 @@ def test_writes_through_the_tools_fill_the_slice_journal(root):
     edit.invoke({"path": "src/app.py", "old": "return 1", "new": "return 2"})
 
     assert journal.paths == ["src/app.py", "tests/test_new.py"]
+
+
+def test_writes_before_the_slices_first_test_write_stay_out_of_the_journal(root):
+    """The journal opens at the slice's first permitted test write:
+    green-state docs writes before it are pre-slice work that recovery
+    may not touch (#174)."""
+    journal = _journaled(root)
+    guard = SliceGuard(journal=journal)
+    write, edit, run_tests = _tools(root, guard, RED_CMD)
+
+    write.invoke({"path": "docs/notes.md", "content": "# notes\n"})
+    assert journal.paths == []
+
+    write.invoke({"path": "tests/test_new.py", "content": "x\n"})
+    run_tests.invoke({"paths": []})
+    write.invoke({"path": "docs/adr/0009-x.md", "content": "# adr\n"})
+    edit.invoke({"path": "src/app.py", "old": "return 1", "new": "return 2"})
+
+    assert journal.paths == [
+        "docs/adr/0009-x.md",
+        "src/app.py",
+        "tests/test_new.py",
+    ]
+
+
+def test_a_refactor_start_writes_stay_out_of_the_journal(root):
+    """A refactor start's code and docs writes are pre-slice too: the
+    journal opens at the first test write the green guard permits (#174)."""
+    journal = _journaled(root)
+    guard = SliceGuard(start="refactor", journal=journal)
+    write, edit, _ = _tools(root, guard, RED_CMD)
+
+    edit.invoke({"path": "src/app.py", "old": "return 1", "new": "return 2"})
+    write.invoke({"path": "docs/refactor.md", "content": "# refactor\n"})
+    assert journal.paths == []
+
+    with pytest.raises(ToolError):  # the denied first test write flips to green
+        write.invoke({"path": "tests/test_new.py", "content": "x\n"})
+    assert journal.paths == []
+
+    write.invoke({"path": "tests/test_new.py", "content": "x\n"})
+    assert journal.paths == ["tests/test_new.py"]
+
+
+def test_recovery_keeps_a_pre_slice_edit_to_a_path_the_slice_rewrote(root):
+    """A path edited before the slice and written again inside it
+    restores to its pre-slice bytes: the earlier edit is preserved, not
+    rolled back to the run's start (#174)."""
+    journal = _journaled(root)
+    guard = SliceGuard(journal=journal)
+    write, _, run_tests = _tools(root, guard, RED_CMD)
+
+    write.invoke({"path": "docs/notes.md", "content": "pre-slice notes\n"})
+    write.invoke({"path": "tests/test_new.py", "content": "x\n"})
+    run_tests.invoke({"paths": []})
+    write.invoke({"path": "docs/notes.md", "content": "in-slice notes\n"})
+
+    result = restore_slice(root, journal.dir, expected_slice=journal.slice)
+
+    assert result.applied
+    assert (root / "docs" / "notes.md").read_text() == "pre-slice notes\n"
+    assert not (root / "tests" / "test_new.py").exists()
+
+
+def test_a_leftover_manifest_from_a_consumed_slice_is_reinitialized(root):
+    """The slice id rotates when a slice ends green: a stale manifest
+    carrying the old id can never be read as the active slice (#174)."""
+    journal = _journaled(root)
+    guard = SliceGuard(journal=journal)
+    write, _, run_tests = _tools(root, guard, GREEN_CMD)
+    write.invoke({"path": "tests/test_new.py", "content": "x\n"})
+    consumed = journal.slice
+    run_tests.invoke({"paths": []})
+    assert journal.slice != consumed
+
+    stale = {
+        "slice": consumed,
+        "restore": None,
+        "paths": {
+            "src/app.py": {
+                "before": {"kind": "absent"},
+                "after": {"kind": "file", "sha": "0" * 64},
+                "parents": [],
+            }
+        },
+    }
+    journal.dir.mkdir(parents=True, exist_ok=True)
+    (journal.dir / "manifest.json").write_text(json.dumps(stale))
+
+    write.invoke({"path": "tests/test_next.py", "content": "y\n"})
+    manifest = json.loads((journal.dir / "manifest.json").read_text())
+    assert manifest["slice"] == journal.slice
+    assert list(manifest["paths"]) == ["tests/test_next.py"]
 
 
 def test_the_escalation_carries_the_journal_identity(root):

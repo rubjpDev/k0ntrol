@@ -470,6 +470,9 @@ def test_commit_stages_all_and_returns_whether_it_committed():
 
 def test_push_uses_upstream_tracking():
     runner = FakeRunner()
+    runner.script(
+        ["git", "remote", "get-url"], stdout="git@example.com:o/r.git\n"
+    )
     runner.script(["git", "ls-remote"], stdout="")
     runner.script(["git", "rev-list"], stdout="")
     runner.script(["git", "push"])

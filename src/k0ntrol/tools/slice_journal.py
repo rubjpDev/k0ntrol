@@ -1,9 +1,11 @@
 """The slice journal: the durable record of one active slice's writes (#174).
 
-While a slice is open, every write the guard lets through is journaled under
-``.k0-mem/snapshots/<run>/slice/`` — the path's pre-slice bytes (or its
-absence) under ``tree/`` plus the digest of what the agent last wrote, all in
-``manifest.json``. The manifest is the crash-safe contract: the recovery
+While a slice is open — from its first permitted test write to the green
+verdict (or the refactor seam) that ends it — every write the guard lets
+through is journaled under ``.k0-mem/snapshots/<run>/slice/`` — the
+path's pre-slice bytes (or its absence) under ``tree/`` plus the digest
+of what the agent last wrote, all in ``manifest.json``. The manifest is
+the crash-safe contract: the recovery
 gate's ``recover`` restores exactly the journaled paths — pre-slice bytes
 back, slice-created files removed — and refuses a journal that is missing,
 malformed, another slice's (stale), or conflicting (current bytes are
@@ -110,13 +112,16 @@ class SliceJournal:
     def clear(self) -> None:
         """The slice ended green: nothing left to recover — drop the
         journal plus the ``snapshots/<run>`` dirs only it created (a
-        run snapshot or another journal's files keep them)."""
+        run snapshot or another journal's files keep them), and rotate
+        the slice id so a manifest the next slice did not write can
+        never be read as its own."""
         shutil.rmtree(self.dir, ignore_errors=True)
         for parent in (self.dir.parent, self.dir.parent.parent):
             try:
                 parent.rmdir()
             except OSError:
                 break
+        self.slice = uuid.uuid4().hex
 
     def _open(self) -> dict:
         """The open manifest for this slice, reinitialised when the one on
@@ -347,10 +352,7 @@ def _target_state(root: Path, relative: str) -> dict:
     A symlink — even a working one — and a directory are ``other``: never
     the regular file a write left nor the absence a created file expects.
     """
-    target = root / relative
-    if target.is_symlink() or (target.exists() and not target.is_file()):
-        return {"kind": "other"}
-    return _state_of(target)
+    return _state_of(root / relative)
 
 
 def _state_of(path: Path) -> dict:

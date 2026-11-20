@@ -9,6 +9,14 @@ brief built out of these fields (ADR 0002).
 from typing import Any, TypedDict
 
 
+class Recovery(TypedDict, total=False):
+    """The pending recovery the gate decides on (#174)."""
+
+    slice: str | None  # the journaled slice id the gate restores
+    paths: list[str]  # the journaled paths the slice wrote
+    refusal: str | None  # why the last ``recover`` answer was refused
+
+
 class RunState(TypedDict, total=False):
     """One run's state; every field is a plain msgpack-safe value."""
 
@@ -80,7 +88,7 @@ class RunState(TypedDict, total=False):
     # #174: the recovery gate after the slice guard's denial bound ran out.
     # ``recover`` restores the journaled slice paths and retries fresh;
     # ``stop`` ends stuck; a refused journal asks again with the reason.
-    recovery: dict | None  # {"slice", "paths", "refusal"} while one is pending
+    recovery: Recovery | None  # {"slice", "paths", "refusal"} while one is pending
     recoveries: int  # human-approved slice recoveries so far
     recovery_route: str  # the recovery gate's decision: a node name
 

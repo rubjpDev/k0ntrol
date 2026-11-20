@@ -17,6 +17,7 @@ from langchain_core.messages import AIMessage
 
 from fakes import STUB_TEST_CMD, FakeChatModel, FakeTracker, cfg_with
 from k0ntrol.tracker import TrackerError
+from k0ntrol.tracker.local_files import checked_push
 from k0ntrol.tracker.local_files import commit as local_commit
 from k0ntrol.tracker.local_files import is_local_only
 from k0ntrol.workflow import Outcome, Pending, RunRefused, abandon, resume, start
@@ -369,8 +370,16 @@ def test_start_refuses_a_run_whose_head_carries_a_private_path(tmp_path):
     with pytest.raises(TrackerError) as error:
         run_item(root, item_cfg(), tracker, builder_model())
 
-    assert leaked in str(error.value)
-    assert SECRET not in str(error.value)
+    message = str(error.value)
+    assert leaked in message
+    assert SECRET not in message
+    # the guidance is truthful: the cleanup commit is the human's to
+    # make by hand — k0 refuses to carry even the staged untrack —
+    # and a leak still outgoing is refused at push, never rewritten
+    assert "rm --cached" in message
+    assert "commit" in message
+    assert "outgoing" in message
+    assert "rewrites history" in message
     # the staged untrack and the log are exactly as found
     staged = git(root, "diff", "--cached", "--name-status").stdout
     assert f"D\t{leaked}" in staged
@@ -557,6 +566,43 @@ def test_resume_refuses_the_push_despite_a_forged_origin_ref(tmp_path):
     assert (
         git(root, "rev-parse", f"refs/remotes/origin/{BRANCH}").stdout.strip()
         == head
+    )
+
+
+def test_a_distinct_push_endpoint_cannot_launder_a_private_ancestor(tmp_path):
+    """``git ls-remote origin`` asks origin's FETCH endpoint; a distinct
+    ``pushurl`` means those advertised refs prove nothing about the
+    destination. A private ancestor the fetch endpoint already has would
+    still be shipped to a push endpoint that never saw it — the whole
+    branch is checked instead (#173)."""
+    root, fetch, push = (
+        tmp_path / "repo",
+        tmp_path / "fetch.git",
+        tmp_path / "push.git",
+    )
+    repo_with_origin(root, fetch)
+    leaked = ".k0-mem/events.jsonl"
+    (root / ".k0-mem").mkdir()
+    (root / leaked).write_text(f"{SECRET} shipped\n", encoding="utf-8")
+    git(root, "add", "-A")
+    git(root, "commit", "-qm", "an old leak already on the fetch origin")
+    git(root, "push", "-q", "origin", "main")
+    # the push destination is a different bare repo that never saw it
+    subprocess.run(["git", "init", "-q", "--bare", str(push)], check=True)
+    git(root, "remote", "set-url", "--push", "origin", str(push))
+    before = git(root, "log", "--format=%H").stdout
+
+    with pytest.raises(TrackerError) as error:
+        checked_push(runner_for(root), "main")
+
+    message = str(error.value)
+    assert leaked in message
+    assert SECRET not in message
+    # history and config are exactly as found — k0 never rewrites either
+    assert git(root, "log", "--format=%H").stdout == before
+    assert (
+        git(root, "remote", "get-url", "--push", "origin").stdout.strip()
+        == str(push)
     )
 
 

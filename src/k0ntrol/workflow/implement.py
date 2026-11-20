@@ -38,7 +38,7 @@ from langgraph.graph.state import CompiledStateGraph
 from langgraph.types import interrupt
 
 from k0ntrol.tools.errors import SliceRecoveryNeeded
-from k0ntrol.tools.slice_guard import SliceStart
+from k0ntrol.tools.slice_guard import MAX_SLICE_DENIALS, SliceStart
 from k0ntrol.tools.slice_journal import restore_slice
 from k0ntrol.tools.tracker import render_work_item
 from k0ntrol.tracker import TRUSTED_ASSOCIATIONS, TrackerError
@@ -76,7 +76,7 @@ from k0ntrol.workflow.routers import (
     route_review_gate,
     route_seam_gate,
 )
-from k0ntrol.workflow.state import RunState
+from k0ntrol.workflow.state import Recovery, RunState
 
 
 def build_implement_graph(
@@ -323,7 +323,8 @@ def make_recovery_gate(ctx: RunContext) -> Callable[[dict], dict]:
     """
 
     def node(state: dict) -> dict:
-        recovery = state.get("recovery") or {}
+        pending: Recovery | None = state.get("recovery")
+        recovery: Recovery = pending or {}
         decision = interrupt(
             {
                 "gate": "recovery",
@@ -362,11 +363,12 @@ def make_recovery_gate(ctx: RunContext) -> Callable[[dict], dict]:
     return node
 
 
-def _recovery_detail(recovery: dict) -> str:
+def _recovery_detail(recovery: Recovery) -> str:
     """What the gate shows: the slice's journaled paths, the last refusal."""
     paths = recovery.get("paths") or []
     lines = [
-        "The slice guard refused 3 test writes in the active red slice —",
+        f"The slice guard refused {MAX_SLICE_DENIALS} test writes in the "
+        "active red slice —",
         "the test file itself may be broken.",
         "",
         "recover restores what the slice wrote and reruns IMPLEMENTER:",
@@ -378,7 +380,7 @@ def _recovery_detail(recovery: dict) -> str:
     return "\n".join(lines)
 
 
-def _recovery_context(recovery: dict, feedback: str) -> str:
+def _recovery_context(recovery: Recovery, feedback: str) -> str:
     """The retry context for the recovered run: what was rolled back."""
     paths = ", ".join(recovery.get("paths") or []) or "(none)"
     parts = [
@@ -553,10 +555,13 @@ def make_post_axis_review(
 #: The axes the change must be reviewed on before ``ok`` can mark it ready.
 _AXES = ("conventions", "contract")
 
+#: One axis's availability for the change under review (#175).
+ReviewStatus = Literal["missing", "refused", "stale", "completed"]
+
 
 def review_status(
     review: dict | None, published: str | None, local: str
-) -> str:
+) -> ReviewStatus:
     """One axis's availability for the change under review.
 
     ``completed`` only when REVIEWER recorded its ``completed`` verdict

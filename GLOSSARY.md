@@ -63,7 +63,7 @@ A cap the harness enforces on how many model calls one agent run may make, how m
 _Avoid_: Budget, quota
 
 **Slice journal**:
-The durable per-path record of what IMPLEMENTER wrote during one red-to-green slice, kept under `.k0-mem/snapshots/`. When a red slice's test-write refusals hit their bound the run pauses at the recovery gate, and `recover` restores exactly the journaled paths.
+The durable per-path record of what IMPLEMENTER wrote during one red-to-green slice, kept under `.k0-mem/snapshots/`. It opens at the slice's first permitted test write and closes at the green verdict or seam that ends the slice, so writes before that boundary are never journaled. When a red slice's test-write refusals hit their bound the run pauses at the recovery gate, and `recover` restores exactly the journaled paths.
 _Avoid_: Backup, undo list, checkpoint (a checkpoint is the graph's own resume state)
 
 **Event**:
