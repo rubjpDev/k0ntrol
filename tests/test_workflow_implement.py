@@ -13,6 +13,7 @@ from functools import partial
 from pathlib import Path
 
 import pytest
+from langchain.agents.middleware import model_retry
 from langchain_core.messages import AIMessage
 
 from fakes import STUB_TEST_CMD, FakeChatModel, FakeTracker, cfg_with, doctor_seam
@@ -23,6 +24,7 @@ from k0ntrol.workflow import (
     Pending,
     RunRefused,
     Unfinished,
+    abandon,
     resume,
     start,
 )
@@ -1587,6 +1589,78 @@ class _FlakyPostTracker(FakeTracker):
         if node == "post_conventions" and not self._flaked:
             self._flaked = True
             raise TrackerError("the post's answer was lost")
+
+
+class ReadTimeoutError(Exception):
+    """botocore's Converse read timeout shape: no ``status_code`` (#177)."""
+
+
+@pytest.fixture
+def no_backoff(monkeypatch):
+    monkeypatch.setattr(model_retry.time, "sleep", lambda seconds: None)
+
+
+def test_a_review_dying_on_bedrock_timeouts_resumes_without_reposting(
+    tmp_path, no_backoff
+):
+    """``contract_review`` exhausting its bounded retries ends the invoke,
+    not the run: resume re-runs only that node — the Conventions review
+    already posted is never duplicated (#177)."""
+    item_repo(tmp_path)
+    tracker = FakeTracker(git_runner=git_runner_for(tmp_path))
+    ready_item(tracker)
+    reviewer = reviewer_model(
+        review_call("conventions pass", [], "c1"),
+        ReadTimeoutError("converse read timed out"),
+        ReadTimeoutError("converse read timed out"),
+        ReadTimeoutError("converse read timed out"),
+    )
+
+    with pytest.raises(ReadTimeoutError):
+        run_item(tmp_path, item_cfg(), tracker, builder_model(), reviewer)
+
+    run_id = events(tmp_path)[0]["run"]
+    change = tracker.read_change("k0/1-calc-answers-42")
+    assert len(tracker.reviews_on(change.ref)) == 1  # conventions posted
+
+    result = resume(
+        run_id,
+        None,
+        root=tmp_path,
+        cfg=item_cfg(),
+        init=models_init(reviewer_model(review_call("contract pass", [], "c2"))),
+        tracker=tracker,
+    )
+
+    assert isinstance(result, Pending) and result.gate == "review"
+    assert len(tracker.reviews_on(change.ref)) == 2  # contract once, no repost
+    assert len(reviewer.invocations) == 4  # 1 conventions + 3 bounded tries
+
+
+def test_abandoning_a_timed_out_run_sends_no_more_attempts(tmp_path, no_backoff):
+    """``abandon`` drops the checkpoint: the run cannot resume, so no
+    further invocation attempt is ever sent (#177)."""
+    item_repo(tmp_path)
+    tracker = FakeTracker(git_runner=git_runner_for(tmp_path))
+    ready_item(tracker)
+    failing = reviewer_model(*[ReadTimeoutError("converse")] * 3)
+
+    with pytest.raises(ReadTimeoutError):
+        run_item(tmp_path, item_cfg(), tracker, builder_model(), failing)
+
+    run_id = events(tmp_path)[0]["run"]
+    abandon(run_id, root=tmp_path)
+
+    with pytest.raises(RunRefused):
+        resume(
+            run_id,
+            None,
+            root=tmp_path,
+            cfg=item_cfg(),
+            init=models_init(reviewer_model(review_call("contract pass", [], "c2"))),
+            tracker=tracker,
+        )
+    assert len(failing.invocations) == 3
 
 
 def test_a_review_hitting_its_call_limit_pauses_mid_reviews(tmp_path):
