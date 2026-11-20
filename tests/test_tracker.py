@@ -4,7 +4,7 @@ import pytest
 
 from fakes import FakeTracker
 from k0ntrol.tools.errors import ToolError
-from k0ntrol.tools.tracker import latest_agent_brief, tracker_read_tools
+from k0ntrol.tools.tracker import latest_agent_brief, render_work_item, tracker_read_tools
 from k0ntrol.tracker import TrackerError, comment_marker
 
 
@@ -304,6 +304,21 @@ def test_a_trusted_app_item_and_comments_reach_the_agent():
     assert "UNTRUSTED" not in out
 
 
+def test_render_keeps_app_comments_with_a_one_shot_allowlist():
+    tracker = FakeTracker()
+    item = tracker.create_work_item(
+        "Spec", "build the thing", author=APP, author_association="NONE"
+    )
+    tracker.add_comment(
+        item.ref, "clarify the scope", author=APP, author_association="NONE"
+    )
+
+    rendered = render_work_item(tracker.read_work_item(item.ref), iter([APP]))
+
+    assert "clarify the scope" in rendered
+    assert "Dropped" not in rendered
+
+
 def test_an_unlisted_app_is_still_refused():
     tracker = FakeTracker(trusted_authors=(APP,))
     item = tracker.create_work_item(
@@ -349,6 +364,19 @@ def test_a_trusted_app_agent_brief_is_the_contract():
     assert latest_agent_brief(item, tracker.trusted_authors) == (
         "## Agent Brief\n\napp brief"
     )
+
+
+def test_latest_brief_checks_all_comments_with_a_one_shot_allowlist():
+    tracker = FakeTracker()
+    item = tracker.create_work_item("Spec", "build the thing")
+    for version in ("first", "latest"):
+        tracker.add_comment(
+            item.ref, f"## Agent Brief\n\n{version}", author=APP, author_association="NONE"
+        )
+
+    brief = latest_agent_brief(tracker.read_work_item(item.ref), iter([APP]))
+
+    assert brief == "## Agent Brief\n\nlatest"
 
 
 def test_an_unlisted_app_agent_brief_is_never_the_contract():
