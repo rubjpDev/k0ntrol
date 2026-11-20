@@ -26,6 +26,7 @@ import re
 import shlex
 import subprocess
 import sys
+from functools import partial
 from pathlib import Path
 from typing import Any, Iterator
 
@@ -187,6 +188,22 @@ def cfg_with(agent_entries=None, helpers=None, providers=None):
     if providers is not None:
         cfg["providers"] = providers
     return cfg
+
+
+def doctor_seam(**seams):
+    """The real ``free_checks`` behind a run's ``check`` seam, env stubbed:
+    extras installed, a tool-calling model profile, shell checks ok and a
+    provider credential — each overridable per test."""
+    from k0ntrol.providers import free_checks
+
+    defaults = {
+        "init": recording_init([], profiles={"any": {"tool_calling": True}}),
+        "importable": lambda module: True,
+        "run": lambda argv, root: (0, ""),
+        "environ": {"ANTHROPIC_API_KEY": "x"},
+    }
+    defaults.update(seams)
+    return partial(free_checks, **defaults)
 
 
 class FakeRunner:

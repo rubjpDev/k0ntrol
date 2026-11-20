@@ -39,6 +39,7 @@ os.environ.setdefault("LANGGRAPH_STRICT_MSGPACK", "true")
 from langgraph.checkpoint.sqlite import SqliteSaver  # noqa: E402
 
 from k0ntrol import __version__  # noqa: E402
+from k0ntrol.agents import ALLOWLISTS  # noqa: E402
 from k0ntrol.events import (  # noqa: E402
     EventWriter,
     EventWriteError,
@@ -195,8 +196,7 @@ def start(
         cfg,
         root,
         tracker,
-        required=kind in ("research", "triage")
-        or (kind in ("implement", "plan") and input_text.startswith("#")),
+        required=_tracker_required(kind, input_text),
     )
     conn, saver = _open_checkpoints(root)
     try:
@@ -419,9 +419,52 @@ def _resume_command(values: dict) -> str:
 def _doctor_gate(
     check: Callable, cfg: dict, kind: str, root: Path, input_text: str
 ) -> None:
-    checks = check(cfg, names=_roster_for(kind, input_text), root=root)
+    roster = _roster_for(kind, input_text)
+    checks = check(
+        cfg,
+        names=roster,
+        root=root,
+        services=_services_for(kind, input_text, roster),
+    )
     if has_errors(checks):
         raise RunRefused(report_lines(checks))
+
+
+def _services_for(
+    kind: str, input_text: str, roster: tuple[str, ...]
+) -> tuple[str, ...]:
+    """The non-model services this run's path needs (#179).
+
+    ``"github"`` — ``gh`` auth and an ``origin`` remote — gates the same
+    paths that require a tracker: every ``/research`` and ``/triage`` run
+    and the ``#<n>`` forms of ``/implement`` and ``/plan``. ``"search"``
+    gates only when a rostered agent's allowlist carries ``web_search``,
+    so a missing optional search credential never blocks unaffected
+    agents.
+    """
+    services = []
+    if _tracker_required(kind, input_text):
+        services.append("github")
+    if _roster_searches(roster):
+        services.append("search")
+    return tuple(services)
+
+
+def _roster_searches(roster: tuple[str, ...]) -> bool:
+    """True when a rostered agent's allowlist carries ``web_search``."""
+    return any(
+        "web_search" in ALLOWLISTS.get(label.split(".", 1)[-1], ())
+        for label in roster
+    )
+
+
+def _tracker_required(kind: str, input_text: str) -> bool:
+    """The paths that cannot run trackerless — and so need GitHub auth and
+    an ``origin`` remote (#179): every ``/research`` and ``/triage`` run,
+    and the ``#<n>`` forms of ``/implement`` and ``/plan``."""
+    return kind in ("research", "triage") or (
+        kind in ("implement", "plan") and input_text.startswith("#")
+    )
 
 
 def _roster_for(kind: str, input_text: str) -> tuple[str, ...]:

@@ -195,7 +195,10 @@ def _api_key_from_env(spec: ProviderSpec, environ: Mapping[str, str] | None) -> 
 # (never values), `gh auth status` and the git remote, local-server
 # reachability and tool capability, `model.profile.tool_calling`, Ollama
 # `num_ctx` >= 64k and dropped effort. `free_checks` accepts `names` so a run
-# can gate start on only the agents and helpers it uses.
+# can gate start on only the agents and helpers it uses, and `services` so a
+# command path gates on only the non-model services it can use (#179):
+# "github" is `gh auth status` plus the `origin` remote, "search" the
+# configured search provider's credential.
 # --------------------------------------------------------------------------
 
 
@@ -221,19 +224,27 @@ def report_lines(checks: Iterable[Check]) -> list[str]:
     return lines
 
 
+# The non-model services a command path can ask the doctor to gate on
+# (#179). ``k0 doctor`` checks them all; ``None`` means the same.
+ALL_SERVICES = frozenset({"github", "search"})
+
+
 def free_checks(
     cfg: dict,
     *,
     names: Iterable[str] | None = None,
     root: Path | None = None,
+    services: Iterable[str] | None = None,
     init: Callable = init_chat_model,
     importable: Callable[[str], bool] | None = None,
     fetch: Callable | None = None,
     run: Callable | None = None,
     environ: Mapping[str, str] | None = None,
 ) -> list[Check]:
-    """Every free doctor check for ``names`` (``"<kind>.<name>"``, all by default)."""
+    """Every free doctor check for ``names`` (``"<kind>.<name>"``, all by
+    default) and ``services`` (all by default)."""
     entries = roster_entries(cfg, names)
+    wanted = _wanted_services(services)
     env = os.environ if environ is None else environ
     is_installed = importable or (lambda m: find_spec(m) is not None)
     http = fetch or _fetch_json
@@ -242,12 +253,24 @@ def free_checks(
     checks.extend(_provider_membership(cfg, entries))
     checks.extend(_extra_checks(entries, is_installed))
     checks.extend(_credential_checks(entries, env))
-    checks.append(_search_check(cfg, env))
-    checks.extend(_gh_checks(runner, root))
-    checks.extend(_remote_checks(runner, root))
+    if "search" in wanted:
+        checks.append(_search_check(cfg, env))
+    if "github" in wanted:
+        checks.extend(_gh_checks(runner, root))
+        checks.extend(_remote_checks(runner, root))
     checks.extend(_local_server_checks(entries, cfg, http))
     checks.extend(_model_checks(entries, cfg, init, env))
     return checks
+
+
+def _wanted_services(services: Iterable[str] | None) -> frozenset[str]:
+    """The service subset to check; an unknown name refuses loudly rather
+    than silently under-checking the path."""
+    wanted = ALL_SERVICES if services is None else frozenset(services)
+    unknown = wanted - ALL_SERVICES
+    if unknown:
+        raise ValueError(f"unknown service: {', '.join(sorted(unknown))}")
+    return wanted
 
 
 def _search_check(cfg: dict, environ: Mapping[str, str]) -> Check:

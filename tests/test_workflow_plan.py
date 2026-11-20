@@ -17,7 +17,7 @@ from pathlib import Path
 import pytest
 from langchain_core.messages import AIMessage
 
-from fakes import FakeChatModel, FakeTracker, cfg_with
+from fakes import FakeChatModel, FakeTracker, cfg_with, doctor_seam
 from k0ntrol.tracker import TrackerError
 from k0ntrol.workflow import (
     Outcome,
@@ -216,6 +216,65 @@ def test_the_planner_and_bulk_read_roster_gates_the_run(tmp_path):
 
     assert "agents.planner" in captured["names"]
     assert "helpers.bulk_read" in captured["names"]
+
+
+def test_the_idea_run_gates_on_the_search_service_only(tmp_path):
+    """``/plan <idea>``'s PLANNER can ``web_search``, but the idea path
+    never pushes: no GitHub service (#179)."""
+    git_repo(tmp_path)
+    captured = {}
+
+    def doctor(cfg, *, names=None, services=None, **kwargs):
+        captured["services"] = services
+        return []
+
+    run_plan(
+        tmp_path,
+        plan_cfg(),
+        planner_model(round_call([]), spec_call()),
+        check=doctor,
+    )
+
+    assert captured["services"] == ("search",)
+
+
+def test_the_item_run_gates_on_github_and_search(tmp_path):
+    """``/plan #<n>`` reads the work item through the tracker and its
+    PLANNER can ``web_search``: both services gate it (#179)."""
+    git_repo(tmp_path)
+    captured = {}
+
+    def doctor(cfg, *, names=None, services=None, **kwargs):
+        captured["services"] = services
+        return []
+
+    tracker = FakeTracker()
+    item = tracker.create_work_item("Calc answers 42", "build the calc module")
+    run_plan(
+        tmp_path,
+        plan_cfg(tracker="github"),
+        planner_model(round_call([Q1])),
+        tracker=tracker,
+        input=f"#{item.ref}",
+        check=doctor,
+    )
+
+    assert captured["services"] == ("github", "search")
+
+
+def test_an_idea_run_refuses_a_missing_search_credential(tmp_path):
+    """PLANNER can ``web_search``: a configured provider without its key is
+    a clear refusal, never a silent switch to another service (#179)."""
+    git_repo(tmp_path)
+    cfg = plan_cfg()
+    cfg["search"] = {"provider": "brave"}
+    # the seam's stubbed environ has no BRAVE_SEARCH_API_KEY
+    check = doctor_seam()
+
+    with pytest.raises(RunRefused, match="BRAVE_SEARCH_API_KEY"):
+        run_plan(
+            tmp_path, cfg, planner_model(round_call([]), spec_call()), check=check
+        )
 
 
 # --- the round gate --------------------------------------------------------------
