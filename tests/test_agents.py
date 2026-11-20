@@ -883,6 +883,89 @@ def test_retries_do_not_count_toward_the_model_call_limit(tmp_path, no_backoff):
     assert result.limit_hit is False
 
 
+# --- Bedrock transport failures are transient (#177) ---------------------------
+
+
+class BotoCoreError(Exception):
+    """botocore's base error: an SDK-side failure with no ``status_code``."""
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(args or (kwargs,))
+
+
+class HTTPClientError(BotoCoreError):
+    """botocore's transport-layer error."""
+
+
+class ReadTimeoutError(HTTPClientError):
+    """botocore's Converse read timeout — also raised mid event stream,
+    where the SDK's own retry layer never sees it."""
+
+
+class ConnectTimeoutError(BotoCoreError):
+    """botocore's connect timeout."""
+
+
+class EndpointConnectionError(BotoCoreError):
+    """botocore's connection failure."""
+
+
+class ClientError(Exception):
+    """botocore's API error: the service answered — auth, config, quota."""
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        ReadTimeoutError("read timed out"),
+        ConnectTimeoutError(endpoint_url="https://bedrock.example"),
+        EndpointConnectionError(endpoint_url="https://bedrock.example"),
+    ],
+    ids=["read_timeout", "connect_timeout", "endpoint_unreachable"],
+)
+def test_bedrock_timeouts_and_connection_errors_are_transient(
+    tmp_path, no_backoff, error
+):
+    model = _scripted(error, AIMessage(content="recovered"))
+
+    assert _chatty(tmp_path, model).invoke([HumanMessage("go")]).text == "recovered"
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        ClientError("AccessDeniedException"),  # auth
+        ClientError("ValidationException"),  # config
+        ClientError("ThrottlingException"),  # quota
+    ],
+    ids=["auth", "config", "quota"],
+)
+def test_bedrock_service_errors_are_not_retried(tmp_path, no_backoff, error):
+    model = _scripted(error, AIMessage(content="never reached"))
+
+    with pytest.raises(ClientError):
+        _chatty(tmp_path, model).invoke([HumanMessage("go")])
+    assert len(model.invocations) == 1
+
+
+def test_bedrock_timeouts_give_up_after_bounded_tries(tmp_path, no_backoff):
+    """Repeated Bedrock timeouts end in a clear error after the bounded
+    tries — each try emits its own ``model`` event, so every invocation
+    attempt is accounted for (#177)."""
+    model = _scripted(*[ReadTimeoutError("converse")] * 3)
+    events_path = tmp_path / "events.jsonl"
+    handler = K0EventHandler(EventWriter(events_path, chat="chat-1", mask=[]))
+
+    with pytest.raises(ReadTimeoutError):
+        _chatty(tmp_path, model).invoke(
+            [HumanMessage("go")], config={"callbacks": [handler]}
+        )
+
+    assert len(model.invocations) == 3
+    events = [json.loads(line) for line in events_path.read_text().splitlines()]
+    assert [e["ok"] for e in events if e["kind"] == "model"] == [False] * 3
+
+
 # --- limits -------------------------------------------------------------------
 
 

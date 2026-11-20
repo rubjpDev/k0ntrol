@@ -98,8 +98,26 @@ _STEPS_SLACK = 8
 _MODEL_RETRIES = 2
 
 # Connection-level failures the provider SDKs raise without a status code:
-# httpx's (ollama) and the OpenAI/Anthropic clients' (timeouts included).
-_TRANSIENT_ERROR_TYPES = frozenset({"TransportError", "APIConnectionError"})
+# httpx's (ollama), the OpenAI/Anthropic clients' (timeouts included), and
+# botocore's (Bedrock) — timeouts and transport breaks only, never the
+# service's own ClientError/EventStreamError, so auth, config and quota
+# failures still stop the run. A Converse read timeout raised while the
+# event stream is being read escapes botocore's own retry layer (it only
+# retries the request exchange), so k0's bounded retry is what covers it
+# (#177).
+_TRANSIENT_ERROR_TYPES = frozenset(
+    {
+        "TransportError",
+        "APIConnectionError",
+        "ReadTimeoutError",
+        "ConnectTimeoutError",
+        "EndpointConnectionError",
+        "ProxyConnectionError",
+        "ConnectionClosedError",
+        "ResponseStreamingError",
+        "IncompleteReadError",
+    }
+)
 
 # Inside one agent run every model call resends all earlier tool output.
 # Past this many tokens, results the model has already read reach it as a
