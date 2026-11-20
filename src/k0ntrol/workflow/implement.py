@@ -37,7 +37,9 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 from langgraph.types import interrupt
 
+from k0ntrol.tools.errors import SliceRecoveryNeeded
 from k0ntrol.tools.slice_guard import SliceStart
+from k0ntrol.tools.slice_journal import restore_slice
 from k0ntrol.tools.tracker import render_work_item
 from k0ntrol.workflow.change import (
     decider,
@@ -67,6 +69,7 @@ from k0ntrol.workflow.routers import (
     route_implement_start,
     route_implement_validator,
     route_limit_hit,
+    route_recovery_gate,
     route_review_gate,
     route_seam_gate,
 )
@@ -115,6 +118,7 @@ def build_implement_graph(
     graph.add_node("mark_ready", make_mark_ready(ctx))
     graph.add_node("plan_feedback", make_plan_feedback(ctx))
     graph.add_node("diff_gate", make_diff_gate(ctx, on_reject=_revert(ctx)))
+    graph.add_node("recovery_gate", make_recovery_gate(ctx))
     graph.add_node("limit_hit", make_limit_hit(ctx))
     graph.add_conditional_edges(START, route_implement_start)
     graph.add_conditional_edges("seam", route_after_seam)
@@ -134,6 +138,7 @@ def build_implement_graph(
     graph.add_conditional_edges("contract_review", route_after_contract_review)
     graph.add_edge("post_contract", "review_gate")
     graph.add_conditional_edges("review_gate", route_review_gate)
+    graph.add_conditional_edges("recovery_gate", route_recovery_gate)
     graph.add_edge("review_comment", "mark_ready")
     graph.add_edge("mark_ready", END)
     graph.add_edge("plan_feedback", END)
@@ -248,23 +253,140 @@ def make_implementer_node(ctx: RunContext) -> Callable[[dict], dict]:
     The redo runs on a second IMPLEMENTER instance (``slot="refactor"``):
     its slice guard starts in refactor — code may change before any test
     write, and the first test write attempted returns the guard to the
-    green/red cycle (#110).
+    green/red cycle (#110). A slice-guard escalation (#174) ends the run
+    for the recovery gate; a ``recover`` answer retries on a fresh instance
+    (``slot="<base>_recovery<n>"``) so its guard and journal start clean in
+    green.
     """
 
     def node(state: dict) -> dict:
-        start: SliceStart = "refactor" if state.get("refactor") else "green"
-        result, updates = _invoke_counted(
-            ctx,
-            "implementer",
-            state,
-            implementer_brief,
-            slot="refactor" if state.get("refactor") else None,
-            slice_start=start,
-        )
+        try:
+            result, updates = _invoke_counted(
+                ctx,
+                "implementer",
+                state,
+                implementer_brief,
+                slot=_implementer_slot(state),
+                slice_start=_slice_start(state),
+            )
+        except SliceRecoveryNeeded as error:
+            return _recovery_escalation(error)
         updates["files"] = _merge(state.get("files"), _written(result))
         return updates
 
     return node
+
+
+def _implementer_slot(state: dict) -> str | None:
+    """The instance the run builds on. Each recovery is a fresh slot, so
+    its guard and journal start clean in green (#174)."""
+    recoveries = state.get("recoveries", 0)
+    if not recoveries:
+        return "refactor" if state.get("refactor") else None
+    return f"{'refactor' if state.get('refactor') else 'build'}_recovery{recoveries}"
+
+
+def _slice_start(state: dict) -> SliceStart:
+    """refactor only until a recovery; a recovered run always starts green."""
+    if state.get("refactor") and not state.get("recoveries"):
+        return "refactor"
+    return "green"
+
+
+def _recovery_escalation(error: SliceRecoveryNeeded) -> dict:
+    """The state update the escalation leaves for the recovery gate."""
+    return {
+        "recovery": {
+            "slice": error.slice,
+            "paths": error.paths,
+            "refusal": None,
+        },
+        "limit": None,
+        "retry_node": None,
+        "retry_context": None,
+    }
+
+
+# --- the recovery gate (#174) ----------------------------------------------------
+
+
+def make_recovery_gate(ctx: RunContext) -> Callable[[dict], dict]:
+    """The recovery gate: the slice guard's denial bound ran out.
+
+    ``recover`` restores the journaled paths to their pre-slice state and
+    retries IMPLEMENTER fresh — a missing, stale or conflicting journal
+    refuses safely and asks again; ``stop`` ends the run ``stuck`` with the
+    tree untouched.
+    """
+
+    def node(state: dict) -> dict:
+        recovery = state.get("recovery") or {}
+        decision = interrupt(
+            {
+                "gate": "recovery",
+                "question": "the slice guard refused test writes — recover the slice?",
+                "answers": ["recover", "stop"],
+                "detail": _recovery_detail(recovery),
+            }
+        )
+        word, _, feedback = str(decision).strip().partition(" ")
+        if word.lower() != "recover":
+            return {
+                "outcome": "stuck",
+                "reason": "slice_recovery",
+                "node": "implementer",
+                "recovery_route": None,
+            }
+        journal_dir = worktree_snapshot_dir(ctx.root, ctx.run_id) / "slice"
+        result = restore_slice(
+            ctx.root,
+            journal_dir,
+            expected_slice=str(recovery.get("slice") or ""),
+        )
+        if not result.applied:
+            return {
+                "recovery": {**recovery, "refusal": result.detail},
+                "recovery_route": "recovery_gate",
+            }
+        return {
+            "recovery": None,
+            "recoveries": state.get("recoveries", 0) + 1,
+            "implementer_attempts": 0,
+            "retry_context": _recovery_context(recovery, feedback.strip()),
+            "recovery_route": "implementer",
+        }
+
+    return node
+
+
+def _recovery_detail(recovery: dict) -> str:
+    """What the gate shows: the slice's journaled paths, the last refusal."""
+    paths = recovery.get("paths") or []
+    lines = [
+        "The slice guard refused 3 test writes in the active red slice —",
+        "the test file itself may be broken.",
+        "",
+        "recover restores what the slice wrote and reruns IMPLEMENTER:",
+        *([f"  {path}" for path in paths] or ["  (journal lists no paths)"]),
+    ]
+    if recovery.get("refusal"):
+        lines += ["", f"recovery refused: {recovery['refusal']}"]
+    lines += ["", "stop ends the run; the working tree stays as it is."]
+    return "\n".join(lines)
+
+
+def _recovery_context(recovery: dict, feedback: str) -> str:
+    """The retry context for the recovered run: what was rolled back."""
+    paths = ", ".join(recovery.get("paths") or []) or "(none)"
+    parts = [
+        "The slice guard refused test edits until the run paused; the human "
+        f"chose to recover the slice. These paths were restored to their "
+        f"pre-slice state: {paths}. Write the failing test again, then the "
+        "code that makes it pass.",
+    ]
+    if feedback:
+        parts.append(f"Human feedback: {feedback}")
+    return "\n\n".join(parts)
 
 
 def make_push(ctx: RunContext) -> Callable[[dict], dict]:

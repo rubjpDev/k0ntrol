@@ -13,10 +13,11 @@ from pathlib import Path
 
 import pytest
 
-from k0ntrol.tools.errors import ToolError
+from k0ntrol.tools.errors import SliceRecoveryNeeded, ToolError
 from k0ntrol.tools.run_tests import make_run_tests
 from k0ntrol.tools.runner import CommandResult
 from k0ntrol.tools.slice_guard import SliceGuard
+from k0ntrol.tools.slice_journal import SliceJournal
 from k0ntrol.tools.write import make_edit_file, make_write_file
 
 RED_CMD = f'{sys.executable} -c "import sys; sys.exit(1)"'
@@ -356,3 +357,117 @@ def test_a_write_waits_for_an_in_flight_run_tests_and_sees_its_verdict(
     assert "red" in str(errors[0])
     assert not (root / "tests" / "test_new.py").exists()
     assert guard.state == "red"
+
+
+def test_third_denied_test_write_in_red_escalates_for_human_recovery(root):
+    """The third refused test write in one red slice ends the agent run for
+    a human recovery decision instead of answering the model again (#174)."""
+    guard = SliceGuard()
+    write, edit, run_tests = _tools(root, guard, RED_CMD)
+    write.invoke({"path": "tests/test_new.py", "content": "x\n"})
+    run_tests.invoke({"paths": []})
+    assert guard.state == "red"
+
+    for _ in range(2):
+        with pytest.raises(ToolError):
+            edit.invoke({"path": "tests/test_new.py", "old": "x", "new": "y"})
+    with pytest.raises(SliceRecoveryNeeded) as error:
+        edit.invoke({"path": "tests/test_new.py", "old": "x", "new": "y"})
+    assert "recovery" in str(error.value)
+
+
+def test_code_writes_between_denials_do_not_reset_the_count(root):
+    """The bound counts denials in the red slice, not in a row: code may be
+    written between them — that is still the same stuck slice (#174)."""
+    guard = SliceGuard()
+    write, edit, run_tests = _tools(root, guard, RED_CMD)
+    write.invoke({"path": "tests/test_new.py", "content": "x\n"})
+    run_tests.invoke({"paths": []})
+
+    for index in range(2):
+        with pytest.raises(ToolError):
+            edit.invoke({"path": "tests/test_new.py", "old": "x", "new": "y"})
+        edit.invoke(
+            {"path": "src/app.py", "old": f"return {index + 1}", "new": f"return {index + 2}"}
+        )
+    with pytest.raises(SliceRecoveryNeeded):
+        edit.invoke({"path": "tests/test_new.py", "old": "x", "new": "y"})
+
+
+def test_the_denial_count_starts_fresh_on_a_new_slice(root):
+    """A green run_tests ends the slice and its denial count (#174)."""
+    guard = SliceGuard()
+    write, edit, run_tests = _tools(root, guard, RED_CMD)
+    green = make_run_tests(root, {"test_cmd": GREEN_CMD}, guard)
+    write.invoke({"path": "tests/test_new.py", "content": "x\n"})
+    run_tests.invoke({"paths": []})
+    for _ in range(2):
+        with pytest.raises(ToolError):
+            write.invoke({"path": "tests/test_a.py", "content": "y\n"})
+
+    green.invoke({"paths": []})
+    assert guard.state == "green"
+    write.invoke({"path": "tests/test_b.py", "content": "z\n"})
+    run_tests.invoke({"paths": []})
+    assert guard.state == "red"
+    for _ in range(2):
+        with pytest.raises(ToolError):
+            write.invoke({"path": "tests/test_c.py", "content": "w\n"})
+
+
+def test_denied_code_writes_in_green_do_not_escalate(root):
+    """The bound is the red slice's denied test writes: a model retrying a
+    code write in green keeps getting ordinary refusals (#174)."""
+    guard = SliceGuard()
+    write = make_write_file(root, guard)
+    for _ in range(4):
+        with pytest.raises(ToolError) as error:
+            write.invoke({"path": "src/app.py", "content": "X = 2\n"})
+        assert error.value.denied == "slice_guard"
+
+
+def _journaled(root) -> SliceJournal:
+    return SliceJournal(root / ".k0-mem" / "snapshots" / "run-1" / "slice")
+
+
+def test_writes_through_the_tools_fill_the_slice_journal(root):
+    """Every write the guard lets through lands in the journal: the test
+    write in green and the code write in red, with its pre-slice image."""
+    journal = _journaled(root)
+    guard = SliceGuard(journal=journal)
+    write, edit, run_tests = _tools(root, guard, RED_CMD)
+
+    write.invoke({"path": "tests/test_new.py", "content": "x\n"})
+    run_tests.invoke({"paths": []})
+    edit.invoke({"path": "src/app.py", "old": "return 1", "new": "return 2"})
+
+    assert journal.paths == ["src/app.py", "tests/test_new.py"]
+
+
+def test_the_escalation_carries_the_journal_identity(root):
+    """The gate restores what the exception names: this journal's slice and
+    the paths the slice wrote (#174)."""
+    journal = _journaled(root)
+    guard = SliceGuard(journal=journal)
+    write, _, run_tests = _tools(root, guard, RED_CMD)
+    write.invoke({"path": "tests/test_new.py", "content": "x\n"})
+    run_tests.invoke({"paths": []})
+    for _ in range(2):
+        with pytest.raises(ToolError):
+            write.invoke({"path": "tests/test_a.py", "content": "y\n"})
+
+    with pytest.raises(SliceRecoveryNeeded) as error:
+        write.invoke({"path": "tests/test_a.py", "content": "y\n"})
+    assert error.value.slice == journal.slice
+    assert error.value.paths == ["tests/test_new.py"]
+
+
+def test_a_green_verdict_clears_the_journal(root):
+    """A slice that ends green is accepted: its journal drops away (#174)."""
+    journal = _journaled(root)
+    guard = SliceGuard(journal=journal)
+    write, _, run_tests = _tools(root, guard, GREEN_CMD)
+    write.invoke({"path": "tests/test_new.py", "content": "x\n"})
+    run_tests.invoke({"paths": []})
+
+    assert not journal.dir.exists()

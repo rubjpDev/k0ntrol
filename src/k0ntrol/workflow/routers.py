@@ -56,9 +56,19 @@ def route_seam_gate(state: dict) -> str:
 
 
 def route_after_implementer(state: dict) -> str:
+    """A slice-guard escalation waits on the human's recovery decision;
+    a limit goes to the pause; anything else runs VALIDATOR (#174)."""
+    if state.get("recovery"):
+        return "recovery_gate"
     if state.get("limit"):
         return "limit_hit"
     return "validator"
+
+
+def route_recovery_gate(state: dict) -> str:
+    """The gate's decision names the next node: recover → IMPLEMENTER
+    retries, a refused journal asks again, stop → END (#174)."""
+    return state.get("recovery_route") or END
 
 
 def route_implement_validator(state: dict) -> str:

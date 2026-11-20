@@ -43,7 +43,10 @@ class _StaticScope:
                 f"CODER writes non-test paths only: {relative}", denied="path_guard"
             )
 
-    def note_write(self, relative: str) -> None:
+    def record_write(self, resolved: Path, relative: str) -> None:
+        """Nothing to capture: a static flavour keeps no journal."""
+
+    def note_write(self, resolved: Path, relative: str) -> None:
         """Nothing to record: a static flavour has no state."""
 
 
@@ -74,9 +77,10 @@ def make_write_file(root: Path, scope: WritePolicy) -> BaseTool:
         """Write `content` to `path`, relative to the repo root. Creates dirs."""
         with checked.lock:
             resolved, relative = _guard_writable(path, root, checked)
+            checked.record_write(resolved, relative)
             resolved.parent.mkdir(parents=True, exist_ok=True)
             resolved.write_text(content, encoding="utf-8")
-            checked.note_write(relative)
+            checked.note_write(resolved, relative)
             return f"wrote {relative}"
 
     return write_file
@@ -91,10 +95,11 @@ def make_edit_file(root: Path, scope: WritePolicy) -> BaseTool:
         """Replace the single occurrence of `old` with `new` in `path`."""
         with checked.lock:
             resolved, relative = _guard_writable(path, root, checked)
+            checked.record_write(resolved, relative)
             text = _existing_text(resolved, path)
             replaced = _replace_once(text, old, new, path)
             resolved.write_text(replaced, encoding="utf-8")
-            checked.note_write(relative)
+            checked.note_write(resolved, relative)
             return f"edited {relative}"
 
     return edit_file
