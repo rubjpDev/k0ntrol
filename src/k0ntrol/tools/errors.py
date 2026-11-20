@@ -13,11 +13,13 @@ the event handler copies into the ``tool`` event's ``denied`` field.
 Ordinary errors (file not found, ambiguous edit, bad regex) leave it ``None``.
 """
 
-from typing import Literal
+from typing import Iterable, Literal
 
 from langchain_core.tools import ToolException
 
-Denied = Literal["allowlist", "network_guard", "path_guard", "slice_guard"]
+Denied = Literal[
+    "allowlist", "network_guard", "path_guard", "slice_guard", "slice_recovery"
+]
 
 
 class ToolError(ToolException):
@@ -26,3 +28,23 @@ class ToolError(ToolException):
     def __init__(self, message: str, *, denied: Denied | None = None) -> None:
         super().__init__(message)
         self.denied = denied
+
+
+class SliceRecoveryNeeded(Exception):
+    """The slice guard's bound on denied test writes ran out (#174).
+
+    Not a ``ToolError``: it must propagate out of the agent run (past
+    ``ToolErrorMiddleware``, which converts only ``ToolError``) so the
+    workflow can pause for the human's recovery decision. ``denied``
+    tags the ``tool`` event like a refusal; ``slice`` and ``paths``
+    carry the journal identity the recovery gate restores.
+    """
+
+    denied: Denied = "slice_recovery"
+
+    def __init__(
+        self, message: str, *, slice: str | None = None, paths: Iterable[str] = ()
+    ) -> None:
+        super().__init__(message)
+        self.slice = slice
+        self.paths = list(paths)

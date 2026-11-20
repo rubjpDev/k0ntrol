@@ -8,9 +8,9 @@ a non-zero exit raises TrackerError (exit 4 means auth, for `k0 doctor`).
 import json
 import os
 import subprocess
-from collections.abc import Callable
 from pathlib import Path
 
+from k0ntrol.tracker import local_files
 from k0ntrol.tracker.protocol import (
     Change,
     ChildWorkItem,
@@ -20,9 +20,9 @@ from k0ntrol.tracker.protocol import (
     comment_marker,
 )
 
-CommandRunner = Callable[[list[str]], subprocess.CompletedProcess]
+CommandRunner = local_files.CommandRunner
 
-_ISSUE_FIELDS = "number,title,state,isDraft,url"
+_ISSUE_FIELDS = "number,title,state,isDraft,url,headRefOid"
 
 
 def subprocess_runner(cwd: Path) -> CommandRunner:
@@ -215,14 +215,10 @@ class GhTracker:
             self._run(["git", "checkout", "-b", branch, f"origin/{base}"])
 
     def commit(self, message: str) -> bool:
-        status = self._run(["git", "status", "--porcelain"])
-        if not status.stdout.strip():
-            return False
-        self._run(["git", "add", "-A"])
-        self._run(["git", "commit", "-m", message])
-        return True
+        return local_files.commit(self._runner, message)
 
     def push(self, branch: str) -> None:
+        local_files.checked_push(self._runner, branch)
         self._run(["git", "push", "-u", "origin", branch])
 
     def open_change(self, branch: str, base: str, title: str, body: str) -> Change:
@@ -246,6 +242,8 @@ class GhTracker:
             state="open",
             is_draft=True,
             url=url,
+            # open_change follows the push: the branch tip is the published head
+            head_sha=self._run(["git", "rev-parse", branch]).stdout.strip() or None,
         )
 
     def mark_change_ready(self, ref: str) -> None:
@@ -290,6 +288,7 @@ class GhTracker:
             state=pr["state"].lower(),
             is_draft=pr["isDraft"],
             url=pr["url"],
+            head_sha=pr.get("headRefOid") or None,
         )
 
     def read_change_diff(self, ref: str) -> str:

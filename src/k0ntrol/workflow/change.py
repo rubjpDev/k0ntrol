@@ -27,11 +27,10 @@ def dirty_paths(root: Path, *, ignored_prefix: str = ".k0-mem/") -> list[str]:
     Local memory is the harness's own scratch space — it never makes the
     tree dirty for a run.
     """
-    status = _status(root)
     return [
-        line
-        for line in status.splitlines()
-        if not _ignored_path(line, ignored_prefix)
+        f"{status} {path}" if status else path
+        for status, path in _status_entries(_status(root))
+        if not _ignored(path, ignored_prefix)
     ]
 
 
@@ -47,17 +46,32 @@ def reset_scan_output(root: Path) -> None:
 
 def changed_paths(root: Path) -> list[str]:
     """The paths ``dirty_paths`` reports: what the working tree changed."""
-    return [_porcelain_path(line) for line in dirty_paths(root)]
+    return [
+        path
+        for _, path in _status_entries(_status(root))
+        if not _ignored(path, ".k0-mem/")
+    ]
 
 
-def _ignored_path(porcelain_line: str, prefix: str) -> bool:
-    path = _porcelain_path(porcelain_line)
+def _status_entries(status: str) -> list[tuple[str, str]]:
+    """``(status, path)`` pairs from ``-z`` porcelain — unquoted names and
+    rename/copy sources (the bare record after an ``R``/``C`` entry)."""
+    entries: list[tuple[str, str]] = []
+    source = False
+    for record in status.split("\0"):
+        if not record:
+            continue
+        if source:
+            entries.append(("", record))
+            source = False
+            continue
+        entries.append((record[:2], record[3:]))
+        source = "R" in record[:2] or "C" in record[:2]
+    return entries
+
+
+def _ignored(path: str, prefix: str) -> bool:
     return path == prefix.rstrip("/") or path.startswith(prefix)
-
-
-def _porcelain_path(porcelain_line: str) -> str:
-    path = porcelain_line[3:] if len(porcelain_line) > 3 else ""
-    return path.split(" -> ")[-1].strip().strip('"')
 
 
 def slugify(title: str) -> str:
@@ -172,13 +186,15 @@ def diff_stat(root: Path) -> str:
 
 def _new_files(root: Path) -> list[str]:
     """Untracked, non-ignored file paths, without ``.k0-mem/``."""
-    out = _git(root, "ls-files", "--others", "--exclude-standard").stdout
-    return [p for p in out.splitlines() if p and not p.startswith(".k0-mem/")]
+    out = _git(
+        root, "ls-files", "-z", "--others", "--exclude-standard"
+    ).stdout
+    return [p for p in out.split("\0") if p and not p.startswith(".k0-mem/")]
 
 
 def _status(root: Path) -> str:
-    """``git status --porcelain`` with ``-uall``: every untracked file."""
-    return _git(root, "status", "--porcelain", "-uall").stdout
+    """``git status --porcelain -z -uall``: unquoted, NUL-separated."""
+    return _git(root, "status", "--porcelain", "-z", "-uall").stdout
 
 
 def _git(root: Path, *args: str) -> subprocess.CompletedProcess:

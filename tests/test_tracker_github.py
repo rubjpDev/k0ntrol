@@ -452,7 +452,12 @@ def test_create_branch_checks_out_existing_branch():
 def test_commit_stages_all_and_returns_whether_it_committed():
     runner = FakeRunner()
     runner.script(["git", "status", "--porcelain"], stdout=" M x.py\n")
+    runner.script(["git", "ls-files", "-u"], stdout="")
+    runner.script(["git", "rev-parse", "--verify", "--quiet", "HEAD"])
+    runner.script(["git", "ls-tree"], stdout="")
+    runner.script(["git", "diff", "--cached", "--name-only"], stdout="")
     runner.script(["git", "add", "-A"])
+    runner.script(["git", "diff", "--cached", "--quiet"], returncode=1)
     runner.script(["git", "commit", "-m", "#42: add login"])
     tracker = GhTracker(runner)
 
@@ -465,6 +470,11 @@ def test_commit_stages_all_and_returns_whether_it_committed():
 
 def test_push_uses_upstream_tracking():
     runner = FakeRunner()
+    runner.script(
+        ["git", "remote", "get-url"], stdout="git@example.com:o/r.git\n"
+    )
+    runner.script(["git", "ls-remote"], stdout="")
+    runner.script(["git", "rev-list"], stdout="")
     runner.script(["git", "push"])
     tracker = GhTracker(runner)
 
@@ -492,12 +502,14 @@ def test_read_change_returns_none_or_the_change():
                     "state": "MERGED",
                     "isDraft": False,
                     "url": "https://github.com/o/r/pull/7",
+                    "headRefOid": "deadbee",
                 }
             ]
         ),
     )
     change = tracker.read_change("b")
     assert change.ref == "7" and change.state == "merged"
+    assert change.head_sha == "deadbee"
 
 
 def _pr(number, state):
@@ -542,10 +554,12 @@ def test_open_change_reuses_open_pr_or_creates_a_draft():
     runner.script(
         ["gh", "pr", "create"], stdout="https://github.com/o/r/pull/7\n"
     )
+    runner.script(["git", "rev-parse", "b"], stdout="cafef00d\n")
     tracker = GhTracker(runner)
 
     change = tracker.open_change("b", "main", "Add login", "Closes #42")
     assert change.ref == "7" and change.is_draft and change.state == "open"
+    assert change.head_sha == "cafef00d"
     create_call = [c for c in runner.calls if c[:3] == ["gh", "pr", "create"]][0]
     assert "--draft" in create_call and "--base" in create_call
 

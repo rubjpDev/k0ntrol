@@ -13,8 +13,17 @@ DEFAULT_MAX_QUESTIONS = 25
 
 def route_review_gate(state: dict) -> str:
     """The gate's decision names the next node: ok → record + ready,
-    redo → IMPLEMENTER with the reviews, plan → comment + unready."""
+    redo → IMPLEMENTER with the reviews, plan → comment + unready.
+    A stored ``ok`` the verdicts cannot back routes back to the gate
+    itself, which re-shows without ``ok`` (#175)."""
     return state.get("review_route") or END
+
+
+def route_mark_ready(state: dict) -> str:
+    """Ready → END (the run is done); a failed readiness check re-shows
+    the review gate — a checkpoint resumed straight into ``mark_ready``
+    gets its verdicts re-checked in code (#175)."""
+    return END if state.get("outcome") == "done" else "review_gate"
 
 
 def route_limit_hit(state: dict) -> str:
@@ -56,9 +65,19 @@ def route_seam_gate(state: dict) -> str:
 
 
 def route_after_implementer(state: dict) -> str:
+    """A slice-guard escalation waits on the human's recovery decision;
+    a limit goes to the pause; anything else runs VALIDATOR (#174)."""
+    if state.get("recovery"):
+        return "recovery_gate"
     if state.get("limit"):
         return "limit_hit"
     return "validator"
+
+
+def route_recovery_gate(state: dict) -> str:
+    """The gate's decision names the next node: recover → IMPLEMENTER
+    retries, a refused journal asks again, stop → END (#174)."""
+    return state.get("recovery_route") or END
 
 
 def route_implement_validator(state: dict) -> str:

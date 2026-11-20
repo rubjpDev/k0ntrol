@@ -9,6 +9,14 @@ brief built out of these fields (ADR 0002).
 from typing import Any, TypedDict
 
 
+class Recovery(TypedDict, total=False):
+    """The pending recovery the gate decides on (#174)."""
+
+    slice: str | None  # the journaled slice id the gate restores
+    paths: list[str]  # the journaled paths the slice wrote
+    refusal: str | None  # why the last ``recover`` answer was refused
+
+
 class RunState(TypedDict, total=False):
     """One run's state; every field is a plain msgpack-safe value."""
 
@@ -62,6 +70,8 @@ class RunState(TypedDict, total=False):
     # /implement #<n> (#118): once the draft change is open, REVIEWER runs
     # twice with fresh context — a Conventions review and a Contract
     # review — each posted on the change as its own labelled review.
+    # #175: each dict carries the verdict — ``status`` completed/refused
+    # with a ``reason`` — and the published ``head_sha`` it judged.
     conventions_review: dict | None  # the Conventions Review as a plain dict
     contract_review: dict | None  # the Contract Review as a plain dict
     conventions_review_attempts: int  # Conventions REVIEWER runs so far
@@ -74,6 +84,13 @@ class RunState(TypedDict, total=False):
     # guard's refactor state, ``plan`` returns the item to planning.
     refactor: bool  # IMPLEMENTER's guard starts in refactor (a review redo)
     plan_feedback: str | None  # the human's `plan` feedback, commented on the item
+
+    # #174: the recovery gate after the slice guard's denial bound ran out.
+    # ``recover`` restores the journaled slice paths and retries fresh;
+    # ``stop`` ends stuck; a refused journal asks again with the reason.
+    recovery: Recovery | None  # {"slice", "paths", "refusal"} while one is pending
+    recoveries: int  # human-approved slice recoveries so far
+    recovery_route: str  # the recovery gate's decision: a node name
 
     # /plan (#120): the Q&A definition — PLANNER's rounds of numbered
     # questions, each round answered by the human in one line. #121:
@@ -123,5 +140,5 @@ class RunState(TypedDict, total=False):
     retries_granted: int  # limit_hit retries the human granted (stuck comment)
     retry_context: str | None  # limit note + output tail + human feedback
     outcome: str  # "done" | "stuck" | "rejected", set at the run's end
-    reason: str | None  # "model_call_limit" | "max_attempts" on stuck
+    reason: str | None  # "model_call_limit" | "max_attempts" | "slice_recovery" on stuck
     node: str | None  # the node a stuck run came from

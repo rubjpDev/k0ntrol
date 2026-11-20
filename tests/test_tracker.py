@@ -140,8 +140,8 @@ def test_git_ops_record_calls_and_use_runner(tmp_path):
     ran = []
 
     class Result:
-        def __init__(self, stdout=""):
-            self.returncode = 0
+        def __init__(self, stdout="", returncode=0):
+            self.returncode = returncode
             self.stdout = stdout
             self.stderr = ""
 
@@ -149,6 +149,8 @@ def test_git_ops_record_calls_and_use_runner(tmp_path):
         ran.append(argv)
         if argv[1] == "status":
             return Result(" M f.py\n")
+        if argv[:4] == ["git", "diff", "--cached", "--quiet"]:
+            return Result(returncode=1)
         return Result()
 
     tracker = FakeTracker(git_runner=runner)

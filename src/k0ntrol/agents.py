@@ -58,6 +58,7 @@ from k0ntrol.tools.read import make_grep, make_list_files, make_read_file
 from k0ntrol.tools.run_tests import make_run_tests
 from k0ntrol.tools.search_memory import make_search_memory
 from k0ntrol.tools.slice_guard import SliceGuard, SliceStart
+from k0ntrol.tools.slice_journal import SliceJournal
 from k0ntrol.tools.tracker import tracker_read_tools
 from k0ntrol.tools.web_search import Fetch, make_web_search
 from k0ntrol.tools.write import WritePolicy, make_edit_file, make_write_file
@@ -113,10 +114,23 @@ _TOOL_NAME = re.compile(r"[a-zA-Z0-9_-]{1,64}")
 
 
 class Review(BaseModel):
-    """REVIEWER's structured output: the review of the change."""
+    """REVIEWER's structured output: its verdict on the change.
 
+    ``status`` is the verdict — ``completed`` or ``refused`` — tracked per
+    axis separately from the text and findings: a refused or missing
+    review is not a completed review with zero findings (#175).
+    """
+
+    status: Literal["completed", "refused"]
     summary: str
     findings: list[str]
+    reason: str = ""
+
+    @model_validator(mode="after")
+    def _refusal_has_a_reason(self) -> "Review":
+        if self.status == "refused" and not self.reason.strip():
+            raise ValueError("a refused review needs a reason")
+        return self
 
 
 class Question(BaseModel):
@@ -327,6 +341,7 @@ def agent_tools(
     fetch: Fetch | None = None,
     read_only: bool = False,
     slice_start: SliceStart = "green",
+    journal: SliceJournal | None = None,
 ) -> list[BaseTool]:
     """The tools on agent ``name``'s allowlist, bound to the run context.
 
@@ -359,6 +374,7 @@ def agent_tools(
         environ=environ,
         fetch=fetch,
         slice_start=slice_start,
+        journal=journal,
     )
     return [factories[tool_name]() for tool_name in names]
 
@@ -567,8 +583,13 @@ def _tool_factories(
     environ: Mapping[str, str] | None,
     fetch: Fetch | None,
     slice_start: SliceStart = "green",
+    journal: SliceJournal | None = None,
 ) -> dict[str, Callable[[], BaseTool]]:
-    guard = SliceGuard(start=slice_start) if agent == "implementer" else None
+    guard = (
+        SliceGuard(start=slice_start, journal=journal)
+        if agent == "implementer"
+        else None
+    )
     factories: dict[str, Callable[[], BaseTool]] = {
         "read_file": lambda: make_read_file(root),
         "list_files": lambda: make_list_files(root),

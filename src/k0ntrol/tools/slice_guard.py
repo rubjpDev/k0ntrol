@@ -9,18 +9,29 @@ written and test writes are refused, so a test cannot be weakened to go
 green. A green result moves back. ``run_tests`` verdicts do not leave
 refactor. The first test write attempted in refactor returns the guard to
 green. Markdown under ``docs/`` and ``GLOSSARY.md`` pass in any state.
+
+The recovery journal (#174) records only inside an open slice: it opens
+at the slice's first permitted test write and closes at the green
+verdict (or the refactor seam) that ends it. Writes the guard allows
+outside that window — green-state docs writes, refactor edits — precede
+the slice and are never journaled, so a ``recover`` cannot undo them.
 """
 
 import threading
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 from typing import Literal
 
-from k0ntrol.tools.errors import ToolError
+from k0ntrol.tools.errors import SliceRecoveryNeeded, ToolError
 from k0ntrol.tools.path_guard import is_test_path
+from k0ntrol.tools.slice_journal import SliceJournal
 
 SliceState = Literal["green", "red", "refactor"]
 SliceStart = Literal["green", "refactor"]
 PathKind = Literal["test", "docs", "code"]
+
+# Denied test writes in one red slice before the guard stops answering the
+# model and escalates for a human recovery decision (#174).
+MAX_SLICE_DENIALS = 3
 
 
 def _is_docs_path(relative: str) -> bool:
@@ -49,9 +60,14 @@ class SliceGuard:
     pass green while a concurrent red verdict lands before its mutation.
     """
 
-    def __init__(self, start: SliceStart = "green") -> None:
+    def __init__(
+        self, start: SliceStart = "green", journal: SliceJournal | None = None
+    ) -> None:
         self._state: SliceState = start
         self._test_written = False
+        self._red_denials = 0
+        self._slice_open = False
+        self._journal = journal
         self.lock = threading.Lock()
 
     @property
@@ -72,6 +88,9 @@ class SliceGuard:
         if kind != "test":
             return
         self._state = "green"
+        self._slice_open = False
+        if self._journal is not None:
+            self._journal.clear()
         raise ToolError(
             f"slice guard is refactor: {relative} is a test write — "
             "the first test write attempt returns the guard to green",
@@ -86,14 +105,49 @@ class SliceGuard:
                 denied="slice_guard",
             )
         if self._state == "red" and kind == "test":
+            self._red_denials += 1
+            if self._red_denials >= MAX_SLICE_DENIALS:
+                journal = self._journal
+                raise SliceRecoveryNeeded(
+                    f"slice guard refused {MAX_SLICE_DENIALS} test writes in "
+                    "one red slice — the test file itself may be broken; "
+                    "stopping for a human recovery decision",
+                    slice=journal.slice if journal else None,
+                    paths=journal.paths if journal else [],
+                )
             raise ToolError(
                 f"slice guard is red: {relative} is a test write — "
                 "a green run_tests unlocks test writes",
                 denied="slice_guard",
             )
 
-    def note_write(self, relative: str) -> None:
-        """Record a successful write: a test-path write arms the guard."""
+    def record_write(self, resolved: Path, relative: str) -> None:
+        """Capture the pre-write image in the slice journal — inside the
+        open slice only. The journal opens at the slice's first permitted
+        test write: a test-path write that passed ``check_write`` (red
+        and refactor both deny it before it can get here). Docs writes in
+        green and refactor edits before it are pre-slice work a later
+        ``recover`` must never undo, so they are not journaled (#174).
+
+        A journaled path whose bytes no longer match what the slice last
+        wrote — someone else changed it — refuses the write rather than
+        carrying a stale pre-image over it."""
+        if self._journal is None:
+            return
+        if not self._slice_open:
+            if _path_kind(relative) != "test":
+                return
+            self._slice_open = True
+        conflict = self._journal.record(resolved, relative)
+        if conflict is not None:
+            raise ToolError(f"slice journal: {conflict}", denied="slice_guard")
+
+    def note_write(self, resolved: Path, relative: str) -> None:
+        """Record a successful write: journal its post-image when the
+        slice journaled its pre-image and, for a test-path write, arm
+        the guard."""
+        if self._journal is not None and self._slice_open:
+            self._journal.note(resolved, relative)
         if _path_kind(relative) == "test":
             self._test_written = True
 
@@ -103,6 +157,10 @@ class SliceGuard:
             return
         if ok:
             self._state = "green"
+            self._red_denials = 0
+            self._slice_open = False
+            if self._journal is not None:
+                self._journal.clear()
         elif self._test_written:
             self._state = "red"
         self._test_written = False
