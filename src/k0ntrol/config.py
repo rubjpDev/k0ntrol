@@ -119,6 +119,8 @@ def _validate_trusted_authors(value: object) -> list[str]:
 def _trusted_author_error(index: int, login: object) -> list[str]:
     if not isinstance(login, str) or not login.strip():
         return [f"trusted_authors[{index}]: must be a non-empty string"]
+    if login != login.strip():
+        return [f"trusted_authors[{index}]: must not have surrounding whitespace"]
     if not login.endswith("[bot]"):
         return [f"trusted_authors[{index}]: only App logins, ending in '[bot]'"]
     return []

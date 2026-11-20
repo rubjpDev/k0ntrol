@@ -368,6 +368,7 @@ def test_trusted_authors_accepts_app_logins(cfg):
         ["acme-k0[bot]", ""],
         ["acme-k0[bot]", None],
         ["mallory"],  # a human login: only App identities belong (#176)
+        [" acme-k0[bot]"],  # padded: never matches a login, reject instead
     ],
 )
 def test_trusted_authors_must_be_a_list_of_app_logins(cfg, value):
