@@ -1,5 +1,7 @@
 """`k0 doctor`: free checks (no tokens spent) plus the --live round trip."""
 
+import pytest
+
 from fakes import FakeChatModel, cfg_with, recording_init
 
 
@@ -342,6 +344,52 @@ def test_lmstudio_loaded_model_is_ok_but_tool_calling_warns():
         c.name == "provider lmstudio" and c.status == "ok" for c in checks
     )
     assert any(c.status == "warning" and "--live" in c.detail for c in checks)
+
+
+# --- services: the non-model checks a command path asks for (#179) -------------
+
+
+def test_an_empty_services_list_runs_no_service_checks():
+    """A path that can use none of the services never shells out for them."""
+    def run(argv, root):
+        raise AssertionError("a local path runs no gh/git service check")
+
+    cfg = anthropic_cfg()
+    cfg["search"] = {"provider": "brave"}
+    checks = free_checks(
+        cfg, services=(), run=run, environ={"ANTHROPIC_API_KEY": "x"}
+    )
+    assert errors(checks) == []
+    assert not any(c.name in ("gh", "remote", "web search") for c in checks)
+
+
+def test_the_github_service_gates_on_gh_auth_and_the_origin_remote():
+    def run(argv, root):
+        if argv[0] == "gh":
+            return (4, "not logged in")
+        return (2, "")
+
+    checks = free_checks(anthropic_cfg(), services=("github",), run=run)
+    assert any(c.name == "gh" and c.status == "error" for c in checks)
+    assert any(c.name == "remote" and c.status == "error" for c in checks)
+    assert not any(c.name == "web search" for c in checks)
+
+
+def test_the_search_service_gates_on_the_search_credential_only():
+    def run(argv, root):
+        raise AssertionError("the search service never touches gh or git")
+
+    cfg = anthropic_cfg()
+    cfg["search"] = {"provider": "brave"}
+    checks = free_checks(cfg, services=("search",), run=run)
+    assert any(c.name == "web search" and c.status == "error" for c in checks)
+    assert not any(c.name in ("gh", "remote") for c in checks)
+
+
+def test_an_unknown_service_is_refused():
+    """A mistyped service must not silently under-check the path."""
+    with pytest.raises(ValueError, match="unknown service"):
+        free_checks(anthropic_cfg(), services=("githubb",))
 
 
 # --- --live: one tiny tool-call round trip per distinct (provider, model) ---

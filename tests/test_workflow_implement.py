@@ -17,6 +17,7 @@ from langchain_core.messages import AIMessage
 
 from fakes import STUB_TEST_CMD, FakeChatModel, FakeTracker, cfg_with
 from k0ntrol.frontends.session import run_session
+from k0ntrol.providers import free_checks
 from k0ntrol.tracker import TrackerError
 from k0ntrol.workflow import (
     Outcome,
@@ -1660,6 +1661,89 @@ def test_the_task_run_does_not_gate_on_the_reviewer_provider(tmp_path):
     run_implement(tmp_path, implement_cfg(), seams_model(), check=record)
 
     assert "agents.reviewer" not in captured["names"]
+
+
+# --- the services the doctor gate asks for (ticket #179) --------------------------
+
+
+def real_checks(**seams):
+    """The real ``free_checks`` behind the run's check seam, env stubbed."""
+    defaults = {
+        "init": lambda model, *, model_provider=None, **kwargs: FakeChatModel(
+            profile={"tool_calling": True}
+        ),
+        "importable": lambda module: True,
+        "run": lambda argv, root: (0, ""),
+        "environ": {"ANTHROPIC_API_KEY": "x"},
+    }
+    defaults.update(seams)
+    return partial(free_checks, **defaults)
+
+
+def test_the_task_run_asks_the_doctor_for_no_services(tmp_path):
+    """``/implement <task>`` is a local path: no GitHub auth, no remote and
+    no search credential gate it (#179)."""
+    git_repo(tmp_path)
+    captured = {}
+
+    def record(cfg, *, names=None, services=None, **kwargs):
+        captured["services"] = services
+        return []
+
+    run_implement(tmp_path, implement_cfg(), seams_model(), check=record)
+
+    assert captured["services"] == ()
+
+
+def test_the_task_run_reaches_its_seam_without_gh_or_a_search_key(tmp_path):
+    """A no-origin repo with ``gh`` off PATH and a keyless search provider:
+    ``/implement <task>`` still reaches the seam gate (#179)."""
+    git_repo(tmp_path)
+    cfg = implement_cfg()
+    cfg["search"] = {"provider": "brave"}
+    check = real_checks(run=lambda argv, root: (None, "gh is not on PATH"))
+
+    result = run_implement(tmp_path, cfg, seams_model(), check=check)
+
+    assert isinstance(result, Pending) and result.gate == "seam"
+
+
+def test_the_item_run_gates_on_github_and_refuses_before_mutating(tmp_path):
+    """``/implement #<n>`` is a tracker/push flow: unavailable ``gh``
+    refuses it at the doctor gate, before the tracker is touched (#179)."""
+    item_repo(tmp_path)
+    tracker = FakeTracker(git_runner=git_runner_for(tmp_path))
+    ready_item(tracker)
+    check = real_checks(run=lambda argv, root: (None, "gh is not on PATH"))
+
+    with pytest.raises(RunRefused, match="gh"):
+        run_item(
+            tmp_path,
+            item_cfg(),
+            tracker,
+            builder_model(),
+            passing_reviewer(),
+            check=check,
+        )
+
+    assert tracker.calls == []
+
+
+def test_the_item_run_ignores_a_missing_search_key(tmp_path):
+    """Neither implementer nor reviewer can ``web_search``: a configured
+    but keyless search provider must not refuse the tracker path (#179)."""
+    item_repo(tmp_path)
+    tracker = FakeTracker(git_runner=git_runner_for(tmp_path))
+    ready_item(tracker)
+    cfg = item_cfg()
+    cfg["search"] = {"provider": "brave"}
+    check = real_checks()  # environ has no BRAVE_SEARCH_API_KEY
+
+    result = run_item(
+        tmp_path, cfg, tracker, builder_model(), passing_reviewer(), check=check
+    )
+
+    assert isinstance(result, Pending)
 
 
 # --- /implement #<n>: the review gate over both reviews (ticket #119) ----------

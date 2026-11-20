@@ -105,7 +105,10 @@ def _prepare(
         write("usage: /ask <question>")
         return None
     checks = check(
-        config, names=("agents.chatty", "helpers.bulk_read"), root=root
+        config,
+        names=("agents.chatty", "helpers.bulk_read"),
+        root=root,
+        services=(),  # local path: no GitHub auth, remote or search key
     )
     if has_errors(checks):
         for line in report_lines(checks):

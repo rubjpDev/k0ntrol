@@ -264,6 +264,49 @@ def test_the_planner_and_bulk_read_roster_gates_the_run(tmp_path):
     assert "helpers.bulk_read" in captured["names"]
 
 
+def test_the_question_run_gates_on_github_and_search(tmp_path):
+    """Charting publishes to the tracker and PLANNER can ``web_search``:
+    both services gate ``/research <question>`` (#179)."""
+    git_repo(tmp_path)
+    captured = {}
+
+    def doctor(cfg, *, names=None, services=None, **kwargs):
+        captured["services"] = services
+        return []
+
+    run_research(
+        tmp_path,
+        research_cfg(),
+        planner_model(chart_call()),
+        tracker=FakeTracker(),
+        check=doctor,
+    )
+
+    assert captured["services"] == ("github", "search")
+
+
+def test_the_map_run_gates_on_github_and_search(tmp_path):
+    """``/research #<n>``'s roster adds RESEARCHER — also a ``web_search``
+    agent on a tracker path (#179)."""
+    git_repo(tmp_path)
+    captured = {}
+
+    def doctor(cfg, *, names=None, services=None, **kwargs):
+        captured["services"] = services
+        return []
+
+    with pytest.raises(RunRefused, match="work item"):
+        run_research(
+            tmp_path,
+            map_cfg(),
+            tracker=FakeTracker(),
+            input="#9",
+            check=doctor,
+        )
+
+    assert captured["services"] == ("github", "search")
+
+
 # --- charting and publishing -----------------------------------------------------
 
 

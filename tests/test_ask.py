@@ -3,13 +3,14 @@
 
 import json
 import subprocess
+from functools import partial
 
 import pytest
 from langchain_core.messages import AIMessage
 
 from fakes import FakeChatModel, cfg_with
 from k0ntrol.frontends.ask import answer_ask
-from k0ntrol.providers import Check
+from k0ntrol.providers import Check, free_checks
 
 
 def _repo(root, files=None):
@@ -401,8 +402,9 @@ def test_ask_doctor_gates_on_chatty_and_the_bulk_read_helper(tmp_path):
     _repo(tmp_path)
     seen = {}
 
-    def spy(cfg, *, names=None, root=None):
+    def spy(cfg, *, names=None, services=None, root=None):
         seen["names"] = tuple(names)
+        seen["services"] = services
         return [Check("config", "ok", "valid")]
 
     answer_ask(
@@ -416,6 +418,38 @@ def test_ask_doctor_gates_on_chatty_and_the_bulk_read_helper(tmp_path):
     )
 
     assert seen["names"] == ("agents.chatty", "helpers.bulk_read")
+    # /ask is a local path: no GitHub auth, remote or search credential
+    assert seen["services"] == ()
+
+
+def test_ask_answers_in_a_local_repo_without_gh_or_a_search_key(tmp_path):
+    """``/ask`` in a no-origin repo, ``gh`` off PATH and a configured but
+    keyless search provider still reaches CHATTY (#179)."""
+    _repo(tmp_path)
+    config = _cfg()
+    config["search"] = {"provider": "brave"}
+    check = partial(
+        free_checks,
+        init=lambda model, *, model_provider=None, **kwargs: FakeChatModel(
+            profile={"tool_calling": True}
+        ),
+        importable=lambda module: True,
+        run=lambda argv, root: (None, "gh is not on PATH"),
+        environ={"ANTHROPIC_API_KEY": "x"},
+    )
+    model = FakeChatModel(messages=[AIMessage(content="an answer")])
+
+    result = answer_ask(
+        "q?",
+        root=tmp_path,
+        config=config,
+        write=lambda _line: None,
+        init=_init(model),
+        check=check,
+        refresh=_no_refresh,
+    )
+
+    assert result is not None and result.text == "an answer"
 
 
 def test_ask_refuses_when_memory_refresh_fails(tmp_path):

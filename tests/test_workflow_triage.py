@@ -240,6 +240,30 @@ def test_the_planner_and_bulk_read_roster_gates_the_run(tmp_path):
     assert "helpers.bulk_read" in captured["names"]
 
 
+def test_the_triage_run_gates_on_github_and_search(tmp_path):
+    """``/triage #<n>`` is a tracker path whose PLANNER can ``web_search``:
+    both services gate it (#179)."""
+    git_repo(tmp_path)
+    captured = {}
+
+    def doctor(cfg, *, names=None, services=None, **kwargs):
+        captured["services"] = services
+        return []
+
+    tracker = FakeTracker()
+    item = raw_item(tracker)
+    run_triage(
+        tmp_path,
+        triage_cfg(),
+        tracker,
+        planner_model(round_call([Q1])),
+        input=f"#{item.ref}",
+        check=doctor,
+    )
+
+    assert captured["services"] == ("github", "search")
+
+
 def test_triage_runs_on_a_dirty_tree_and_needs_no_ready_label(tmp_path):
     """Triage is what readies work: no label and no clean tree required."""
     git_repo(tmp_path)
