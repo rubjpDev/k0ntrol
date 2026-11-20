@@ -62,6 +62,8 @@ class RunState(TypedDict, total=False):
     # /implement #<n> (#118): once the draft change is open, REVIEWER runs
     # twice with fresh context — a Conventions review and a Contract
     # review — each posted on the change as its own labelled review.
+    # #175: each dict carries the verdict — ``status`` completed/refused
+    # with a ``reason`` — and the published ``head_sha`` it judged.
     conventions_review: dict | None  # the Conventions Review as a plain dict
     contract_review: dict | None  # the Contract Review as a plain dict
     conventions_review_attempts: int  # Conventions REVIEWER runs so far

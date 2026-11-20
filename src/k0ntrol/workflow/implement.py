@@ -39,9 +39,11 @@ from langgraph.types import interrupt
 
 from k0ntrol.tools.slice_guard import SliceStart
 from k0ntrol.tools.tracker import render_work_item
+from k0ntrol.tracker import TRUSTED_ASSOCIATIONS, TrackerError
 from k0ntrol.workflow.change import (
     decider,
     existing_branch,
+    head_sha,
     remote_tip,
     reset_scan_output,
     restore_worktree,
@@ -67,6 +69,7 @@ from k0ntrol.workflow.routers import (
     route_implement_start,
     route_implement_validator,
     route_limit_hit,
+    route_mark_ready,
     route_review_gate,
     route_seam_gate,
 )
@@ -135,7 +138,7 @@ def build_implement_graph(
     graph.add_edge("post_contract", "review_gate")
     graph.add_conditional_edges("review_gate", route_review_gate)
     graph.add_edge("review_comment", "mark_ready")
-    graph.add_edge("mark_ready", END)
+    graph.add_conditional_edges("mark_ready", route_mark_ready)
     graph.add_edge("plan_feedback", END)
     graph.add_edge("diff_gate", END)
     graph.add_conditional_edges("limit_hit", route_limit_hit)
@@ -315,6 +318,10 @@ def make_axis_review_node(
 
     def node(state: dict) -> dict:
         name = f"{axis}_review"
+        refusal = _axis_refusal(ctx, state, name)
+        if refusal is not None:
+            return refusal
+        head = _reviewed_head(ctx, state, axis)
         result, updates = _invoke_counted(
             ctx,
             "reviewer",
@@ -324,11 +331,77 @@ def make_axis_review_node(
             limit_node=name,
         )
         if not result.limit_hit:
-            updates[name] = brief_dict(result.structured_response)
-            updates[f"{name}_round"] = state.get(f"{name}_round", 0) + 1
+            updates.update(_axis_verdict(ctx, state, name, axis, head, result))
         return updates
 
     return node
+
+
+def _axis_verdict(
+    ctx: RunContext, state: dict, name: str, axis: str, head: str, result
+) -> dict:
+    """The axis's recorded verdict after a pass: the published head
+    re-checked, then the Review dict bound to it (#175)."""
+    _confirm_head(ctx, state, head, axis)
+    review = brief_dict(result.structured_response)
+    if review is not None:
+        review["head_sha"] = head
+    return {
+        name: review,
+        f"{name}_round": state.get(f"{name}_round", 0) + 1,
+    }
+
+
+def _axis_refusal(ctx: RunContext, state: dict, name: str) -> dict | None:
+    """A refusal recorded in code when the change's author is untrusted —
+    REVIEWER is never asked, and its verdict could never pass anyway
+    (#175). ``None`` on a trusted change."""
+    item = ctx.tracker.read_work_item(state["change_ref"])
+    if item.author_association in TRUSTED_ASSOCIATIONS:
+        return None
+    return {
+        name: {
+            "status": "refused",
+            "reason": (
+                f"the change's author {item.author} "
+                f"({item.author_association}) is not a trusted author"
+            ),
+            "summary": "",
+            "findings": [],
+            "head_sha": _published_head(ctx, state),
+        },
+        f"{name}_round": state.get(f"{name}_round", 0) + 1,
+    }
+
+
+def _published_head(ctx: RunContext, state: dict) -> str | None:
+    """The change's published head — what ``read_change_diff`` shows —
+    or ``None`` when the tracker cannot name it (#175)."""
+    change = ctx.tracker.read_change(state["branch"])
+    return change.head_sha if change is not None else None
+
+
+def _reviewed_head(ctx: RunContext, state: dict, axis: str) -> str:
+    """The published head an axis review binds its verdict to — the run
+    stops resumable when the tracker cannot name it (#175)."""
+    head = _published_head(ctx, state)
+    if head is None:
+        raise TrackerError(
+            f"the change's head is unknown — the {axis} review cannot "
+            "bind its verdict to the published revision"
+        )
+    return head
+
+
+def _confirm_head(ctx: RunContext, state: dict, head: str, axis: str) -> None:
+    """The published head must not have moved while the pass collected
+    its inputs — a moved head is a resumable stop, never a verdict on a
+    mixed revision (#175)."""
+    if _published_head(ctx, state) != head:
+        raise TrackerError(
+            f"the change's head moved during the {axis} review — resume "
+            "to re-review the published revision"
+        )
 
 
 def make_post_axis_review(
@@ -353,58 +426,135 @@ def make_post_axis_review(
     return node
 
 
-# --- the review gate (#119) -----------------------------------------------------
+# --- the review gate (#119, #175) -------------------------------------------------
+
+#: The axes the change must be reviewed on before ``ok`` can mark it ready.
+_AXES = ("conventions", "contract")
+
+
+def review_status(
+    review: dict | None, published: str | None, local: str
+) -> str:
+    """One axis's availability for the change under review.
+
+    ``completed`` only when REVIEWER recorded its ``completed`` verdict
+    against a head that is still both the change's published head and
+    the local HEAD — a remote move or an unpushed local commit makes it
+    ``stale``; ``refused`` when a refusal was recorded; ``missing`` when
+    there is no verdict at all — including pre-verdict review dicts from
+    before #175, which carry no ``status`` and read as missing.
+    """
+    if not isinstance(review, dict):
+        return "missing"
+    status = review.get("status")
+    if status == "refused":
+        return "refused"
+    if status != "completed":
+        return "missing"
+    judged = review.get("head_sha")
+    if published is None or not (judged == published == local):
+        return "stale"
+    return "completed"
+
+
+def reviews_completed(ctx: RunContext, state: dict) -> bool:
+    """Whether every required axis holds a completed verdict on the
+    change's current published head — the only evidence ``ok`` may act
+    on (#175)."""
+    published = _published_head(ctx, state)
+    local = head_sha(ctx.root)
+    return all(
+        review_status(state.get(f"{axis}_review"), published, local)
+        == "completed"
+        for axis in _AXES
+    )
 
 
 def make_review_gate(ctx: RunContext) -> Callable[[dict], dict]:
     """The review gate: both posted reviews, unmerged; ``ok`` marks the
     change ready, ``redo`` reruns IMPLEMENTER in refactor, ``plan`` sends
-    the work item back to planning."""
+    the work item back to planning.
+
+    ``ok`` exists only while both axes hold a completed verdict on the
+    change's published head — a missing, refused or stale axis is named
+    in the detail and never offers ``ok`` (#175)."""
 
     def node(state: dict) -> dict:
+        ready = reviews_completed(ctx, state)
         decision = interrupt(
             {
                 "gate": "review",
                 "question": "approve the change?",
-                "answers": ["ok", "redo", "plan"],
-                "detail": _reviews_detail(state),
+                "answers": ["ok", "redo", "plan"] if ready else ["redo", "plan"],
+                "detail": _reviews_detail(ctx, state),
                 "diff": code_diff(
                     ctx.tracker.read_change_diff(state["change_ref"])
                 ),
             }
         )
-        word, _, feedback = str(decision).strip().partition(" ")
-        word = word.lower()
-        if word == "ok":
-            return {"review_approved": True, "review_route": "review_comment"}
-        rejections = [*state.get("review_rejections", []), feedback.strip()]
-        if word == "redo":
-            return {
-                "review_approved": False,
-                "review_route": "implementer",
-                "implementer_attempts": 0,
-                "refactor": True,
-                "review_feedback": _reviews_feedback(state, feedback),
-                "review_rejections": rejections,
-            }
-        return {
-            "review_approved": False,
-            "review_route": "plan_feedback",
-            "plan_feedback": feedback.strip(),
-            "review_rejections": rejections,
-        }
+        return _gate_route(state, str(decision), ready)
 
     return node
 
 
-def _reviews_detail(state: dict) -> str:
-    """The gate's detail: the change's ref and both reviews, unmerged."""
+def _gate_route(state: dict, decision: str, ready: bool) -> dict:
+    """The review gate's decision as a state update."""
+    word, _, feedback = decision.strip().partition(" ")
+    word = word.lower()
+    if word == "ok" and not ready:
+        # A stored ``ok`` from before the verdicts is no approval:
+        # re-show the gate with the unavailable axes named (#175).
+        return {"review_route": "review_gate"}
+    if word == "ok":
+        return {"review_approved": True, "review_route": "review_comment"}
+    rejections = [*state.get("review_rejections", []), feedback.strip()]
+    if word == "redo":
+        return {
+            "review_approved": False,
+            "review_route": "implementer",
+            "implementer_attempts": 0,
+            "refactor": True,
+            "review_feedback": _reviews_feedback(state, feedback),
+            "review_rejections": rejections,
+        }
+    return {
+        "review_approved": False,
+        "review_route": "plan_feedback",
+        "plan_feedback": feedback.strip(),
+        "review_rejections": rejections,
+    }
+
+
+def _reviews_detail(ctx: RunContext, state: dict) -> str:
+    """The gate's detail: each axis's availability, then both reviews,
+    unmerged — a refused or missing axis says why (#175)."""
+    published = _published_head(ctx, state)
+    local = head_sha(ctx.root)
+    lines = [f"PR {state.get('change_ref')}", "", "Reviews:"]
+    for axis in _AXES:
+        lines.append(
+            f"- {axis}: "
+            + _availability(state.get(f"{axis}_review"), published, local)
+        )
     return (
-        f"PR {state.get('change_ref')}\n\n"
+        "\n".join(lines)
+        + "\n\n"
         + render_review(state.get("conventions_review"), "Conventions review")
         + "\n\n"
         + render_review(state.get("contract_review"), "Contract review")
     )
+
+
+def _availability(
+    review: dict | None, published: str | None, local: str
+) -> str:
+    status = review_status(review, published, local)
+    if status == "refused":
+        reason = (review or {}).get("reason") or "(no reason given)"
+        return f"refused — {reason}"
+    if status == "stale":
+        return "stale — the change's head moved since this review"
+    return status
 
 
 def _reviews_feedback(state: dict, extra: str) -> str:
@@ -424,6 +574,9 @@ def make_review_comment(ctx: RunContext) -> Callable[[dict], dict]:
     the round: after a redo the pass comments again."""
 
     def node(state: dict) -> dict:
+        if not reviews_completed(ctx, state):
+            # never record a pass the verdicts do not back (#175)
+            return {}
         ctx.tracker.comment_change(
             state["change_ref"],
             gate_comment(
@@ -492,7 +645,8 @@ def conventions_brief(ctx: RunContext) -> Callable[[dict], str]:
             f"{_gate_lines(ctx)}\n\n"
             f"## Code smells\n\n{_CODE_SMELLS}\n\n"
             "Read the files the diff touches with the read tools. Call "
-            "the Review tool exactly once with your summary and findings."
+            "the Review tool exactly once with your verdict — completed, "
+            "or refused with a reason — plus your summary and findings."
         )
 
     return brief
@@ -674,9 +828,16 @@ def _post_ci_comment(
 
 
 def make_mark_ready(ctx: RunContext) -> Callable[[dict], dict]:
-    """``gh pr ready``: the draft leaves draft state; the run is done."""
+    """``gh pr ready``: the draft leaves draft state; the run is done.
+
+    The readiness check runs again here, so a checkpoint that resumes
+    straight into this node (paused by older code) can never un-draft a
+    change without both completed verdicts (#175).
+    """
 
     def node(state: dict) -> dict:
+        if not reviews_completed(ctx, state):
+            return {}
         ctx.tracker.mark_change_ready(state["change_ref"])
         return {"outcome": "done"}
 
@@ -753,15 +914,23 @@ def contract_brief(state: dict) -> str:
         "partial, work the diff adds that was never asked for, and work "
         "that looks done but wrong. Its diff is below, without the "
         ".k0-mem/ memory files. Read the files it touches with the read "
-        "tools. Call the Review tool exactly once with your summary and "
+        "tools. Call the Review tool exactly once with your verdict — "
+        "completed, or refused with a reason — plus your summary and "
         "findings."
     )
 
 
 def render_review(review: dict | None, label: str = "Review") -> str:
-    """The ``## <label>`` markdown: PR review body and gate detail."""
+    """The ``## <label>`` markdown: PR review body and gate detail.
+
+    A refused verdict renders its reason; a pre-verdict dict still
+    renders its text — its ``missing`` status is the gate's call (#175).
+    """
     if not review:
         return "(REVIEWER produced no review)"
+    if review.get("status") == "refused":
+        reason = review.get("reason") or "(no reason given)"
+        return f"## {label}\n\nRefused: {reason}\n"
     findings = "\n".join(f"- {item}" for item in review.get("findings", []))
     return (
         f"## {label}\n\n"

@@ -75,6 +75,7 @@ class Change:
     state: str  # "open" | "merged" | "closed"
     is_draft: bool
     url: str
+    head_sha: str | None = None  # the published head; None when unknown (#175)
 
 
 class WorkItems(Protocol):

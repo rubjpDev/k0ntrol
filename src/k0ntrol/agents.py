@@ -113,10 +113,23 @@ _TOOL_NAME = re.compile(r"[a-zA-Z0-9_-]{1,64}")
 
 
 class Review(BaseModel):
-    """REVIEWER's structured output: the review of the change."""
+    """REVIEWER's structured output: its verdict on the change.
 
+    ``status`` is the verdict — ``completed`` or ``refused`` — tracked per
+    axis separately from the text and findings: a refused or missing
+    review is not a completed review with zero findings (#175).
+    """
+
+    status: Literal["completed", "refused"]
     summary: str
     findings: list[str]
+    reason: str = ""
+
+    @model_validator(mode="after")
+    def _refusal_has_a_reason(self) -> "Review":
+        if self.status == "refused" and not self.reason.strip():
+            raise ValueError("a refused review needs a reason")
+        return self
 
 
 class Question(BaseModel):

@@ -22,7 +22,7 @@ from k0ntrol.tracker.protocol import (
 
 CommandRunner = Callable[[list[str]], subprocess.CompletedProcess]
 
-_ISSUE_FIELDS = "number,title,state,isDraft,url"
+_ISSUE_FIELDS = "number,title,state,isDraft,url,headRefOid"
 
 
 def subprocess_runner(cwd: Path) -> CommandRunner:
@@ -246,6 +246,8 @@ class GhTracker:
             state="open",
             is_draft=True,
             url=url,
+            # open_change follows the push: the branch tip is the published head
+            head_sha=self._run(["git", "rev-parse", branch]).stdout.strip() or None,
         )
 
     def mark_change_ready(self, ref: str) -> None:
@@ -290,6 +292,7 @@ class GhTracker:
             state=pr["state"].lower(),
             is_draft=pr["isDraft"],
             url=pr["url"],
+            head_sha=pr.get("headRefOid") or None,
         )
 
     def read_change_diff(self, ref: str) -> str:

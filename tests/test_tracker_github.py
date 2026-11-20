@@ -492,12 +492,14 @@ def test_read_change_returns_none_or_the_change():
                     "state": "MERGED",
                     "isDraft": False,
                     "url": "https://github.com/o/r/pull/7",
+                    "headRefOid": "deadbee",
                 }
             ]
         ),
     )
     change = tracker.read_change("b")
     assert change.ref == "7" and change.state == "merged"
+    assert change.head_sha == "deadbee"
 
 
 def _pr(number, state):
@@ -542,10 +544,12 @@ def test_open_change_reuses_open_pr_or_creates_a_draft():
     runner.script(
         ["gh", "pr", "create"], stdout="https://github.com/o/r/pull/7\n"
     )
+    runner.script(["git", "rev-parse", "b"], stdout="cafef00d\n")
     tracker = GhTracker(runner)
 
     change = tracker.open_change("b", "main", "Add login", "Closes #42")
     assert change.ref == "7" and change.is_draft and change.state == "open"
+    assert change.head_sha == "cafef00d"
     create_call = [c for c in runner.calls if c[:3] == ["gh", "pr", "create"]][0]
     assert "--draft" in create_call and "--base" in create_call
 

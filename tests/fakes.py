@@ -398,6 +398,10 @@ class FakeTracker:
 
     def push(self, branch: str) -> None:
         self.calls.append(("push", branch))
+        # a push moves the published head to the local tip, like the remote
+        for change in self._changes.values():
+            if change["branch"] == branch:
+                change["head_sha"] = self._tip(branch)
 
     def open_change(self, branch: str, base: str, title: str, body: str) -> Change:
         self.calls.append(("open_change", branch))
@@ -416,6 +420,8 @@ class FakeTracker:
             "diff": "",
             "reviews": [],
             "comments": [],
+            # open_change follows the push: the branch tip is the published head
+            "head_sha": self._tip(branch),
         }
         return self._to_change(ref)
 
@@ -481,6 +487,10 @@ class FakeTracker:
 
     def set_diff(self, ref: str, diff: str) -> None:
         self._change(ref)["diff"] = diff
+
+    def set_change_head(self, ref: str, head_sha: str) -> None:
+        """Move the published head — the remote moved without k0 pushing."""
+        self._change(ref)["head_sha"] = head_sha
 
     def merge_change(self, ref: str) -> None:
         self._change(ref)["state"] = "merged"
@@ -550,13 +560,18 @@ class FakeTracker:
             body=change["body"],
             state=change["state"],
             url=change["url"],
-            author="k0",
-            author_association="OWNER",
+            author=change.get("author", "k0"),
+            author_association=change.get("author_association", "OWNER"),
             comments=tuple(
                 Comment(c["author"], c["author_association"], c["body"])
                 for c in change["comments"]
             ),
         )
+
+    def _tip(self, branch: str) -> str | None:
+        if self.git_runner is None:
+            return None
+        return self._git(["git", "rev-parse", branch]).stdout.strip() or None
 
     def _to_change(self, ref: str) -> Change:
         change = self._changes[ref]
@@ -567,6 +582,7 @@ class FakeTracker:
             state=change["state"],
             is_draft=change["is_draft"],
             url=change["url"],
+            head_sha=change.get("head_sha"),
         )
 
     def _git(self, argv: list[str]):

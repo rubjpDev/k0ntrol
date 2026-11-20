@@ -1279,13 +1279,18 @@ def test_a_marker_quoted_in_the_body_is_not_a_k0_ticket(tmp_path):
         run_item(tmp_path, item_cfg(), tracker, input=f"#{item.ref}")
 
 
-def review_call(summary, findings, call_id):
+def review_call(summary, findings, call_id, *, status="completed", reason=""):
     return AIMessage(
         content="",
         tool_calls=[
             {
                 "name": "Review",
-                "args": {"summary": summary, "findings": findings},
+                "args": {
+                    "status": status,
+                    "summary": summary,
+                    "findings": findings,
+                    "reason": reason,
+                },
                 "id": call_id,
             }
         ],
