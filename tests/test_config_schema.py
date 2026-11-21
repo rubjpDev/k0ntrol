@@ -347,6 +347,41 @@ def test_full_refuses_a_host_or_tracker_other_than_github(tmp_path, cfg, name):
         _tracker_for("full", cfg, tmp_path, None, required=True)
 
 
+# --- search: the provider key and the native-search switch (#182) --------------
+
+
+def test_search_is_absent_by_default(cfg):
+    assert "search" not in cfg
+
+
+def test_search_native_is_a_switch_missing_means_off(cfg):
+    cfg["search"] = {"provider": "brave"}
+    validate_config(cfg)
+    cfg["search"]["native"] = False
+    validate_config(cfg)
+    cfg["search"]["native"] = True
+    validate_config(cfg)
+
+
+@pytest.mark.parametrize("value", ["yes", 1, "true", [True]])
+def test_search_native_must_be_a_boolean(cfg, value):
+    cfg["search"] = {"native": value}
+    with pytest.raises(ConfigError, match="search.native"):
+        validate_config(cfg)
+
+
+def test_search_must_be_a_mapping(cfg):
+    cfg["search"] = "brave"
+    with pytest.raises(ConfigError, match="search"):
+        validate_config(cfg)
+
+
+def test_unknown_search_keys_are_rejected(cfg):
+    cfg["search"] = {"nativ": True}
+    with pytest.raises(ConfigError, match="search.nativ"):
+        validate_config(cfg)
+
+
 # --- trusted_authors: expressly trusted GitHub App logins (#176) --------------
 
 

@@ -101,6 +101,55 @@ def test_unknown_search_provider_reports_an_error_with_supported_providers():
     )
 
 
+def test_native_search_agents_need_no_search_provider():
+    """PLANNER and RESEARCHER on OpenAI's search: no ``search.provider``
+    key needed, the check is ok and names them (#182)."""
+    cfg = cfg_with(
+        agent_entries={
+            "planner": {"provider": "openai", "model": "gpt-x"},
+            "researcher": {"provider": "openai", "model": "gpt-y"},
+        }
+    )
+    cfg["search"] = {"native": True}
+    checks = free_checks(cfg)
+    (check,) = [c for c in checks if c.name == "web search"]
+    assert check.status == "ok"
+    assert "PLANNER" in check.detail and "RESEARCHER" in check.detail
+    assert "OpenAI" in check.detail
+    assert errors(checks) == []
+
+
+def test_native_search_covers_only_the_agents_on_openai():
+    """RESEARCHER on another provider still needs ``search.provider``;
+    the warning names only the agent without search (#182)."""
+    cfg = cfg_with(
+        agent_entries={
+            "planner": {"provider": "openai", "model": "gpt-x"},
+            "researcher": {"provider": "anthropic", "model": "claude-x"},
+        }
+    )
+    cfg["search"] = {"native": True}
+    checks = free_checks(cfg)
+    (check,) = [c for c in checks if c.name == "web search"]
+    assert check.status == "warning"
+    assert "RESEARCHER" in check.detail
+    assert "PLANNER" not in check.detail
+
+
+def test_native_search_alongside_a_search_provider():
+    cfg = cfg_with(
+        agent_entries={
+            "planner": {"provider": "openai", "model": "gpt-x"},
+            "researcher": {"provider": "anthropic", "model": "claude-x"},
+        }
+    )
+    cfg["search"] = {"native": True, "provider": "brave"}
+    checks = free_checks(cfg, environ={"BRAVE_SEARCH_API_KEY": "x"})
+    (check,) = [c for c in checks if c.name == "web search"]
+    assert check.status == "ok"
+    assert "brave" in check.detail and "PLANNER" in check.detail
+
+
 def test_unknown_provider_is_an_error_naming_it():
     cfg = cfg_with(agent_entries={"coder": {"provider": "litellm", "model": "m"}})
     checks = free_checks(cfg)

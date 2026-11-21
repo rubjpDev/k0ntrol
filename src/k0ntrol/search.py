@@ -55,6 +55,28 @@ def search_provider_name(cfg: dict) -> str | None:
     return name if isinstance(name, str) else None
 
 
+# The agents a provider's own web search can replace k0's ``web_search``
+# for (ADR 0017): the read-only network agents, never a writing one.
+NATIVE_SEARCH_AGENTS = ("planner", "researcher")
+
+
+def uses_native_search(cfg: dict, agent: str) -> bool:
+    """True when ``agent`` searches with its provider's own web search.
+
+    Only with ``search.native: true``, only PLANNER and RESEARCHER, and
+    only on the k0 provider ``openai`` — never on LangChain's
+    ``model_provider`` name, which ``lmstudio`` and ``openai_compatible``
+    share (ADR 0017).
+    """
+    search = cfg.get("search")
+    if not isinstance(search, dict) or search.get("native") is not True:
+        return False
+    if agent not in NATIVE_SEARCH_AGENTS:
+        return False
+    entry = (cfg.get("agents") or {}).get(agent) or {}
+    return entry.get("provider") == "openai"
+
+
 def _brave_request(endpoint: str, query: str, api_key: str) -> SearchRequest:
     url = f"{endpoint}?q={quote(query, safe='')}"
     headers = {"Accept": "application/json", "X-Subscription-Token": api_key}

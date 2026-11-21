@@ -14,7 +14,9 @@ the tools on ``ALLOWLISTS[name]``, and ``build_agent`` refuses any tool set
 that is not that allowlist — off-allowlist tools get
 ``ToolError(denied="allowlist")``, the canonical refusal. Only ``BaseTool``
 instances are accepted: dict tools (provider built-ins) would bypass the
-allowlist check in the tool node.
+allowlist check in the tool node — but for the one exception ADR 0017
+carves out: ``OPENAI_WEB_SEARCH`` may fill the ``web_search`` slot for
+PLANNER and RESEARCHER.
 """
 
 import re
@@ -37,6 +39,7 @@ from langchain.agents.middleware import (
 )
 from langchain.agents.structured_output import ToolStrategy
 from langchain.chat_models import init_chat_model
+from langchain_core.callbacks import dispatch_custom_event
 from langchain_core.messages import (
     AIMessage,
     AIMessageChunk,
@@ -47,9 +50,10 @@ from langchain_core.tools import BaseTool
 from langgraph.types import Command
 from pydantic import BaseModel, Field, model_validator
 
-from k0ntrol.events import META_AGENT, META_EFFORT
+from k0ntrol.events import META_AGENT, META_EFFORT, WARNING_EVENT
 from k0ntrol.memory.index import custom_rules_text, custom_topology_text
 from k0ntrol.providers import build_chat_model
+from k0ntrol.search import NATIVE_SEARCH_AGENTS, uses_native_search
 from k0ntrol.tools.bulk_read import make_bulk_read
 from k0ntrol.tools.errors import ToolError
 from k0ntrol.tools.fetch_url import make_fetch_url
@@ -71,6 +75,16 @@ _BASE_READ_TOOLS = _PRIMARY_READ_TOOLS + _HELPER_READ_TOOLS
 _TRACKER_TOOLS = ("read_work_item", "read_change_diff")
 
 _NETWORK_TOOLS = ("fetch_url", "web_search")
+
+# The provider built-in PLANNER and RESEARCHER get instead of k0's
+# ``web_search`` when ``uses_native_search`` says so (#182, ADR 0017): a
+# constant k0 owns, the one exception to "tools are only ``BaseTool``
+# instances". Binding it routes ``ChatOpenAI`` through the Responses API.
+OPENAI_WEB_SEARCH: dict[str, Any] = {"type": "web_search"}
+
+# OpenAI's hard cap on built-in tool calls per model call — a fixed k0
+# constant, not configurable (ADR 0017).
+NATIVE_SEARCH_MAX_CALLS = 5
 
 # The roster's tool allowlists (issue #12). `bulk_read` and `search_memory`
 # are on the base reads (#40); CHATTY's `read_work_item` joins when the
@@ -360,12 +374,14 @@ def agent_tools(
     read_only: bool = False,
     slice_start: SliceStart = "green",
     journal: SliceJournal | None = None,
-) -> list[BaseTool]:
+) -> list[BaseTool | dict[str, Any]]:
     """The tools on agent ``name``'s allowlist, bound to the run context.
 
     ``cfg`` supplies ``test_cmd``/``test_timeout`` for ``run_tests``,
     ``helpers.*`` for ``bulk_read`` and ``search.provider`` for
-    ``web_search``; ``tracker`` feeds the tracker reads; ``init`` builds
+    ``web_search`` — or ``search.native``, which puts the provider's own
+    search constant in the ``web_search`` slot instead (#182);
+    ``tracker`` feeds the tracker reads; ``init`` builds
     helper models; ``resolve``/``transport``/``environ``/``fetch`` are the
     network tools' injected seams. Each is needed only by tools that use
     it, and only when the tool runs. With ``tracker=None`` the tracker
@@ -394,13 +410,19 @@ def agent_tools(
         slice_start=slice_start,
         journal=journal,
     )
-    return [factories[tool_name]() for tool_name in names]
+    tools: list[BaseTool | dict[str, Any]] = []
+    for tool_name in names:
+        if tool_name == "web_search" and uses_native_search(cfg or {}, name):
+            tools.append(OPENAI_WEB_SEARCH)
+        else:
+            tools.append(factories[tool_name]())
+    return tools
 
 
 def build_agent(
     name: str,
     cfg: dict,
-    tools: Sequence[BaseTool],
+    tools: Sequence[BaseTool | dict[str, Any]],
     *,
     root: Path,
     init: Callable = init_chat_model,
@@ -417,26 +439,29 @@ def build_agent(
     entry = cfg["agents"][name]
     checked = _check_allowlist(name, tools, allowlist)
     model = build_chat_model(cfg, entry, init=init)
+    middleware: list[AgentMiddleware] = [
+        ModelCallLimitMiddleware(  # type: ignore[list-item]
+            run_limit=entry["model_calls"], exit_behavior="end"
+        ),
+        ModelRetryMiddleware(
+            max_retries=_MODEL_RETRIES,
+            retry_on=is_transient,
+            on_failure="error",
+        ),
+        ContextEditingMiddleware(
+            edits=[ClearSeenToolResults(exclude_tools=("read_work_item",))],  # type: ignore[list-item]
+        ),
+        ToolNameMiddleware(),
+        ToolErrorMiddleware(),
+    ]
+    if uses_native_search(cfg, name):
+        middleware.append(NativeSearchMiddleware(agent=name, model=entry["model"]))
     graph = create_agent(
         model,
         tools=checked,
         system_prompt=_system_prompt(name, root),
         response_format=_RESPONSE_FORMATS.get(name),
-        middleware=[
-            ModelCallLimitMiddleware(  # type: ignore[list-item]
-                run_limit=entry["model_calls"], exit_behavior="end"
-            ),
-            ModelRetryMiddleware(
-                max_retries=_MODEL_RETRIES,
-                retry_on=is_transient,
-                on_failure="error",
-            ),
-            ContextEditingMiddleware(
-                edits=[ClearSeenToolResults(exclude_tools=("read_work_item",))],  # type: ignore[list-item]
-            ),
-            ToolNameMiddleware(),
-            ToolErrorMiddleware(),
-        ],
+        middleware=middleware,
         name=name,
     )
     return K0Agent(
@@ -551,23 +576,93 @@ class ToolErrorMiddleware(AgentMiddleware):
             )
 
 
+class NativeSearchMiddleware(AgentMiddleware):
+    """Bind the provider search's call cap; drop the tool if the model
+    cannot use it (ADR 0017).
+
+    Every model call carries ``max_tool_calls`` so the provider's
+    searches stay capped. When the provider rejects the tool — the
+    configured model does not support web search — the call is retried
+    once without it and the tool stays off for the rest of the agent
+    run. One ``warning`` event names the agent and model; k0 never falls
+    back to ``search.provider`` (Brave): a silent switch would hide a
+    misconfiguration and could bill a second account.
+    """
+
+    def __init__(self, *, agent: str, model: str) -> None:
+        super().__init__()
+        self._agent = agent
+        self._model = model
+        self._search_dropped = False
+
+    def wrap_model_call(
+        self,
+        request: ModelRequest,
+        handler: Callable[[ModelRequest], ModelResponse],
+    ) -> ModelResponse:
+        request = request.override(
+            model_settings={
+                **request.model_settings,
+                "max_tool_calls": NATIVE_SEARCH_MAX_CALLS,
+            }
+        )
+        if self._search_dropped:
+            request = request.override(tools=_without_search(request.tools))
+        try:
+            return handler(request)
+        except Exception as error:
+            if not _unsupported_search(error):
+                raise
+        self._search_dropped = True
+        dispatch_custom_event(
+            WARNING_EVENT,
+            {
+                "agent": self._agent,
+                "model": self._model,
+                "reason": "web search unsupported",
+            },
+        )
+        return handler(request.override(tools=_without_search(request.tools)))
+
+
+def _without_search(tools: Sequence[Any]) -> list[Any]:
+    return [tool for tool in tools if tool != OPENAI_WEB_SEARCH]
+
+
+def _unsupported_search(error: Exception) -> bool:
+    """The OpenAI SDK's ``BadRequestError`` naming ``web_search``: the
+    model cannot use the tool. Matched on the class name — the
+    ``langchain-openai`` extra may not be installed — like
+    ``_TRANSIENT_ERROR_TYPES``."""
+    return "web_search" in str(error) and any(
+        cls.__name__ == "BadRequestError" for cls in type(error).__mro__
+    )
+
+
 def _check_allowlist(
-    name: str, tools: Sequence[BaseTool], allowlist: Sequence[str] | None = None
-) -> list[BaseTool]:
-    for item in tools:
-        if not isinstance(item, BaseTool):
-            raise TypeError(
-                f"tools must be BaseTool instances, got {item!r}"
-            )
+    name: str,
+    tools: Sequence[BaseTool | dict[str, Any]],
+    allowlist: Sequence[str] | None = None,
+) -> list[BaseTool | dict[str, Any]]:
+    slots = [_tool_slot(name, item) for item in tools]
     expected = set(allowlist if allowlist is not None else ALLOWLISTS[name])
-    got = {tool.name for tool in tools}
-    if got != expected:
+    if len(set(slots)) != len(slots) or set(slots) != expected:
         raise ToolError(
             f"agent {name!r} tools must be its allowlist {sorted(expected)}; "
-            f"got {sorted(got)}",
+            f"got {sorted(slots)}",
             denied="allowlist",
         )
     return list(tools)
+
+
+def _tool_slot(agent: str, item: BaseTool | dict[str, Any]) -> str:
+    """The allowlist slot a tool occupies; dict tools are refused but for
+    the one provider built-in PLANNER and RESEARCHER may carry (ADR 0017)."""
+    if isinstance(item, BaseTool):
+        return item.name
+    if item == OPENAI_WEB_SEARCH and agent in NATIVE_SEARCH_AGENTS:
+        return "web_search"
+    raise TypeError(f"tools must be BaseTool instances, got {item!r}")
 
 
 def _prompt(name: str) -> str:
@@ -714,7 +809,7 @@ class K0Agent:
         self,
         name: str,
         graph,
-        tools: Sequence[BaseTool],
+        tools: Sequence[BaseTool | dict[str, Any]],
         *,
         model_calls: int,
         effort: str | None = None,
