@@ -63,6 +63,7 @@ from k0ntrol.workflow.nodes import (
     make_validator,
 )
 from k0ntrol.workflow.routers import (
+    route_after_branch_setup,
     route_after_contract_review,
     route_after_conventions_review,
     route_after_implementer,
@@ -126,7 +127,7 @@ def build_implement_graph(
     graph.add_conditional_edges(START, route_implement_start)
     graph.add_conditional_edges("seam", route_after_seam)
     graph.add_conditional_edges("seam_gate", route_seam_gate)
-    graph.add_edge("branch_setup", "implementer")
+    graph.add_conditional_edges("branch_setup", route_after_branch_setup)
     graph.add_conditional_edges("implementer", route_after_implementer)
     graph.add_conditional_edges("validator", route_implement_validator)
     graph.add_edge("publish", "ci_gate")
@@ -545,11 +546,20 @@ def make_post_axis_review(
                 state.get(f"{axis}_review"), f"{axis.capitalize()} review"
             ),
             run=ctx.run_id,
-            node=f"post_{axis}{round_suffix(state, f'{axis}_review_round')}",
+            node=f"post_{axis}_{_post_head(ctx, state, axis)}",
         )
         return {}
 
     return node
+
+
+def _post_head(ctx: RunContext, state: dict, axis: str) -> str:
+    """The head an axis's post binds to — the reviewed head, else the
+    published one — keyed into the post's marker so any run's post of the
+    same revision dedupes and a moved head does not (#178)."""
+    review = state.get(f"{axis}_review") or {}
+    head = review.get("head_sha") or _published_head(ctx, state)
+    return head[:12] if head else "unpublished"
 
 
 # --- the review gate (#119, #175) -------------------------------------------------
@@ -880,20 +890,44 @@ def make_branch_setup(ctx: RunContext) -> Callable[[dict], dict]:
     """
 
     def node(state: dict) -> dict:
-        ref = state["item_ref"]
-        branch = (
-            state.get("branch")
-            or existing_branch(ctx.root, ref)
-            or f"k0/{ref}-{slugify(state['item_title'])}"
-        )
+        branch = _branch_for(ctx, state)
         reset_scan_output(ctx.root)
         ctx.tracker.create_branch(branch, ctx.base_branch)
-        ctx.scan(ctx.root)
-        ctx.tracker.commit(f"#{ref}: update memory")
         tip = None if state.get("ci_approved_sha") else remote_tip(ctx.root, branch)
-        return {"branch": branch, **({"ci_approved_sha": tip} if tip else {})}
+        update = _reconcile(ctx, branch)
+        if update is None:
+            ctx.scan(ctx.root)
+            ctx.tracker.commit(f"#{state['item_ref']}: update memory")
+            update = {}
+        return {
+            "branch": branch,
+            **({"ci_approved_sha": tip} if tip else {}),
+            **update,
+        }
 
     return node
+
+
+def _branch_for(ctx: RunContext, state: dict) -> str:
+    """The run's branch: a resuming run's, else the item's existing
+    ``k0/<n>-*``, else a fresh slug."""
+    ref = state["item_ref"]
+    return (
+        state.get("branch")
+        or existing_branch(ctx.root, ref)
+        or f"k0/{ref}-{slugify(state['item_title'])}"
+    )
+
+
+def _reconcile(ctx: RunContext, branch: str) -> dict | None:
+    """The branch's published change is under review: seed its refs so the
+    run re-enters at the reviews — build, validation and push are not
+    rerun, and no memory commit puts local ahead of published (#178).
+    ``None`` when the branch carries no open change."""
+    change = ctx.tracker.read_change(branch)
+    if change is None or change.state != "open":
+        return None
+    return {"change_ref": change.ref, "change_url": change.url}
 
 
 def make_publish(ctx: RunContext) -> Callable[[dict], dict]:
