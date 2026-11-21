@@ -1,5 +1,7 @@
 # PLANNER and RESEARCHER get read-only network tools
 
+> Amended by [ADR 0017](0017-planner-and-researcher-can-use-the-providers-own-web-search.md): with `search.native` on, an agent on a wired provider (OpenAI in 0.1.0) searches with that provider's own web search instead of `web_search`. Its rejection of the provider's built-in search below no longer holds.
+
 From 0.1.0, two agents can read the web: PLANNER, to ground its questions, and RESEARCHER, to answer research decision tickets from primary sources. They get two tools. `fetch_url` reads one page over HTTP(S) with the standard library and returns its text. It refuses any host that resolves to a loopback, private or link-local address (checked again after each redirect), caps the size it reads, and times out. `web_search` queries one search API the user configures, whose key is saved like the provider keys and called with the standard library, so no new package enters the install. Everything either tool returns is marked untrusted, the way untrusted tracker content already is. IMPLEMENTER, REVIEWER and CHATTY get no network tool. We chose this because planning and research without the web leave agents to answer from model memory, which is stale and cannot be cited, and the risk that kept the network out (ADR 0006: injected text steering an agent) is contained when the only agents that read the web have no write tools.
 
 ## Considered Options
