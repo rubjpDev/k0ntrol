@@ -46,6 +46,12 @@ from k0ntrol.tracker import (
 )
 
 
+class BadRequestError(Exception):
+    """Stand-in for the OpenAI SDK's ``BadRequestError`` (#182)."""
+
+    status_code = 400
+
+
 class FakeChatModel(GenericFakeChatModel):
     """Scripted stand-in for a ``BaseChatModel``.
 

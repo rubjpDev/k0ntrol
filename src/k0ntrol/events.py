@@ -74,6 +74,10 @@ META_HELPER = "k0_helper"
 META_ATTEMPT = "k0_attempt"
 META_EFFORT = "k0_effort"
 
+# The custom-event name middleware dispatches to emit a `warning` event
+# from inside a model call (#182).
+WARNING_EVENT = "warning"
+
 
 def events_path(root: Path) -> Path:
     """The event log for the project rooted at `root`."""
@@ -380,6 +384,7 @@ class K0EventHandler(GraphCallbackHandler):
             tokens_in=usage.get("input_tokens"),
             tokens_out=usage.get("output_tokens"),
             cost_usd=_response_cost(message),
+            web_searches=_web_searches(message),
             ok=True,
         )
 
@@ -477,6 +482,27 @@ class K0EventHandler(GraphCallbackHandler):
             denied=getattr(error, "denied", None),
         )
 
+    # -- custom events --------------------------------------------------------
+
+    def on_custom_event(
+        self,
+        name: str,
+        data: Any,
+        *,
+        run_id: Any = None,
+        tags: list | None = None,
+        metadata: dict | None = None,
+        **kwargs: Any,
+    ) -> None:
+        """A middleware's adhoc ``warning`` becomes one JSONL event."""
+        if name == WARNING_EVENT and isinstance(data, Mapping):
+            self._writer.emit(
+                WARNING_EVENT,
+                agent=data.get("agent"),
+                model=data.get("model"),
+                reason=data.get("reason"),
+            )
+
     # -- gate events ---------------------------------------------------------
 
     def on_interrupt(self, event: GraphInterruptEvent) -> None:
@@ -548,6 +574,31 @@ def _response_model(response: Any, message: Any | None) -> Any | None:
 def _response_cost(message: Any | None) -> Any | None:
     meta = getattr(message, "response_metadata", None) or {}
     return meta.get("cost")
+
+
+def _web_searches(message: Any | None) -> int | None:
+    """The provider searches the call ran, or ``None`` — the field is
+    left out of the ``model`` event when the call ran none (#182).
+    ``web_search_call`` items land in the content blocks; a v0-formatted
+    response keeps them in ``additional_kwargs.tool_outputs``."""
+    if message is None:
+        return None
+    count = _search_calls(getattr(message, "content", None))
+    tool_outputs = (getattr(message, "additional_kwargs", None) or {}).get(
+        "tool_outputs"
+    )
+    count += _search_calls(tool_outputs)
+    return count or None
+
+
+def _search_calls(blocks: Any) -> int:
+    if not isinstance(blocks, list):
+        return 0
+    return sum(
+        1
+        for block in blocks
+        if isinstance(block, dict) and block.get("type") == "web_search_call"
+    )
 
 
 # --- Progress renderer ----------------------------------------------------
@@ -633,6 +684,13 @@ def _render_tool(e: dict) -> str:
     if e.get("ok"):
         return f"{head} ok {e.get('ms', 0)}ms"
     return f"{head} failed: {_snip(e.get('err', ''))} ({e.get('ms', 0)}ms)"
+
+
+def _render_warning(e: dict) -> str:
+    return (
+        f"warning {e.get('agent', '?')} {e.get('model', '?')}: "
+        f"{e.get('reason', '?')}"
+    )
 
 
 def _render_gate(e: dict) -> str:
@@ -738,6 +796,7 @@ _RENDERERS: dict[str, Callable[[dict], str]] = {
     "run_start": _render_run_start,
     "model": _render_model,
     "tool": _render_tool,
+    "warning": _render_warning,
     "gate": _render_gate,
     "run_end": _render_run_end,
 }

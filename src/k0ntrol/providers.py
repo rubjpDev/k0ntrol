@@ -28,7 +28,13 @@ from langchain_core.messages import HumanMessage
 from langchain_core.tools import tool
 
 from k0ntrol.config import resolved_params
-from k0ntrol.search import SEARCH_PROVIDERS, search_provider_name
+from k0ntrol.search import (
+    NATIVE_SEARCH_AGENTS,
+    SEARCH_PROVIDERS,
+    SearchProvider,
+    search_provider_name,
+    uses_native_search,
+)
 
 OLLAMA_BASE_URL = "http://localhost:11434"
 LMSTUDIO_BASE_URL = "http://localhost:1234/v1"
@@ -274,19 +280,62 @@ def _wanted_services(services: Iterable[str] | None) -> frozenset[str]:
 
 
 def _search_check(cfg: dict, environ: Mapping[str, str]) -> Check:
+    """Which agents can search: those on their provider's own web
+    search, and the rest through ``search.provider`` (#182, ADR 0017)."""
     name = search_provider_name(cfg)
-    if name is None:
+    provider = SEARCH_PROVIDERS.get(name) if name is not None else None
+    error = _search_provider_error(name, provider, environ)
+    if error is not None:
+        return error
+    native = _native_agents(cfg)
+    uncovered = [a for a in NATIVE_SEARCH_AGENTS if a not in native]
+    if provider is None and uncovered:
         return Check(
             "web search", "warning",
-            "PLANNER and RESEARCHER will have no web search. Set search.provider to enable it.",
+            f"{_agent_names(uncovered)} will have no web search. "
+            "Set search.provider to enable it.",
         )
-    provider = SEARCH_PROVIDERS.get(name)
-    if provider is None:
+    return Check("web search", "ok", _search_detail(name, provider, native))
+
+
+def _native_agents(cfg: dict) -> list[str]:
+    return [a for a in NATIVE_SEARCH_AGENTS if uses_native_search(cfg, a)]
+
+
+def _search_provider_error(
+    name: str | None,
+    provider: SearchProvider | None,
+    environ: Mapping[str, str],
+) -> Check | None:
+    if name is not None and provider is None:
         known = ", ".join(sorted(SEARCH_PROVIDERS))
-        return Check("web search", "error", f"unknown search.provider {name!r}; choose {known}")
-    if not environ.get(provider.key_env):
-        return Check("web search", "error", f"{name} needs a credential; set {provider.key_env}")
-    return Check("web search", "ok", f"{name} credential {provider.key_env} set")
+        return Check(
+            "web search", "error",
+            f"unknown search.provider {name!r}; choose {known}",
+        )
+    if provider is not None and not environ.get(provider.key_env):
+        return Check(
+            "web search", "error",
+            f"{name} needs a credential; set {provider.key_env}",
+        )
+    return None
+
+
+def _search_detail(
+    name: str | None,
+    provider: SearchProvider | None,
+    native: list[str],
+) -> str:
+    parts = []
+    if provider is not None:
+        parts.append(f"{name} credential {provider.key_env} set")
+    if native:
+        parts.append(f"{_agent_names(native)} on OpenAI's web search")
+    return "; ".join(parts)
+
+
+def _agent_names(agents: list[str]) -> str:
+    return " and ".join(agent.upper() for agent in agents)
 
 
 def _provider_membership(cfg: dict, entries: dict[str, dict]) -> list[Check]:
