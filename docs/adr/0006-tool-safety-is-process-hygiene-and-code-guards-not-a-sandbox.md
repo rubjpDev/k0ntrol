@@ -1,6 +1,8 @@
 # Tool safety in 0.1.0 is process hygiene and code guards, not a sandbox
 
 > Amended by [ADR 0013](0013-planner-and-researcher-get-read-only-network-tools.md): PLANNER and RESEARCHER get read-only network tools. The other guards stand.
+>
+> Amended by [ADR 0017](0017-planner-and-researcher-can-use-the-providers-own-web-search.md): PLANNER and RESEARCHER may get their provider's own web search, the one tool that is not a `BaseTool`.
 
 In 0.1.0, agent-written code runs unsandboxed, with network access, as the user. k0 limits what that code and the agents can reach with checks in code instead of an OS sandbox:
 
