@@ -100,6 +100,23 @@ def _validate_top_level(cfg: dict) -> list[str]:
     errors.extend(_validate_roster("agents", cfg.get("agents")))
     errors.extend(_validate_roster("helpers", cfg.get("helpers")))
     errors.extend(_validate_providers(cfg.get("providers")))
+    errors.extend(_validate_search(cfg.get("search")))
+    return errors
+
+
+# ``search`` keys: ``provider`` names k0's ``web_search`` backend; ``native``
+# is the switch for provider-native search (#182, ADR 0017).
+_SEARCH_KEYS = {"provider", "native"}
+
+
+def _validate_search(value: object) -> list[str]:
+    if value is None:
+        return []
+    if not isinstance(value, Mapping):
+        return ["search: must be a mapping"]
+    errors = [f"search.{key}: unknown key" for key in value if key not in _SEARCH_KEYS]
+    if "native" in value and not isinstance(value["native"], bool):
+        errors.append("search.native: must be a boolean")
     return errors
 
 

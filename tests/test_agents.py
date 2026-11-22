@@ -15,9 +15,11 @@ from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_core.tools import BaseTool, tool
 from pydantic import ValidationError
 
-from fakes import FakeChatModel, FakeTracker, cfg_with
+from fakes import BadRequestError, FakeChatModel, FakeTracker, cfg_with
 from k0ntrol.agents import (
     ALLOWLISTS,
+    NATIVE_SEARCH_MAX_CALLS,
+    OPENAI_WEB_SEARCH,
     MissingStructuredOutput,
     QuestionRound,
     ResearchFinding,
@@ -26,8 +28,10 @@ from k0ntrol.agents import (
     agent_tools,
     allowlist_for,
     build_agent,
+    is_transient,
 )
 from k0ntrol.events import EventWriter, K0EventHandler
+from k0ntrol.search import uses_native_search
 from k0ntrol.tools.errors import ToolError
 from k0ntrol.tools.net import HttpResponse
 from k0ntrol.tools.tracker import tracker_read_tools
@@ -144,6 +148,248 @@ def test_network_tools_use_injected_boundaries(tmp_path, name):
     assert "UNTRUSTED" in results
     assert "Primary source" in results
     assert fetches
+
+
+# --- native search: the provider's own web search (#182, ADR 0017) -------------
+
+
+def _native_cfg(agent="planner", provider="openai", **search):
+    cfg = cfg_with(
+        {agent: {"provider": provider, "model": "m", "model_calls": 5}}
+    )
+    cfg["search"] = {"native": True, **search}
+    return cfg
+
+
+@pytest.mark.parametrize("agent", ["planner", "researcher"])
+def test_native_search_keys_on_the_k0_provider(agent):
+    cfg = _native_cfg(agent)
+    assert uses_native_search(cfg, agent) is True
+
+
+@pytest.mark.parametrize("provider", ["lmstudio", "openai_compatible", "anthropic"])
+def test_native_search_follows_the_k0_provider_name(provider):
+    # lmstudio and openai_compatible share LangChain's "openai"
+    # model_provider — they still use search.provider (ADR 0017).
+    cfg = _native_cfg(provider=provider)
+    assert uses_native_search(cfg, "planner") is False
+
+
+@pytest.mark.parametrize("agent", ["implementer", "reviewer", "chatty"])
+def test_native_search_is_planner_and_researcher_only(agent):
+    cfg = _native_cfg(agent)
+    assert uses_native_search(cfg, agent) is False
+
+
+def test_native_search_is_off_without_the_switch():
+    cfg = cfg_with({"planner": {"provider": "openai", "model": "m"}})
+    assert uses_native_search(cfg, "planner") is False
+    cfg["search"] = {"native": False}
+    assert uses_native_search(cfg, "planner") is False
+    cfg["search"] = {"provider": "brave"}
+    assert uses_native_search(cfg, "planner") is False
+
+
+def test_agent_tools_swap_the_search_slot_for_the_provider_tool(tmp_path):
+    """With native search on, PLANNER's ``web_search`` slot carries
+    OpenAI's own tool dict — never k0's ``web_search`` (#182)."""
+    cfg = _native_cfg()
+    fetches = []
+    tools = agent_tools(
+        "planner",
+        root=tmp_path,
+        cfg=cfg,
+        tracker=_tracker(),
+        fetch=lambda request: fetches.append(request) or b"{}",
+    )
+    assert OPENAI_WEB_SEARCH in tools
+    assert not any(
+        isinstance(tool, BaseTool) and tool.name == "web_search" for tool in tools
+    )
+    assert fetches == []
+
+
+def test_native_search_binds_the_tool_and_the_call_cap(tmp_path):
+    """The mocked OpenAI Responses seam: the request carries
+    ``{"type": "web_search"}`` and ``max_tool_calls`` (#182)."""
+    model = _scripted(_planner_round())
+    cfg = _native_cfg()
+    tools = agent_tools(
+        "planner", root=tmp_path, cfg=cfg, tracker=_tracker(), init=_init(model)
+    )
+    agent = build_agent("planner", cfg, tools, root=tmp_path, init=_init(model))
+
+    agent.invoke([HumanMessage("plan")])
+
+    assert OPENAI_WEB_SEARCH in model.bound_tools
+    assert model.bind_kwargs["max_tool_calls"] == NATIVE_SEARCH_MAX_CALLS
+
+
+def test_native_search_never_binds_both_search_tools(tmp_path):
+    model = _scripted(_planner_round())
+    cfg = _native_cfg()
+    cfg["search"]["provider"] = "brave"
+    tools = agent_tools(
+        "planner",
+        root=tmp_path,
+        cfg=cfg,
+        tracker=_tracker(),
+        init=_init(model),
+        environ={"BRAVE_SEARCH_API_KEY": "x"},
+    )
+    agent = build_agent("planner", cfg, tools, root=tmp_path, init=_init(model))
+
+    agent.invoke([HumanMessage("plan")])
+
+    bound = [
+        tool for tool in model.bound_tools
+        if (tool.get("type") if isinstance(tool, dict) else tool.name)
+        == "web_search"
+    ]
+    assert bound == [OPENAI_WEB_SEARCH]
+
+
+def test_the_allowlist_refuses_both_search_tools(tmp_path):
+    """k0's ``web_search`` and the provider's own must never be bound
+    together — two tools, one slot (#182)."""
+    cfg = _native_cfg()
+    cfg["search"]["provider"] = "brave"
+    k0_tools = agent_tools(
+        "planner",
+        root=tmp_path,
+        cfg={**cfg, "search": {"provider": "brave"}},
+        tracker=_tracker(),
+        environ={"BRAVE_SEARCH_API_KEY": "x"},
+    )
+    with pytest.raises(ToolError) as error:
+        build_agent(
+            "planner",
+            cfg,
+            [*k0_tools, OPENAI_WEB_SEARCH],
+            root=tmp_path,
+            init=_init(_scripted()),
+        )
+    assert error.value.denied == "allowlist"
+
+
+def test_the_search_constant_is_refused_off_the_search_agents(tmp_path):
+    cfg = cfg_with({"chatty": {"provider": "anthropic", "model": "m", "model_calls": 5}})
+    with pytest.raises(TypeError):
+        build_agent(
+            "chatty",
+            cfg,
+            [*agent_tools("chatty", root=tmp_path), OPENAI_WEB_SEARCH],
+            root=tmp_path,
+            init=_init(_scripted()),
+        )
+
+
+def test_any_other_tool_dict_still_raises(tmp_path):
+    cfg = _native_cfg()
+    tools = agent_tools("planner", root=tmp_path, cfg=cfg, tracker=_tracker())
+    with pytest.raises(TypeError):
+        build_agent(
+            "planner",
+            cfg,
+            [*tools, {"type": "computer_use_preview"}],
+            root=tmp_path,
+            init=_init(_scripted()),
+        )
+
+
+def _planner_round(questions=None):
+    return AIMessage(
+        content="",
+        tool_calls=[
+            {
+                "name": "QuestionRound",
+                "args": {"questions": questions or []},
+                "id": "q1",
+            }
+        ],
+    )
+
+
+def _native_agent(tmp_path, model, **tool_kwargs):
+    cfg = _native_cfg()
+    tools = agent_tools(
+        "planner",
+        root=tmp_path,
+        cfg=cfg,
+        tracker=_tracker(),
+        init=_init(model),
+        **tool_kwargs,
+    )
+    agent = build_agent("planner", cfg, tools, root=tmp_path, init=_init(model))
+    return agent
+
+
+def _event_log(root):
+    path = root / ".k0-mem" / "events.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    writer = EventWriter(path, run="r" * 32, mask=[])
+    return K0EventHandler(writer), path
+
+
+def _read_events(path):
+    return [
+        json.loads(line)
+        for line in path.read_text().splitlines()
+        if line.strip()
+    ]
+
+
+def test_an_unsupported_model_retries_without_the_tool(tmp_path):
+    fetches = []
+    model = _scripted(
+        BadRequestError("400 Unsupported tool: 'web_search'"),
+        _planner_round(),
+        _planner_round(),
+    )
+    agent = _native_agent(
+        tmp_path, model, fetch=lambda request: fetches.append(request) or b"{}"
+    )
+    handler, path = _event_log(tmp_path)
+
+    result = agent.invoke(
+        [HumanMessage("plan")], config={"callbacks": [handler]}
+    )
+
+    assert len(model.invocations) == 2  # the failed call retried once
+    assert OPENAI_WEB_SEARCH not in model.bound_tools
+    assert fetches == []  # k0 never falls back to search.provider
+    (warning,) = [
+        event for event in _read_events(path) if event.get("kind") == "warning"
+    ]
+    assert warning["agent"] == "planner"
+    assert warning["model"] == "m"
+    assert warning["reason"] == "web search unsupported"
+
+    # The tool stays off for the rest of the agent run — and no second
+    # warning is emitted.
+    agent.invoke([HumanMessage("again")], config={"callbacks": [handler]})
+    assert OPENAI_WEB_SEARCH not in model.bound_tools
+    warnings = [
+        event for event in _read_events(path) if event.get("kind") == "warning"
+    ]
+    assert len(warnings) == 1
+
+
+def test_other_bad_request_errors_still_fail_the_run(tmp_path):
+    model = _scripted(BadRequestError("400 context length exceeded"))
+    agent = _native_agent(tmp_path, model)
+    handler, path = _event_log(tmp_path)
+
+    with pytest.raises(BadRequestError):
+        agent.invoke([HumanMessage("plan")], config={"callbacks": [handler]})
+
+    assert not [
+        event for event in _read_events(path) if event.get("kind") == "warning"
+    ]
+
+
+def test_the_search_rejection_is_not_transient():
+    assert not is_transient(BadRequestError("400 Unsupported tool: 'web_search'"))
 
 
 def _tracker():

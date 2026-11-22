@@ -569,6 +569,87 @@ def test_tool_event_without_a_url_has_no_host(tmp_path):
     assert "host" not in event
 
 
+def test_model_event_counts_the_calls_web_searches(tmp_path):
+    """``web_search_call`` items in the response — the shape the
+    installed langchain-openai puts in ``AIMessage.content`` for the
+    Responses API (#182)."""
+    from uuid import uuid4
+
+    from langchain_core.outputs import LLMResult
+
+    handler, path = make_handler(tmp_path)
+    run_id = uuid4()
+    handler.on_chat_model_start({}, [], run_id=run_id, metadata={"k0_agent": "planner"})
+    message = AIMessage(
+        content=[
+            {"type": "web_search_call", "id": "ws_1", "status": "completed"},
+            {"type": "text", "text": "answer", "annotations": []},
+            {"type": "web_search_call", "id": "ws_2", "status": "completed"},
+        ]
+    )
+    handler.on_llm_end(
+        LLMResult(generations=[[ChatGeneration(message=message)]]),
+        run_id=run_id,
+    )
+    (event,) = read_events(path)
+    assert event["web_searches"] == 2
+    # Cost stays token-only and events stay content-free: no query or URL.
+    assert "cost_usd" not in event
+    assert "example.com" not in json.dumps(event)
+
+
+def test_model_event_omits_web_searches_when_the_call_ran_none(tmp_path):
+    from uuid import uuid4
+
+    from langchain_core.outputs import LLMResult
+
+    handler, path = make_handler(tmp_path)
+    run_id = uuid4()
+    handler.on_chat_model_start({}, [], run_id=run_id, metadata={"k0_agent": "planner"})
+    handler.on_llm_end(
+        LLMResult(
+            generations=[[ChatGeneration(message=AIMessage(content="plain text"))]]
+        ),
+        run_id=run_id,
+    )
+    (event,) = read_events(path)
+    assert "web_searches" not in event
+
+
+def test_a_custom_event_writes_a_warning_event(tmp_path):
+    """A middleware's adhoc ``warning`` becomes one JSONL event naming
+    the agent and model (#182)."""
+    from uuid import uuid4
+
+    handler, path = make_handler(tmp_path)
+    handler.on_custom_event(
+        "warning",
+        {"agent": "planner", "model": "gpt-x", "reason": "web search unsupported"},
+        run_id=uuid4(),
+        metadata={},
+    )
+    handler.on_custom_event("unrelated", {"x": 1}, run_id=uuid4(), metadata={})
+    (event,) = read_events(path)
+    assert event["kind"] == "warning"
+    assert event["run"] == RUN
+    assert event["agent"] == "planner"
+    assert event["model"] == "gpt-x"
+    assert event["reason"] == "web search unsupported"
+
+
+def test_render_event_warning_is_one_line():
+    line = render_event(
+        {
+            "kind": "warning",
+            "agent": "planner",
+            "model": "gpt-x",
+            "reason": "web search unsupported",
+        }
+    )
+    assert line is not None and "\n" not in line
+    assert "planner" in line and "gpt-x" in line and "web search unsupported" in line
+
+
 def test_gate_waiting_from_interrupt_payload(tmp_path):
     handler, path = make_handler(tmp_path)
     handler.on_interrupt(

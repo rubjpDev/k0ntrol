@@ -17,7 +17,8 @@ from pathlib import Path
 import pytest
 from langchain_core.messages import AIMessage
 
-from fakes import FakeChatModel, FakeTracker, cfg_with, doctor_seam
+from fakes import BadRequestError, FakeChatModel, FakeTracker, cfg_with, doctor_seam
+from k0ntrol.agents import NATIVE_SEARCH_MAX_CALLS, OPENAI_WEB_SEARCH
 from k0ntrol.tracker import TrackerError
 from k0ntrol.workflow import (
     Outcome,
@@ -176,6 +177,73 @@ def events(root):
     if not path.exists():
         return []
     return [json.loads(line) for line in path.read_text().splitlines()]
+
+
+# --- native search entry points (#182, ADR 0017) -------------------------------
+
+
+def native_cfg():
+    """A ``/plan`` config with PLANNER on OpenAI's own web search."""
+    cfg = plan_cfg()
+    cfg["agents"]["planner"]["provider"] = "openai"
+    cfg["search"] = {"native": True}
+    return cfg
+
+
+def _unsupported():
+    return BadRequestError("400 Unsupported tool: 'web_search'")
+
+
+def _warnings(root):
+    return [e for e in events(root) if e.get("kind") == "warning"]
+
+
+def test_start_builds_planner_with_openais_web_search(tmp_path):
+    git_repo(tmp_path)
+    model = planner_model(round_call([Q1]))
+
+    pending = run_plan(tmp_path, native_cfg(), model)
+
+    assert isinstance(pending, Pending) and pending.gate == "round"
+    assert OPENAI_WEB_SEARCH in model.bound_tools
+    assert model.bind_kwargs["max_tool_calls"] == NATIVE_SEARCH_MAX_CALLS
+
+
+def test_resume_rebuilds_the_agent_and_may_warn_again(tmp_path):
+    """``resume`` builds a fresh agent from config: no search state
+    persists, so an unsupported model warns and drops the tool again."""
+    git_repo(tmp_path)
+    first = planner_model(_unsupported(), round_call([Q1]))
+    pending = run_plan(tmp_path, native_cfg(), first)
+    assert isinstance(pending, Pending)
+    assert len(_warnings(tmp_path)) == 1
+    assert OPENAI_WEB_SEARCH not in first.bound_tools
+
+    second = planner_model(_unsupported(), round_call([]), spec_call())
+    gate = resume(
+        pending.run,
+        "1 yes",
+        root=tmp_path,
+        cfg=native_cfg(),
+        init=models_init(second),
+    )
+
+    assert isinstance(gate, Pending) and gate.gate == "spec"
+    assert len(_warnings(tmp_path)) == 2
+    assert OPENAI_WEB_SEARCH not in second.bound_tools
+
+
+def test_abandon_makes_no_model_call_and_shows_no_warning(tmp_path):
+    git_repo(tmp_path)
+    model = planner_model(round_call([Q1]))
+    pending = run_plan(tmp_path, native_cfg(), model)
+    assert isinstance(pending, Pending)
+    calls = len(model.invocations)
+
+    abandon(pending.run, root=tmp_path)
+
+    assert len(model.invocations) == calls
+    assert _warnings(tmp_path) == []
 
 
 # --- usage and start-time refusals ---------------------------------------------
