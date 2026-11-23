@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from k0ntrol.config import ConfigError, deep_merge, load_config
+from k0ntrol.config import ConfigError, deep_merge, load_config, validate_config
 
 
 def write(path: Path, text: str) -> None:
@@ -148,7 +148,7 @@ def test_project_config_overrides_planning_settings(tmp_path):
     [
         "max_questions: 0",
         "max_questions: -5",
-        "max_questions: \"25\"",
+        'max_questions: "25"',
         "max_round_questions: 0",
         "max_round_questions: -2",
         "max_round_questions: 7.5",
@@ -185,3 +185,27 @@ def test_retired_agent_keys_name_their_replacement(tmp_path, name, replacement, 
     with pytest.raises(ConfigError) as error:
         load_config(tmp_path, home)
     assert str(error.value) == message
+
+
+def test_validate_config_allows_output_token_count_params(tmp_path):
+    cfg = load_config(tmp_path, tmp_path / "home")
+    cfg["providers"] = {
+        "openai": {
+            "params": {
+                "max_tokens": 4000,
+                "max_output_tokens": 4000,
+                "max_completion_tokens": 4000,
+            }
+        }
+    }
+
+    validate_config(cfg)
+
+
+@pytest.mark.parametrize("secret_key", ["token", "access_token", "auth_token"])
+def test_validate_config_still_rejects_token_secrets(tmp_path, secret_key):
+    cfg = load_config(tmp_path, tmp_path / "home")
+    cfg["providers"] = {"openai": {"params": {secret_key: "secret-value"}}}
+
+    with pytest.raises(ConfigError, match="secrets are not allowed"):
+        validate_config(cfg)

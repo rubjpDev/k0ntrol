@@ -231,7 +231,10 @@ def _check_key(key: object, path: str, in_params: bool) -> list[str]:
     lowered = key.lower()
     if hint := _retired_key_hint(key, path):
         return [f"{path}: retired in 0.1.0; {hint}"]
-    if any(marker in lowered for marker in _SECRET_MARKERS):
+    secret_match = any(
+        marker in lowered for marker in _SECRET_MARKERS if marker != "token"
+    ) or lowered == "token" or lowered.endswith("token")
+    if secret_match:
         return [f"{path}: secrets are not allowed in config; use the provider's env vars"]
     if in_params and any(marker in lowered for marker in _TOOL_MARKERS):
         return [f"{path}: tool definitions are not allowed in params"]
