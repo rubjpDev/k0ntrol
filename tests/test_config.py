@@ -19,6 +19,12 @@ def test_deep_merge_nested_override_keeps_siblings_and_does_not_mutate():
     assert base["agents"]["coder"]["model"] == "a"
 
 
+def test_researcher_defaults_to_the_planners_strong_model(tmp_path):
+    cfg = load_config(tmp_path, tmp_path / "home")
+    for key in ("provider", "model", "effort"):
+        assert cfg["agents"]["researcher"][key] == cfg["agents"]["planner"][key]
+
+
 def test_defaults_only(tmp_path):
     cfg = load_config(tmp_path, tmp_path / "home")
     assert cfg["threshold_lines"] == 350
@@ -76,7 +82,7 @@ def test_home_config_overrides_each_new_agent(tmp_path):
     }
     assert agents["researcher"] == {
         "provider": "anthropic",
-        "model": "claude-sonnet-5-5",
+        "model": "claude-opus-5-5",
         "effort": "low",
         "model_calls": 12,
     }
