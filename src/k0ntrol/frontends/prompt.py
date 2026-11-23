@@ -8,7 +8,7 @@ plain functions over strings and indexes, so it tests without a terminal.
 import os
 import select
 import sys
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Collection, Mapping
 from pathlib import Path
 
 from rich.console import Console
@@ -97,6 +97,21 @@ def choice_step(index: int, key: str, count: int) -> tuple[int, bool]:
     return next_index(index, key, count), False
 
 
+def enabled_step(
+    index: int, key: str, options: list[tuple[str, str]], disabled: Collection[str]
+) -> tuple[int, bool]:
+    """``choice_step``, but a key that would pick a disabled option is ignored."""
+    picked, chosen = choice_step(index, key, len(options))
+    if chosen and options[picked][0] in disabled:
+        return index, False
+    return picked, chosen
+
+
+def flush_pending_input() -> None:  # pragma: no cover - raw terminal I/O
+    """Drop keys typed before a picker was drawn: they answered nothing (#204)."""
+    termios.tcflush(sys.stdin.fileno(), termios.TCIFLUSH)
+
+
 def parse_choice(answer: str, options: list[tuple[str, str]]) -> str | None:
     answer = answer.strip().lower()
     lowered = [key.lower() for key, _ in options]
@@ -167,8 +182,10 @@ class Prompt:
         read_input: Callable[[str], str] = input,
         read_key: Callable[[], str] | None = None,
         status: Callable[[], str] | None = None,
+        flush: Callable[[], None] | None = None,
     ) -> None:
         self._console = console
+        self._flush = flush
         self._status = status
         self._commands = commands
         self._history = history
@@ -196,10 +213,16 @@ class Prompt:
             return self._read_input(f"{label} {PLAIN_PROMPT}")
         return self._read_input(self._styled(label, DIM) + f" {POINTER} ")
 
-    def choose(self, question: str, options: list[tuple[str, str]]) -> str:
+    def choose(
+        self,
+        question: str,
+        options: list[tuple[str, str]],
+        disabled: Collection[str] = (),
+    ) -> str:
+        """One of ``options``' keys; a ``disabled`` key is shown, never picked."""
         if self._tty and self._read_key is not None:
-            return self._choose_with_keys(question, options, self._read_key)
-        return self._choose_by_line(question, options)
+            return self._choose_with_keys(question, options, self._read_key, disabled)
+        return self._choose_by_line(question, options, disabled)
 
     def help_table(self) -> None:
         width = max((len(name) for name in self._commands), default=0)
@@ -237,12 +260,14 @@ class Prompt:
         self._raw("\x1b[2A" + "\x1b[2K\n" * 4 + "\x1b[4A")
         self._console.print(Text(f"{POINTER} {line}", style=DIM))
 
-    def _choose_by_line(self, question: str, options: list[tuple[str, str]]) -> str:
+    def _choose_by_line(
+        self, question: str, options: list[tuple[str, str]], disabled: Collection[str]
+    ) -> str:
         keys = "/".join(key for key, _ in options)
         self._console.print(Text(f"{question} [{keys}]"))
         while True:
             choice = parse_choice(self._read_input(PLAIN_PROMPT), options)
-            if choice is not None:
+            if choice is not None and choice not in disabled:
                 return choice
             self._console.print(Text(f"Answer {keys} or 1-{len(options)}.", style=DIM))
 
@@ -251,12 +276,15 @@ class Prompt:
         question: str,
         options: list[tuple[str, str]],
         read_key: Callable[[], str],
+        disabled: Collection[str],
     ) -> str:
+        if self._flush is not None:
+            self._flush()
         self._console.print(Text(question, style="bold"))
         index = 0
         self._draw_options(options, index)
         while True:
-            index, chosen = choice_step(index, read_key(), len(options))
+            index, chosen = enabled_step(index, read_key(), options, disabled)
             if chosen:
                 self._collapse_options(options, index)
                 return options[index][0]

@@ -116,27 +116,31 @@ def saved(root):
     return yaml.safe_load((root / ".k0-mem/config.yaml").read_text())
 
 
-def test_a_coming_soon_tracker_is_saved_with_a_warning(tmp_path):
+def test_a_coming_soon_tracker_cannot_be_picked(tmp_path):
+    """Coming-soon rows are shown but disabled: no key selects them (#204)."""
     console = make_console()
 
-    run_project_setup(tmp_path, make_prompt(console, "github", "jira", "1", "1", "pytest"), console)
+    run_project_setup(
+        tmp_path, make_prompt(console, "github", "jira", "github", "1", "1", "pytest"), console
+    )
 
-    assert screen(console).count("#<issue> runs need GitHub in 0.1.0") == 1
-    assert saved(tmp_path)["tracker"] == "jira"
+    assert saved(tmp_path)["tracker"] == "github"
 
 
-def test_a_coming_soon_host_is_saved_and_offers_only_its_trackers(tmp_path):
+def test_a_coming_soon_host_cannot_be_picked(tmp_path):
     console = make_console()
     seen = []
-    prompt = make_prompt(console, "bitbucket", "jira", "1", "1", "pytest")
+    prompt = make_prompt(console, "bitbucket", "github", "github", "1", "1", "pytest")
     choose = prompt.choose
-    prompt.choose = lambda question, options: seen.append(options) or choose(question, options)
+    prompt.choose = lambda question, options, disabled=(): (
+        seen.append(set(disabled)) or choose(question, options, disabled=disabled)
+    )
 
     run_project_setup(tmp_path, prompt, console)
 
-    assert [key for key, _ in seen[1]] == ["jira", "linear"]
-    assert screen(console).count("#<issue> runs need GitHub in 0.1.0") == 1
-    assert (saved(tmp_path)["vcs"], saved(tmp_path)["tracker"]) == ("bitbucket", "jira")
+    assert seen[0] == {"gitlab", "bitbucket"}
+    assert seen[1] == {"linear", "jira"}
+    assert (saved(tmp_path)["vcs"], saved(tmp_path)["tracker"]) == ("github", "github")
 
 
 def git_repo(path, remote=None):
@@ -167,7 +171,7 @@ def test_the_detected_host_comes_first_and_is_labelled(tmp_path):
     seen = []
 
     class Spy:
-        def choose(self, question, options):
+        def choose(self, question, options, disabled=()):
             seen.append(options)
             return "github"
 
@@ -186,7 +190,7 @@ def test_without_a_remote_github_comes_first_and_nothing_is_detected(tmp_path):
     options = []
 
     class Spy:
-        def choose(self, question, choices):
+        def choose(self, question, choices, disabled=()):
             options.extend(choices)
             return "github"
 
@@ -196,21 +200,21 @@ def test_without_a_remote_github_comes_first_and_nothing_is_detected(tmp_path):
     assert all("(detected)" not in label for _, label in options)
 
 
-def test_a_detected_gitlab_is_saved_as_detected(tmp_path):
+def test_a_detected_gitlab_comes_first_but_cannot_be_picked(tmp_path):
     console = make_console()
     git_repo(tmp_path, "https://gitlab.com/me/repo.git")
+    prompt = make_prompt(console, "1", "gitlab", "github", "github", "1", "1", "pytest")
 
-    run_project_setup(tmp_path, make_prompt(console, "1", "gitlab", "1", "1", "pytest"), console)
+    run_project_setup(tmp_path, prompt, console)
 
-    assert saved(tmp_path)["vcs"] == "gitlab"
-    assert saved(tmp_path)["tracker"] == "gitlab"
+    assert (saved(tmp_path)["vcs"], saved(tmp_path)["tracker"]) == ("github", "github")
 
 
 def test_trackers_are_filtered_by_the_code_host(tmp_path):
     seen = []
 
     class Spy:
-        def choose(self, question, options):
+        def choose(self, question, options, disabled=()):
             seen.append([key for key, _ in options])
             return "github"
 
@@ -386,7 +390,7 @@ def test_effort_options_keep_one_order_and_tag_the_tier_default():
     seen = []
 
     class Spy:
-        def choose(self, question, options):
+        def choose(self, question, options, disabled=()):
             seen.append(options)
             return next(key for key, label in options if "(recommended)" in label)
 
@@ -419,7 +423,7 @@ def test_anthropic_offers_its_claude_ids_tier_first(tmp_path):
     seen = []
 
     class Spy:
-        def choose(self, question, options):
+        def choose(self, question, options, disabled=()):
             seen.append((question, [key for key, _ in options]))
             return options[0][0]
 
@@ -617,7 +621,7 @@ def test_placeholder_models_are_never_recommended(tmp_path):
     seen = []
 
     class Spy:
-        def choose(self, question, options):
+        def choose(self, question, options, disabled=()):
             seen.append(question)
             return options[0][0]
 

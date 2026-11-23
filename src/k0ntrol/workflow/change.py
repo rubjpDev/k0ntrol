@@ -568,3 +568,38 @@ def _truncate(text: str) -> str:
     if len(text) > _SUMMARY_MAX_CHARS:
         text = text[:_SUMMARY_MAX_CHARS] + "\n... diff truncated ..."
     return text
+
+
+GENERATED_ATTRIBUTE = ".k0-mem/Project_context/** linguist-generated=true"
+_GRAPH = ".k0-mem/Project_context/"
+
+
+def mark_graph_generated(root: Path) -> bool:
+    """Add ``GENERATED_ATTRIBUTE`` to ``.gitattributes``; False when there."""
+    path = root / ".gitattributes"
+    text = path.read_text(encoding="utf-8") if path.exists() else ""
+    if GENERATED_ATTRIBUTE in text.splitlines():
+        return False
+    gap = "\n" if text and not text.endswith("\n") else ""
+    path.write_text(f"{text}{gap}{GENERATED_ATTRIBUTE}\n", encoding="utf-8")
+    return True
+
+
+def branch_paths(root: Path, base: str) -> list[str]:
+    """Every file the commits on ``HEAD`` since ``base`` touch."""
+    return _git_paths(root, "diff", "--name-only", "-z", f"{base}...HEAD")
+
+
+def pushed_file_lines(paths: list[str]) -> list[str]:
+    """The files a push carries, one line each; the knowledge graph as one
+    count, so a ``Mem.md`` edit is never lost among them (#204)."""
+    graph = [p for p in paths if p.startswith(_GRAPH)]
+    lines = [f"- {p}" for p in sorted(paths) if not p.startswith(_GRAPH)]
+    if graph:
+        lines.append(f"- {len(graph)} knowledge-graph files refreshed")
+    return lines
+
+
+def has_origin(root: Path) -> bool:
+    """Whether the repo has an ``origin`` remote to push to."""
+    return _git(root, "remote", "get-url", "origin").returncode == 0

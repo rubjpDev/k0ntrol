@@ -911,3 +911,14 @@ def test_rotation_does_not_create_a_gitignore(tmp_path):
     path = _log(tmp_path)
     rotate_events(path, max_bytes=2)
     assert not (path.parent / ".gitignore").exists()
+
+
+def test_ctrl_c_during_a_model_call_logs_a_pause_not_an_error(tmp_path):
+    from uuid import uuid4
+
+    handler, path = make_handler(tmp_path)
+    handler.on_llm_error(KeyboardInterrupt(), run_id=uuid4())
+    (event,) = read_events(path)
+    assert event["kind"] == "model"
+    assert event["paused"] is True
+    assert "err" not in event
