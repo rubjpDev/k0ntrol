@@ -4,6 +4,7 @@ from pathlib import Path
 import pytest
 
 from k0ntrol.config import ConfigError, deep_merge, load_config, validate_config
+from k0ntrol.providers import model_kwargs
 
 
 def write(path: Path, text: str) -> None:
@@ -209,3 +210,12 @@ def test_validate_config_still_rejects_token_secrets(tmp_path, secret_key):
 
     with pytest.raises(ConfigError, match="secrets are not allowed"):
         validate_config(cfg)
+
+
+def test_a_project_max_tokens_param_reaches_the_model_on_start(tmp_path):
+    write(tmp_path / ".k0-mem/config.yaml", "providers:\n  openai:\n    params:\n      max_tokens: 4000\n")
+
+    cfg = load_config(tmp_path, tmp_path / "home")
+
+    entry = {"provider": "openai", "model": "gpt-6-luna"}
+    assert model_kwargs(cfg, entry, environ={})["max_tokens"] == 4000
