@@ -146,7 +146,8 @@ def _as_int(value: Any) -> int:
 
 def run_start_line(event: dict) -> Text:
     line = Text.assemble((f"{BULLET} ", ACCENT), f"/{event.get('run_kind', '?')}")
-    shown = [str(event[key]) for key in ("work_item", "branch") if event.get(key)]
+    keys = ("work_item", "question") if event.get("question") else ("work_item", "branch")
+    shown = [str(event[key]) for key in keys if event.get(key)]
     if shown:
         line.append(" " + " · ".join(shown), style=DIM)
     if event.get("resumed"):

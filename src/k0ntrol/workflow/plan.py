@@ -577,6 +577,7 @@ def render_tickets(tickets: list[dict], ticket_size: str) -> str:
         lines.append(f"Delivers: {ticket.get('what_to_build', '')}")
         lines.append(f"Blocked by: {blockers}")
         lines.append(f"Acceptance criteria: {count}{flag}")
+        lines.extend(f"- {c}" for c in ticket.get("acceptance_criteria", []))
     return "\n".join(lines)
 
 

@@ -572,3 +572,10 @@ def test_gate_markdown_headings_are_not_underlined_like_links() -> None:
     ansi = console.export_text(styles=True)
     heading = ansi[ansi.index("Review", ansi.index("Review gate") + 6) - 40:]
     assert not re.search(r"\x1b\[(?:\d+;)*4(?:;\d+)*m[^\x1b]*Review", heading)
+
+
+def test_a_research_run_header_shows_its_question_not_the_branch(
+    renderer: LiveRenderer, console: Console
+) -> None:
+    renderer({"kind": "run_start", "run_kind": "research", "question": "which auth?", "branch": "main"})
+    assert lines_of(console) == ["⏺ /research which auth?"]

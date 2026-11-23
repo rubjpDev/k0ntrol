@@ -410,3 +410,33 @@ def test_a_free_text_gate_asks_for_a_line_instead_of_a_picker(gate, label):
 
     assert answer == "1 yes, 2 no"
     assert labels == [f"{label} › "]
+
+
+def test_an_answer_streams_as_one_block_across_its_model_calls():
+    """A model or tool event inside the answer does not start a new ⏺ (#205)."""
+    ui, console = terminal([])
+    ui.stream("The answer is ")
+    ui.event({"kind": "model", "agent": "chatty", "ok": True})
+    ui.event({"kind": "tool", "agent": "chatty", "tool": "read_file", "ok": True})
+    ui.stream("forty-two.")
+    text = console.export_text()
+    assert text.count("⏺") == 1
+    assert "The answer is forty-two." in text
+
+
+def test_no_color_turns_every_colour_off_on_a_real_terminal(monkeypatch):
+    from rich.text import Text
+
+    from k0ntrol.frontends.terminal import terminal_console
+
+    class Tty(io.StringIO):
+        def isatty(self):
+            return True
+
+    monkeypatch.setenv("NO_COLOR", "1")
+    monkeypatch.setenv("TERM", "xterm-256color")
+    out = Tty()
+    console = terminal_console(out)
+    console.print(Text("x", style="red"))
+    assert console.color_system is None
+    assert "\x1b[" not in out.getvalue()

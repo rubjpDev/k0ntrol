@@ -199,6 +199,11 @@ def route_after_chart(state: dict) -> str:
     publish; anything else → PLANNER charts again."""
     if state.get("limit"):
         return "limit_hit"
+    return "map_gate" if state.get("map") else "planner"
+
+
+def route_after_map_gate(state: dict) -> str:
+    """An approved Map publishes; a sent-back one is charted again (#205)."""
     return "publish_map" if state.get("map") else "planner"
 
 

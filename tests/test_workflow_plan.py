@@ -1572,3 +1572,21 @@ def test_plan_public_functions_have_complete_annotations():
             parameter.annotation is not inspect.Parameter.empty
             for parameter in signature.parameters.values()
         ), name
+
+
+def test_the_ticket_gate_shows_each_acceptance_criterion():
+    from k0ntrol.workflow.plan import render_tickets
+
+    text = render_tickets(
+        [{"title": "t", "what_to_build": "w", "acceptance_criteria": ["does A", "does B"]}],
+        "small",
+    )
+    assert "- does A" in text and "- does B" in text
+
+
+def test_the_planner_keeps_the_glossary_ticket_and_writes_no_tests_only_ticket():
+    from importlib.resources import files
+
+    text = (files("k0ntrol") / "prompts" / "planner.md").read_text(encoding="utf-8")
+    assert "GLOSSARY.md" in text and "docs/adr/" in text
+    assert "tests-only ticket" in text

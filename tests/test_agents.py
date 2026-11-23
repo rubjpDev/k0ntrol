@@ -1332,3 +1332,16 @@ def _git_add(root):
     import subprocess
 
     subprocess.run(["git", "add", "-A"], cwd=root, check=True, capture_output=True)
+
+
+def test_a_helpers_tokens_never_reach_the_answer():
+    """bulk_read runs inside CHATTY's tools: its deltas are not the answer (#205)."""
+    from langchain_core.messages import AIMessageChunk
+
+    from k0ntrol.agents import _emit_text
+    from k0ntrol.events import META_AGENT, META_HELPER
+
+    shown: list[str] = []
+    _emit_text((AIMessageChunk(content="digest"), {META_HELPER: "bulk_read"}), shown.append)
+    _emit_text((AIMessageChunk(content="answer"), {META_AGENT: "chatty"}), shown.append)
+    assert shown == ["answer"]

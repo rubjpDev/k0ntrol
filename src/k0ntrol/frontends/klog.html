@@ -67,6 +67,7 @@ th { color: var(--dim); font-weight: 500; font-size: 12px; }
 td.num, th.num { text-align: right; }
 tr.row { cursor: pointer; }
 tr.row:hover { background: var(--panel); }
+td.clip { max-width: 160px; overflow: hidden; text-overflow: ellipsis; }
 td.wrap { white-space: normal; word-break: break-word; min-width: 240px; }
 .mono { font-family: var(--mono); font-size: 12px; }
 .fail { color: var(--error); }
@@ -245,7 +246,7 @@ function renderTotals() {
     [fmtCount(t.model_calls), "model calls", ""],
     [fmtCount(t.tokens_in) + " / " + fmtCount(t.tokens_out), "tokens in / out", ""],
     [fmtCost(t.cost, t.cost_estimated), "spend", costNote],
-    [t.failures, "failures and denials", ""],
+    [t.failures, "failures", t.denials + " expected denials"],
   ];
   $("#stats").innerHTML = stats.map(([value, label, note]) =>
     `<div class="total"><b>${esc(value)}</b><span>${esc(label)}</span>${note ? `<small>${esc(note)}</small>` : ""}</div>`).join("");
@@ -311,14 +312,14 @@ function timeline(run) {
 
 function runRow(run, withSession) {
   const outcome = run.outcome || "–";
-  const outcomeClass = run.outcome === "done" ? "good" : run.outcome && run.outcome !== "running" ? "fail" : "dim";
+  const outcomeClass = run.outcome === "done" ? "good" : run.flagged ? "fail" : "dim";
   const isOpen = open.has(run.id);
-  const head = `<tr class="row ${run.failures ? "fail" : ""}" tabindex="0" data-run="${esc(run.id)}" aria-expanded="${isOpen}">
+  const head = `<tr class="row ${run.flagged ? "fail" : ""}" tabindex="0" data-run="${esc(run.id)}" aria-expanded="${isOpen}">
     <td>${esc(fmtTime(run.start))}</td>
     <td><span class="badge">${esc(run.kind)}</span></td>
-    <td>${esc(run.work_item || "–")}</td>
-    <td class="mono">${esc(run.branch || "–")}</td>
-    ${withSession ? `<td class="mono">${esc(run.session || "–")}</td>` : ""}
+    <td class="clip" title="${esc(run.work_item || "")}">${esc(run.work_item || "–")}</td>
+    <td class="clip mono" title="${esc(run.branch || "")}">${esc(run.branch || "–")}</td>
+    ${withSession ? `<td class="clip mono" title="${esc(run.session || "")}">${esc(run.session || "–")}</td>` : ""}
     <td class="num">${fmtMs(run.duration_ms)}</td>
     <td class="${outcomeClass}">${esc(outcome)}</td>
     <td class="num">${run.model_calls}</td>

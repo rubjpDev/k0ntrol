@@ -199,7 +199,7 @@ def test_failures_and_denials_are_flagged_on_the_events():
         {"ts": "2026-11-09T10:00:03.000Z", "kind": "gate", "run": RUN, "gate": "g", "result": "fail"},
         {"ts": "2026-11-09T10:00:04.000Z", "kind": "run_end", "run": RUN, "outcome": "stuck", "ms": 1},
     ])["events"]]
-    assert flags == [None, "fail", "denied", "fail", "fail"]
+    assert flags == [None, "fail", "denied", "fail", None]
 
 
 def test_bad_timestamps_and_odd_values_do_not_break_the_data():
@@ -361,3 +361,39 @@ def test_klog_command_reports_a_write_failure_and_stays_in_the_session(tmp_path)
     )
     assert code == 0
     assert "klog failed: read-only file system" in "\n".join(shown)
+
+
+@pytest.mark.parametrize("outcome, flagged", [("done", False), ("stuck", False), ("rejected", False),
+                                               ("failed", True), ("paused", True)])
+def test_a_run_is_flagged_only_when_its_run_end_failed_or_paused(outcome, flagged):
+    """A done run with an expected denial is not a red row (#205)."""
+    events = [
+        {"ts": "2026-11-09T10:00:00.000Z", "kind": "run_start", "run": RUN, "run_kind": "implement"},
+        {"ts": "2026-11-09T10:00:01.000Z", "kind": "tool", "run": RUN, "tool": "write_file", "ok": False,
+         "denied": "path_guard"},
+        {"ts": "2026-11-09T10:00:02.000Z", "kind": "run_end", "run": RUN, "outcome": outcome, "ms": 1},
+    ]
+    (run,) = build_data(events)["runs"]
+    assert run["flagged"] is flagged
+    assert (run["denials"], run["failures"]) == (1, 1 if flagged else 0)
+
+
+def test_gpt_6_luna_has_an_estimated_price():
+    from k0ntrol.pricing import estimate_cost
+
+    assert estimate_cost("openai", "gpt-6-luna", 1_000_000, 1_000_000) == pytest.approx(0.60)
+
+
+def test_the_page_colours_rows_by_the_run_outcome_not_the_failure_count():
+    page = render_page(build_data([]))
+    assert "run.flagged" in page
+    assert '<tr class="row ${run.failures' not in page
+
+
+def test_long_run_cells_are_clipped_so_the_runs_table_fits():
+    """#205: long work items, branches and sessions are cut with an ellipsis
+    (full text on hover), so Duration and the rest stay in view."""
+    page = render_page(build_data([]))
+    assert "td.clip { max-width:" in page and "text-overflow: ellipsis" in page
+    for field in ("work_item", "branch", "session"):
+        assert f'class="clip' in page and f'title="${{esc(run.{field} || "")}}"' in page

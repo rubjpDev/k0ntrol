@@ -63,11 +63,12 @@ def models_init(*models):
     return init
 
 
-def run_research(root, cfg, *models, input=QUESTION, **kwargs):
-    """``start('research', ...)`` with the doctor and rescan seams stubbed."""
+def run_research(root, cfg, *models, input=QUESTION, approve_map=True, **kwargs):
+    """``start('research', ...)`` with the doctor and rescan seams stubbed;
+    an ``ok`` answers the Map gate unless ``approve_map`` is False."""
     kwargs.setdefault("check", lambda *a, **k: [])
     kwargs.setdefault("scan", lambda root: "scanned")
-    return start(
+    result = start(
         "research",
         input,
         root=root,
@@ -75,6 +76,29 @@ def run_research(root, cfg, *models, input=QUESTION, **kwargs):
         init=models_init(*models),
         **kwargs,
     )
+    if approve_map:
+        return through_map_gate(result, root, cfg, kwargs.get("tracker"))
+    return result
+
+
+def through_map_gate(result, root, cfg, tracker):
+    """``ok`` at the Map gate when the run stopped there (#205)."""
+    if isinstance(result, Pending) and result.gate == "map":
+        return resume(
+            result.run, "ok", root=root, cfg=cfg, init=models_init(), tracker=tracker,
+            scan=lambda root: "scanned",
+        )
+    return result
+
+
+def published(tracker):
+    """The Map item, or None when nothing was published."""
+    from k0ntrol.tracker import TrackerError
+
+    try:
+        return tracker.read_work_item("1")
+    except TrackerError:
+        return None
 
 
 def planner_model(*messages):
@@ -431,6 +455,7 @@ def test_limit_retry_reruns_the_chart(tmp_path):
         init=models_init(planner_model(chart_call())),
         tracker=tracker,
     )
+    outcome = through_map_gate(outcome, tmp_path, cfg, tracker)
 
     assert isinstance(outcome, Outcome) and outcome.outcome == "done"
     assert tracker.list_children("1")
@@ -1047,3 +1072,54 @@ def test_an_unlisted_app_map_is_still_refused(tmp_path):
             tracker=tracker,
             input=f"#{item.ref}",
         )
+
+
+def test_a_charted_map_stops_at_the_map_gate_and_publishes_nothing_yet(tmp_path):
+    """The drafted Map is shown and waits for a human (#205)."""
+    git_repo(tmp_path)
+    tracker = FakeTracker()
+
+    pending = run_research(
+        tmp_path, research_cfg(), planner_model(chart_call()), tracker=tracker, approve_map=False
+    )
+
+    assert isinstance(pending, Pending) and pending.gate == "map"
+    assert "Auth library map" in pending.detail
+    assert "decide the auth library" in pending.detail
+    assert published(tracker) is None
+
+
+def test_ok_at_the_map_gate_publishes_the_map(tmp_path):
+    git_repo(tmp_path)
+    tracker = FakeTracker()
+    pending = run_research(
+        tmp_path, research_cfg(), planner_model(chart_call()), tracker=tracker, approve_map=False
+    )
+
+    outcome = resume(pending.run, "ok", root=tmp_path, cfg=research_cfg(),
+                     init=models_init(), tracker=tracker)
+
+    assert isinstance(outcome, Outcome) and outcome.outcome == "done"
+    assert tracker.read_work_item("1").title == "Auth library map"
+
+
+def test_abandoning_at_the_map_gate_publishes_nothing(tmp_path):
+    git_repo(tmp_path)
+    tracker = FakeTracker()
+    pending = run_research(
+        tmp_path, research_cfg(), planner_model(chart_call()), tracker=tracker, approve_map=False
+    )
+
+    abandon(pending.run, root=tmp_path)
+
+    assert published(tracker) is None
+
+
+def test_the_research_run_start_names_the_question(tmp_path):
+    git_repo(tmp_path)
+    run_research(tmp_path, research_cfg(), planner_model(chart_call()), tracker=FakeTracker(),
+                 approve_map=False)
+
+    (start_event,) = [e for e in events(tmp_path) if e["kind"] == "run_start"]
+    assert start_event["question"] == QUESTION
+    assert "branch" not in start_event

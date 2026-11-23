@@ -50,7 +50,7 @@ from langchain_core.tools import BaseTool
 from langgraph.types import Command
 from pydantic import BaseModel, Field, model_validator
 
-from k0ntrol.events import META_AGENT, META_EFFORT, WARNING_EVENT
+from k0ntrol.events import META_AGENT, META_EFFORT, META_HELPER, WARNING_EVENT
 from k0ntrol.memory.index import custom_rules_text, custom_topology_text
 from k0ntrol.providers import build_chat_model
 from k0ntrol.search import NATIVE_SEARCH_AGENTS, uses_native_search
@@ -882,8 +882,8 @@ class K0Agent:
 
 
 def _emit_text(data, on_text: Callable[[str], None]) -> None:
-    chunk, _metadata = data
-    if not isinstance(chunk, AIMessageChunk):
+    chunk, metadata = data
+    if not isinstance(chunk, AIMessageChunk) or metadata.get(META_HELPER):
         return
     text = _content_text(chunk.content)
     if text:

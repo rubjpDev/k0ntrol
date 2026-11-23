@@ -8,6 +8,7 @@ through a handful of methods (``read``, ``line``, ``event``, ``stream``,
 """
 
 import time
+import sys
 from collections.abc import Callable
 from pathlib import Path
 from typing import TextIO, cast
@@ -20,7 +21,7 @@ from k0ntrol.frontends.prompt import Prompt, render_welcome, terminal_key_reader
 from k0ntrol.credentials import load_credentials
 from k0ntrol.frontends.editor import LineEditor, raw_key_reader
 from k0ntrol.frontends.badges import service_badges
-from k0ntrol.frontends.banner import banner_layout
+from k0ntrol.frontends.banner import banner_layout, color_enabled
 from k0ntrol.frontends.render import LiveRenderer, format_elapsed, format_tokens, render_gate
 from k0ntrol.frontends.setup import run_project_setup, run_provider_setup
 from k0ntrol.pricing import estimate_cost
@@ -148,7 +149,7 @@ class Terminal:
     @classmethod
     def open(cls, history: Path | None = None) -> "Terminal":
         """The terminal front on the real stdin/stdout."""
-        console = Console(highlight=False)
+        console = terminal_console(sys.stdout)
         stats = SessionStats()
         terminal: Terminal | None = None
         prompt = Prompt(
@@ -203,10 +204,15 @@ class Terminal:
 
     def event(self, event: dict) -> None:
         self._stats.add(event)
-        if self._continues_after_gate(event):
+        if self._continues_after_gate(event) or self._inside_answer(event):
             return
         self._end_answer()
         self._renderer(event)
+
+    def _inside_answer(self, event: dict) -> bool:
+        """A model or tool event mid-answer stays off screen: the answer
+        reads as one block (#205); the event log still has it."""
+        return self._answering and event.get("kind") in ("model", "tool")
 
     def stream(self, delta: str) -> None:
         if not self._answering:
@@ -371,3 +377,14 @@ def gate_options(gate: str, answers: tuple[str, ...]) -> list[tuple[str, str]]:
         if [key for key, _ in known] == list(answers):
             return known
     return [(answer, answer) for answer in answers]
+
+
+def terminal_console(stream: TextIO) -> Console:
+    """The REPL's console on ``stream``, behind the banner's colour gate:
+    ``NO_COLOR`` or a pipe turns colour off for the input box and the
+    status bar too (#205)."""
+    return Console(
+        file=stream,
+        highlight=False,
+        color_system="auto" if color_enabled(stream) else None,
+    )
