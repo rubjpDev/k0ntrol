@@ -410,7 +410,7 @@ class K0EventHandler(GraphCallbackHandler):
             attempt=start.get("attempt"),
             ms=_elapsed_ms(start),
             ok=False,
-            err=str(error),
+            **_failure(error),
         )
 
     # -- tool events --------------------------------------------------------
@@ -802,3 +802,10 @@ _RENDERERS: dict[str, Callable[[dict], str]] = {
     "gate": _render_gate,
     "run_end": _render_run_end,
 }
+
+
+def _failure(error: BaseException) -> dict:
+    """A failed call's outcome: Ctrl-C is the user pausing the run (#204)."""
+    if isinstance(error, KeyboardInterrupt):
+        return {"paused": True}
+    return {"err": str(error)}

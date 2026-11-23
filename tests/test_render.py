@@ -579,3 +579,11 @@ def test_a_research_run_header_shows_its_question_not_the_branch(
 ) -> None:
     renderer({"kind": "run_start", "run_kind": "research", "question": "which auth?", "branch": "main"})
     assert lines_of(console) == ["⏺ /research which auth?"]
+
+
+def test_a_ctrl_c_model_call_is_a_pause_not_a_failure(
+    renderer: LiveRenderer, console: Console
+) -> None:
+    """Ctrl-C mid-call is the user pausing the run (#204)."""
+    renderer(model("coder", ok=False, paused=True))
+    assert not any("model call failed" in line for line in lines_of(console))

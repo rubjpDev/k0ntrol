@@ -17,7 +17,12 @@ import yaml
 from rich.console import Console
 from rich.text import Text
 
-from k0ntrol.frontends.prompt import Prompt, render_welcome, terminal_key_reader
+from k0ntrol.frontends.prompt import (
+    Prompt,
+    flush_pending_input,
+    render_welcome,
+    terminal_key_reader,
+)
 from k0ntrol.credentials import load_credentials
 from k0ntrol.frontends.editor import LineEditor, raw_key_reader
 from k0ntrol.frontends.badges import service_badges
@@ -154,6 +159,7 @@ class Terminal:
         terminal: Terminal | None = None
         prompt = Prompt(
             console, commands=COMMANDS, history=history, read_key=terminal_key_reader(),
+            flush=flush_pending_input,
             status=lambda: terminal.status_line() if terminal else "",
         )
         terminal = cls(console, prompt, LiveRenderer(console), stats, _editor(console, history))

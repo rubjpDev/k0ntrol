@@ -52,7 +52,7 @@ from k0ntrol.memory.refresh import refresh_memory  # noqa: E402
 from k0ntrol.tools.tracker import latest_agent_brief_comment  # noqa: E402
 from k0ntrol.memory.scan import ScanError  # noqa: E402
 from k0ntrol.otel import build_run_trace, otel_callbacks  # noqa: E402
-from k0ntrol.providers import free_checks, has_errors, report_lines  # noqa: E402
+from k0ntrol.providers import error_lines, free_checks, has_errors  # noqa: E402
 from k0ntrol.tracker import (  # noqa: E402
     Comment,
     TRUSTED_ASSOCIATIONS,
@@ -68,6 +68,7 @@ from k0ntrol.workflow.change import (  # noqa: E402
     dirty_paths,
     drop_worktree_snapshot,
     existing_branch,
+    has_origin,
     is_git_repo,
     snapshot_worktree,
     worktree_snapshot_dir,
@@ -217,6 +218,7 @@ def start(
         graph = _BUILDERS[kind](ctx, saver)
         run_id = new_run_id()
         _implement_preflight(kind, item, root, run_id)
+        _warn_local_only(kind, item, root, write)
         _bind_events(ctx, root, run_id, write)
         ctx.trace = tracing(run_id)
         session_id = item.qualified_ref if item else _sitting_session(ctx)
@@ -438,7 +440,7 @@ def _doctor_gate(
         services=_services_for(kind, input_text, roster),
     )
     if has_errors(checks):
-        raise RunRefused(report_lines(checks))
+        raise RunRefused(error_lines(checks))
 
 
 def _services_for(
@@ -570,6 +572,18 @@ def _header(kind: str, item, input_text: str, root: Path) -> dict:
     if kind == "research" and item is None:
         return {"question": input_text}
     return {"branch": current_branch(root)}
+
+
+_LOCAL_ONLY = (
+    "no 'origin' remote: the change stays on your local branch; nothing is pushed"
+)
+
+
+def _warn_local_only(kind: str, item, root: Path, write) -> None:
+    """A working-tree ``/implement`` runs without a remote, but says so
+    before any model call (#179, #204)."""
+    if kind == "implement" and item is None and write and not has_origin(root):
+        write(_LOCAL_ONLY)
 
 
 def _tracker_for(kind: str, cfg: dict, root: Path, tracker, *, required: bool):

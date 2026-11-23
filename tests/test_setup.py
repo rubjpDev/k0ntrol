@@ -116,27 +116,31 @@ def saved(root):
     return yaml.safe_load((root / ".k0-mem/config.yaml").read_text())
 
 
-def test_a_coming_soon_tracker_is_saved_with_a_warning(tmp_path):
+def test_a_coming_soon_tracker_cannot_be_picked(tmp_path):
+    """Coming-soon rows are shown but disabled: no key selects them (#204)."""
     console = make_console()
 
-    run_project_setup(tmp_path, make_prompt(console, "github", "jira", "1", "1", "pytest"), console)
+    run_project_setup(
+        tmp_path, make_prompt(console, "github", "jira", "github", "1", "1", "pytest"), console
+    )
 
-    assert screen(console).count("#<issue> runs need GitHub in 0.1.0") == 1
-    assert saved(tmp_path)["tracker"] == "jira"
+    assert saved(tmp_path)["tracker"] == "github"
 
 
-def test_a_coming_soon_host_is_saved_and_offers_only_its_trackers(tmp_path):
+def test_a_coming_soon_host_cannot_be_picked(tmp_path):
     console = make_console()
     seen = []
-    prompt = make_prompt(console, "bitbucket", "jira", "1", "1", "pytest")
+    prompt = make_prompt(console, "bitbucket", "github", "github", "1", "1", "pytest")
     choose = prompt.choose
-    prompt.choose = lambda question, options: seen.append(options) or choose(question, options)
+    prompt.choose = lambda question, options, disabled=(): (
+        seen.append(set(disabled)) or choose(question, options, disabled=disabled)
+    )
 
     run_project_setup(tmp_path, prompt, console)
 
-    assert [key for key, _ in seen[1]] == ["jira", "linear"]
-    assert screen(console).count("#<issue> runs need GitHub in 0.1.0") == 1
-    assert (saved(tmp_path)["vcs"], saved(tmp_path)["tracker"]) == ("bitbucket", "jira")
+    assert seen[0] == {"gitlab", "bitbucket"}
+    assert seen[1] == {"linear", "jira"}
+    assert (saved(tmp_path)["vcs"], saved(tmp_path)["tracker"]) == ("github", "github")
 
 
 def git_repo(path, remote=None):
@@ -167,7 +171,7 @@ def test_the_detected_host_comes_first_and_is_labelled(tmp_path):
     seen = []
 
     class Spy:
-        def choose(self, question, options):
+        def choose(self, question, options, disabled=()):
             seen.append(options)
             return "github"
 
@@ -186,7 +190,7 @@ def test_without_a_remote_github_comes_first_and_nothing_is_detected(tmp_path):
     options = []
 
     class Spy:
-        def choose(self, question, choices):
+        def choose(self, question, choices, disabled=()):
             options.extend(choices)
             return "github"
 
@@ -196,21 +200,21 @@ def test_without_a_remote_github_comes_first_and_nothing_is_detected(tmp_path):
     assert all("(detected)" not in label for _, label in options)
 
 
-def test_a_detected_gitlab_is_saved_as_detected(tmp_path):
+def test_a_detected_gitlab_comes_first_but_cannot_be_picked(tmp_path):
     console = make_console()
     git_repo(tmp_path, "https://gitlab.com/me/repo.git")
+    prompt = make_prompt(console, "1", "gitlab", "github", "github", "1", "1", "pytest")
 
-    run_project_setup(tmp_path, make_prompt(console, "1", "gitlab", "1", "1", "pytest"), console)
+    run_project_setup(tmp_path, prompt, console)
 
-    assert saved(tmp_path)["vcs"] == "gitlab"
-    assert saved(tmp_path)["tracker"] == "gitlab"
+    assert (saved(tmp_path)["vcs"], saved(tmp_path)["tracker"]) == ("github", "github")
 
 
 def test_trackers_are_filtered_by_the_code_host(tmp_path):
     seen = []
 
     class Spy:
-        def choose(self, question, options):
+        def choose(self, question, options, disabled=()):
             seen.append([key for key, _ in options])
             return "github"
 
@@ -259,8 +263,8 @@ def test_ollama_offers_installed_models_and_writes_the_config(tmp_path):
     root.mkdir()
     console = make_console()
     models = lister("qwen3:8b", "llama3.1")
-    # provider, custom; strong: model 2, effort default; middle: model 1, effort low; light: model 1, none
-    prompt = make_prompt(console, "ollama", "custom", "2", "1", "1", "3", "1", "1")
+    # provider, custom; strong: model 2, high; middle: model 1, low; light: model 1, none
+    prompt = make_prompt(console, "ollama", "custom", "2", "1", "1", "3", "1", "4")
 
     path = run_provider_setup(home, prompt, console, root=root, list_models=models)
 
@@ -314,17 +318,11 @@ def test_ollama_unreachable_warns_and_asks_for_model_names(tmp_path):
     assert yaml.safe_load(path.read_text())["helpers"]["reflect"]["model"] == "qwen3:4b"
 
 
-def test_lmstudio_without_tool_models_warns_once(tmp_path):
-    home = tmp_path / "home"
-    console = make_console()
-    answers = ["lmstudio", "type", "m", "1", "m", "1", "m", "1", "2"]
+def test_lmstudio_is_not_offered_but_stays_loadable():
+    from k0ntrol.providers import REGISTRY
 
-    run_provider_setup(home, make_prompt(console, *answers), console,
-                       root=tmp_path, list_models=lister(), read_secret=no_secret)
-
-    out = screen(console)
-    assert out.count("LM Studio has no installed model that can call tools") == 1
-    assert user_config(home)["agents"]["implementer"]["provider"] == "lmstudio"
+    assert "lmstudio" not in [key for key, _ in screens._PROVIDERS]
+    assert "lmstudio" in REGISTRY
 
 
 def test_default_lister_wraps_tool_calling_models(tmp_path, monkeypatch):
@@ -388,27 +386,28 @@ def test_bedrock_another_region_and_another_model(tmp_path):
     assert not credentials_path(home).exists()
 
 
-def test_effort_options_put_the_tier_default_first():
+def test_effort_options_keep_one_order_and_tag_the_tier_default():
     seen = []
 
     class Spy:
-        def choose(self, question, options):
-            seen.append((question, [key for key, _ in options]))
-            return options[0][0]
+        def choose(self, question, options, disabled=()):
+            seen.append(options)
+            return next(key for key, label in options if "(recommended)" in label)
 
     assert screens._ask_effort(Spy(), "strong") == "high"
     assert screens._ask_effort(Spy(), "middle") == "medium"
     assert screens._ask_effort(Spy(), "light") is None
-    assert seen[0] == ("Effort for PLANNER and REVIEWER", ["high", "medium", "low", "none"])
-    assert seen[1][1] == ["medium", "high", "low", "none"]
-    assert seen[2][1] == ["none", "high", "medium", "low"]
+    assert {tuple(key for key, _ in options) for options in seen} == {
+        ("high", "medium", "low", "none")
+    }
+    assert [label for _, label in seen[1]][1] == "Medium (recommended)"
 
 
 def test_choosing_no_effort_cancels_the_shipped_default(tmp_path):
     home = tmp_path / "home"
     console = make_console()
     # strong: model 1, effort "none" (4th); middle: 1, medium; light: 1, none
-    answers = ["anthropic", "custom", "1", "4", "1", "1", "1", "1", "2"]
+    answers = ["anthropic", "custom", "1", "4", "1", "2", "1", "4", "2"]
 
     run_provider_setup(home, make_prompt(console, *answers), console, root=tmp_path,
                        read_secret=no_secret)
@@ -424,7 +423,7 @@ def test_anthropic_offers_its_claude_ids_tier_first(tmp_path):
     seen = []
 
     class Spy:
-        def choose(self, question, options):
+        def choose(self, question, options, disabled=()):
             seen.append((question, [key for key, _ in options]))
             return options[0][0]
 
@@ -463,14 +462,40 @@ def test_an_empty_key_saves_nothing(tmp_path):
     assert "No key entered; nothing saved." in screen(console)
 
 
-def test_openai_and_vertex_offer_labelled_placeholders():
+def test_openai_and_vertex_offer_their_presets_without_a_placeholder_label():
     openai = screens._model_options("openai", "strong", None)
-    assert openai == [("gpt-6.1-terra", "gpt-6.1-terra (placeholder)"),
-                      ("gpt-6-luna", "gpt-6-luna (placeholder)")]
+    assert openai == [("gpt-6.1-terra", "gpt-6.1-terra"), ("gpt-6-luna", "gpt-6-luna")]
     vertex = screens._model_options("vertex", "light", None)
     assert [key for key, _ in vertex] == ["gemini-3-pro", "gemini-3-flash"]
     assert screens._model_options("openai_compatible", "light", None)
     assert screens._model_options("unknown", "light", None) == []
+
+
+def test_first_run_openai_shows_only_shipped_labels_and_one_effort_order(tmp_path):
+    seen = []
+
+    class Spy:
+        def choose(self, question, options):
+            seen.append((question, options))
+            keys = [key for key, _ in options]
+            return "openai" if "openai" in keys else "env" if "env" in keys else keys[0]
+
+    home = tmp_path / "home"
+    run_provider_setup(home, Spy(), make_console(), root=tmp_path, read_secret=no_secret)
+
+    labels = [label for _, options in seen for _, label in options]
+    assert not [label for label in labels if "(untested)" in label and "OpenAI" in label]
+    assert not [label for label in labels if "LM Studio" in label or "(placeholder)" in label]
+    efforts = [options for question, options in seen if question.startswith("Effort")]
+    assert len(efforts) == 3
+    assert {tuple(key for key, _ in options) for options in efforts} == {
+        ("high", "medium", "low", "none")
+    }
+    from k0ntrol.providers import model_kwargs
+
+    cfg = load_config(tmp_path, home_dir=home)
+    kwargs = model_kwargs(cfg, cfg["agents"]["planner"], environ={})
+    assert kwargs["use_responses_api"] is True
 
 
 def test_openai_runs_end_to_end_with_another_model(tmp_path):
@@ -596,7 +621,7 @@ def test_placeholder_models_are_never_recommended(tmp_path):
     seen = []
 
     class Spy:
-        def choose(self, question, options):
+        def choose(self, question, options, disabled=()):
             seen.append(question)
             return options[0][0]
 

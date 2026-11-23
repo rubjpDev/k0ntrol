@@ -295,7 +295,7 @@ class LiveRenderer:
             stretch.calls += 1
             stretch.tokens_in += _as_int(event.get("tokens_in"))
             stretch.tokens_out += _as_int(event.get("tokens_out"))
-        if event.get("ok") is False:
+        if event.get("ok") is False and not event.get("paused"):
             self._console.print(model_failure_line(event))
 
     def _on_tool(self, event: dict) -> None:

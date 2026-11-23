@@ -77,6 +77,7 @@ def test_ask_refuses_when_doctor_checks_error(tmp_path):
     assert not deltas
     text = _read_event_shown(shown)
     assert "missing credential" in text
+    assert "unsandboxed" not in text
     assert not _events(tmp_path)
 
 

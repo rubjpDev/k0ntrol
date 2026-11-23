@@ -108,7 +108,8 @@ def _ask_vcs(root: Path, prompt: Prompt) -> str:
     detected = detect_vcs(root)
     hosts = sorted(_VCS_HOSTS, key=lambda host: host != detected)
     options = [(host, _host_label(host, detected)) for host in hosts]
-    return prompt.choose("Where is this repo's code hosted?", options)
+    coming = {host for host in hosts if host != "github"}
+    return prompt.choose("Where is this repo's code hosted?", options, disabled=coming)
 
 
 def _host_label(host: str, detected: str | None) -> str:
@@ -119,7 +120,8 @@ def _host_label(host: str, detected: str | None) -> str:
 
 def _ask_tracker(vcs: str, prompt: Prompt) -> str:
     options = [(name, _tracker_label(name)) for name in VCS_TRACKERS[vcs]]
-    return prompt.choose("Which issue tracker does this repo use?", options)
+    coming = {name for name in VCS_TRACKERS[vcs] if name != "github"}
+    return prompt.choose("Which issue tracker does this repo use?", options, disabled=coming)
 
 
 def _tracker_label(name: str) -> str:
@@ -154,9 +156,8 @@ def _ask_nonempty(prompt: Prompt, label: str) -> str:
 _PROVIDERS = [
     ("ollama", "Ollama (local)"),
     ("bedrock", "Amazon Bedrock"),
-    ("lmstudio", "LM Studio (local)"),
     ("anthropic", "Anthropic API (untested)"),
-    ("openai", "OpenAI API (untested)"),
+    ("openai", "OpenAI API"),
     ("openrouter", "OpenRouter (untested)"),
     ("vertex", "Google Vertex (untested)"),
 ]
@@ -307,7 +308,7 @@ def _model_options(
         return _bedrock_options(tier)
     if provider in _CLAUDE_TIER_MODELS:
         return _claude_options(provider, tier)
-    return [(m, f"{m} (placeholder)") for m in _PLACEHOLDERS.get(provider, [])]
+    return [(m, m) for m in _PLACEHOLDERS.get(provider, [])]
 
 
 def _claude_options(provider: str, tier: str) -> list[tuple[str, str]]:
@@ -334,8 +335,11 @@ def _ask_model(prompt: Prompt, tier: str, options: list[tuple[str, str]]) -> str
 
 def _ask_effort(prompt: Prompt, tier: str) -> str | None:
     default = _TIER_EFFORT.get(tier, "none")
-    ordered = sorted(_EFFORTS, key=lambda option: option[0] != default)
-    choice = prompt.choose(f"Effort for {_TIER_QUESTION[tier]}", ordered)
+    options = [
+        (key, f"{label} (recommended)" if key == default else label)
+        for key, label in _EFFORTS
+    ]
+    choice = prompt.choose(f"Effort for {_TIER_QUESTION[tier]}", options)
     return None if choice == "none" else choice
 
 

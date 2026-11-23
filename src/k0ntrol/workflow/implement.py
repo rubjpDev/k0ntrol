@@ -43,6 +43,9 @@ from k0ntrol.tools.slice_journal import restore_slice
 from k0ntrol.tools.tracker import render_work_item
 from k0ntrol.tracker import TrackerError, is_trusted_author
 from k0ntrol.workflow.change import (
+    branch_paths,
+    mark_graph_generated,
+    pushed_file_lines,
     decider,
     existing_branch,
     head_sha,
@@ -625,7 +628,7 @@ def make_review_gate(ctx: RunContext) -> Callable[[dict], dict]:
                 "gate": "review",
                 "question": "approve the change?",
                 "answers": ["ok", "redo", "plan"] if ready else ["redo", "plan"],
-                "detail": _reviews_detail(ctx, state),
+                "detail": _reviews_detail(ctx, state) + _pushed_detail(ctx),
                 "diff": code_diff(
                     ctx.tracker.read_change_diff(state["change_ref"])
                 ),
@@ -634,6 +637,12 @@ def make_review_gate(ctx: RunContext) -> Callable[[dict], dict]:
         return _gate_route(state, str(decision), ready)
 
     return node
+
+
+def _pushed_detail(ctx: RunContext) -> str:
+    """Every file the pushed commits carry: what the PR shows (#204)."""
+    lines = pushed_file_lines(branch_paths(ctx.root, ctx.base_branch))
+    return "\n\n## Files pushed\n\n" + "\n".join(lines)
 
 
 def _gate_route(state: dict, decision: str, ready: bool) -> dict:
@@ -881,6 +890,9 @@ def _seam_answers(state: dict) -> str:
 # --- tracker side effects -------------------------------------------------------
 
 
+REFRESH_COMMIT = "k0: refresh project context"
+
+
 def make_branch_setup(ctx: RunContext) -> Callable[[dict], dict]:
     """Cut ``k0/<n>-<slug>`` from the base, rescan, commit ``.k0-mem/``.
 
@@ -896,8 +908,9 @@ def make_branch_setup(ctx: RunContext) -> Callable[[dict], dict]:
         tip = None if state.get("ci_approved_sha") else remote_tip(ctx.root, branch)
         update = _reconcile(ctx, branch)
         if update is None:
+            mark_graph_generated(ctx.root)
             ctx.scan(ctx.root)
-            ctx.tracker.commit(f"#{state['item_ref']}: update memory")
+            ctx.tracker.commit(REFRESH_COMMIT)
             update = {}
         return {
             "branch": branch,
@@ -934,7 +947,7 @@ def make_publish(ctx: RunContext) -> Callable[[dict], dict]:
     """On green: commit, rescan + memory commit; the CI gate and push follow.
 
     ``commit`` is whole-tree, so the title commit runs first — a memory
-    commit first would sweep the change into "update memory" and leave
+    commit first would sweep the change into ``REFRESH_COMMIT`` and leave
     ``#<n>: <title>`` empty (carrier contract, #13).
     """
 
@@ -947,7 +960,7 @@ def make_publish(ctx: RunContext) -> Callable[[dict], dict]:
         )
         ctx.tracker.commit(message)
         ctx.scan(ctx.root)
-        ctx.tracker.commit(f"#{ref}: update memory")
+        ctx.tracker.commit(REFRESH_COMMIT)
         return {}
 
     return node
