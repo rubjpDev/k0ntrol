@@ -52,7 +52,7 @@ from k0ntrol.memory.refresh import refresh_memory  # noqa: E402
 from k0ntrol.tools.tracker import latest_agent_brief_comment  # noqa: E402
 from k0ntrol.memory.scan import ScanError  # noqa: E402
 from k0ntrol.otel import build_run_trace, otel_callbacks  # noqa: E402
-from k0ntrol.providers import free_checks, has_errors, report_lines  # noqa: E402
+from k0ntrol.providers import error_lines, free_checks, has_errors  # noqa: E402
 from k0ntrol.tracker import (  # noqa: E402
     Comment,
     TRUSTED_ASSOCIATIONS,
@@ -438,7 +438,7 @@ def _doctor_gate(
         services=_services_for(kind, input_text, roster),
     )
     if has_errors(checks):
-        raise RunRefused(report_lines(checks))
+        raise RunRefused(error_lines(checks))
 
 
 def _services_for(

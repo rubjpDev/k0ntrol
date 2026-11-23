@@ -72,7 +72,8 @@ REGISTRY: dict[str, ProviderSpec] = {
                      api_key_env="LM_STUDIO_API_KEY"),
         ProviderSpec("openai", "openai", "openai", "langchain_openai",
                      credentials=("OPENAI_API_KEY",),
-                     credentials_required=True),
+                     credentials_required=True,
+                     defaults={"use_responses_api": True}),
         ProviderSpec("openai_compatible", "openai", "openai", "langchain_openai",
                      credentials=("OPENAI_COMPATIBLE_API_KEY",),
                      api_key_env="OPENAI_COMPATIBLE_API_KEY"),
@@ -222,6 +223,11 @@ def has_errors(checks: Iterable[Check]) -> bool:
     return any(c.status == "error" for c in checks)
 
 
+def error_lines(checks: Iterable[Check]) -> list[str]:
+    """Only the failed checks, one line each: what a refused run shows."""
+    return [f"{c.status}: {c.name}: {c.detail}" for c in checks if c.status == "error"]
+
+
 def report_lines(checks: Iterable[Check]) -> list[str]:
     """Human-readable doctor output: one line per check plus the notices."""
     lines = [f"{c.status}: {c.name}: {c.detail}" for c in checks]
@@ -258,15 +264,23 @@ def free_checks(
     checks = [Check("config", "ok", "valid")]
     checks.extend(_provider_membership(cfg, entries))
     checks.extend(_extra_checks(entries, is_installed))
-    checks.extend(_credential_checks(entries, env))
+    credentials = _credential_checks(entries, env)
+    checks.extend(credentials)
     if "search" in wanted:
         checks.append(_search_check(cfg, env))
     if "github" in wanted:
         checks.extend(_gh_checks(runner, root))
         checks.extend(_remote_checks(runner, root))
     checks.extend(_local_server_checks(entries, cfg, http))
-    checks.extend(_model_checks(entries, cfg, init, env))
+    checks.extend(_model_checks(_with_credentials(entries, credentials), cfg, init, env))
     return checks
+
+
+def _with_credentials(entries: dict[str, dict], credentials: list[Check]) -> dict[str, dict]:
+    """The entries whose provider credential is not already reported
+    missing: one actionable line beats a build error per agent."""
+    missing = {c.name.removeprefix("provider ") for c in credentials if c.status == "error"}
+    return {label: e for label, e in entries.items() if e.get("provider") not in missing}
 
 
 def _wanted_services(services: Iterable[str] | None) -> frozenset[str]:
@@ -371,7 +385,8 @@ def _extra_checks(entries: dict[str, dict], importable: Callable[[str], bool]) -
                                 f"extra '{spec.extra}' installed ({spec.module})"))
         else:
             checks.append(Check(f"provider {provider}", "error",
-                                f"missing package {spec.module}; install k0ntrol[{spec.extra}]"))
+                                f"missing package {spec.module}; "
+                                f'run: uv tool install "k0ntrol[{spec.extra}]"'))
     return checks
 
 
@@ -384,6 +399,9 @@ def _credential_checks(entries: dict[str, dict], environ: Mapping[str, str]) -> 
     return checks
 
 
+_KEY_OWNERS = {"openai": "OpenAI", "anthropic": "Anthropic", "openrouter": "OpenRouter"}
+
+
 def _credential_check(provider: str, environ: Mapping[str, str]) -> Check | None:
     spec = REGISTRY.get(provider)
     if spec is None or not spec.credentials:
@@ -394,7 +412,8 @@ def _credential_check(provider: str, environ: Mapping[str, str]) -> Check | None
         return Check(name, "ok", f"credential {present[0]} set")
     if spec.credentials_required:
         return Check(name, "error",
-                     f"missing credential; set {' or '.join(spec.credentials)}")
+                     f"{_KEY_OWNERS.get(provider, provider)} key missing: "
+                     f"export {spec.credentials[0]}=…")
     names = ", ".join(spec.credentials)
     return Check(name, "warning",
                  f"no credential in env ({names}); "
@@ -504,8 +523,18 @@ def _build_or_report(checks: list[Check], label: str, cfg: dict,
     except (ImportError, ModuleNotFoundError):
         return None  # the extra check already reports the missing package
     except Exception as error:
-        checks.append(Check(label, "error", f"cannot build model: {_short(error)}"))
+        checks.append(Check(label, "error",
+                            f"cannot build model: {_build_error(entry, error)}"))
         return None
+
+
+def _build_error(entry: dict, error: Exception) -> str:
+    """k0's own words for a LangChain credential error, never its text."""
+    spec = REGISTRY.get(entry.get("provider") or "")
+    text = str(error).lower()
+    if spec is not None and spec.credentials and ("credential" in text or "api_key" in text):
+        return f"{' or '.join(spec.credentials)} is not set"
+    return _short(error)
 
 
 def _profile_checks(label: str, provider: str, entry: dict, model) -> list[Check]:
@@ -633,7 +662,8 @@ def _live_check(label, entry, cfg, init, environ) -> Check:
         reply = model.bind_tools([_ping]).invoke(
             [HumanMessage(content="Call the `_ping` tool.")])
     except Exception as error:
-        return Check(label, "error", f"{pair} live call failed: {_short(error)}")
+        return Check(label, "error",
+                     f"{pair} live call failed: {_build_error(entry, error)}")
     if getattr(reply, "tool_calls", None):
         return Check(label, "ok", f"{pair} made a tool call")
     return Check(label, "error", f"{pair} answered without a tool call")

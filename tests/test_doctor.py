@@ -173,7 +173,8 @@ def test_unknown_provider_in_the_providers_map_is_a_warning():
 def test_missing_extra_is_an_error_naming_the_extra():
     checks = free_checks(anthropic_cfg(), importable=lambda module: False)
     assert any(
-        c.status == "error" and "k0ntrol[anthropic]" in c.detail for c in checks
+        c.status == "error" and 'uv tool install "k0ntrol[anthropic]"' in c.detail
+        for c in checks
     )
 
 
@@ -181,6 +182,36 @@ def test_missing_required_credential_is_an_error_naming_only_the_var():
     checks = free_checks(anthropic_cfg(), environ={})
     cred = [c for c in errors(checks) if "ANTHROPIC_API_KEY" in c.detail]
     assert cred, "expected a missing-credential error naming the env var"
+
+
+def openai_cfg():
+    return cfg_with(
+        agent_entries={"planner": {"provider": "openai", "model": "gpt-6-luna"},
+                       "chatty": {"provider": "openai", "model": "gpt-6-luna"}},
+        helpers={"reflect": {"provider": "openai", "model": "gpt-6-luna"}},
+    )
+
+
+def test_a_missing_key_is_one_actionable_line_and_skips_the_model_builds():
+    def langchain_init(model, **kwargs):
+        raise ValueError("Missing credentials. Please pass an `api_key`, "
+                         "`workload_identity`, or set OPENAI_ADMIN_KEY")
+
+    checks = free_checks(openai_cfg(), environ={}, init=langchain_init)
+
+    lines = [c.detail for c in errors(checks)]
+    assert lines == ["OpenAI key missing: export OPENAI_API_KEY=…"]
+
+
+def test_a_langchain_credential_error_maps_to_k0s_own_message():
+    def langchain_init(model, **kwargs):
+        raise ValueError("Missing credentials. Please pass an `api_key`")
+
+    cfg = cfg_with(agent_entries={"chatty": {"provider": "openai_compatible", "model": "m"}})
+    checks = free_checks(cfg, environ={}, init=langchain_init)
+
+    details = [c.detail for c in errors(checks)]
+    assert details == ["cannot build model: OPENAI_COMPATIBLE_API_KEY is not set"]
 
 
 def test_cloud_chain_without_env_hints_is_a_warning_not_an_error():
@@ -499,6 +530,15 @@ def test_live_failure_is_an_error():
     )
 
 
+def test_live_credential_failure_uses_k0s_own_message():
+    def init(model, *, model_provider=None, **kwargs):
+        raise ValueError("Missing credentials. Please pass an `api_key`")
+
+    cfg = cfg_with(agent_entries={"coder": {"provider": "openai", "model": "m"}})
+    details = [c.detail for c in errors(live_checks(cfg, init))]
+    assert details == ["openai:m live call failed: OPENAI_API_KEY is not set"]
+
+
 def test_live_binds_tools_without_forcing_tool_choice():
     from fakes import FakeReply
 
@@ -532,11 +572,33 @@ def test_live_respects_the_names_subset():
 # --- the `k0 doctor` command ---
 
 
+def with_user_config(monkeypatch, tmp_path):
+    home = tmp_path / "home"
+    (home / ".k0ntrol").mkdir(parents=True)
+    (home / ".k0ntrol" / "config.yaml").write_text(
+        "agents:\n  chatty: {provider: anthropic, model: claude-x}\n")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.chdir(tmp_path)
+
+
+def test_doctor_on_a_fresh_home_prints_only_the_setup_hint(capsys, monkeypatch, tmp_path):
+    from k0ntrol.cli import main
+
+    monkeypatch.chdir(tmp_path)
+
+    def refuse(cfg, **kw):
+        raise AssertionError("checks ran with no user config")
+
+    monkeypatch.setattr("k0ntrol.cli.free_checks", refuse)
+    assert main(["doctor"]) == 1
+    assert capsys.readouterr().out == "no user config yet: run k0 to set up\n"
+
+
 def test_doctor_exits_0_when_checks_pass(capsys, monkeypatch, tmp_path):
     from k0ntrol.cli import main
     from k0ntrol.providers import Check
 
-    monkeypatch.chdir(tmp_path)
+    with_user_config(monkeypatch, tmp_path)
     monkeypatch.setattr(
         "k0ntrol.cli.free_checks",
         lambda cfg, **kw: [Check("config", "ok", "valid"),
@@ -553,7 +615,7 @@ def test_doctor_exits_1_on_an_error(capsys, monkeypatch, tmp_path):
     from k0ntrol.cli import main
     from k0ntrol.providers import Check
 
-    monkeypatch.chdir(tmp_path)
+    with_user_config(monkeypatch, tmp_path)
     monkeypatch.setattr(
         "k0ntrol.cli.free_checks",
         lambda cfg, **kw: [Check("gh", "error", "gh is not on PATH")],
@@ -566,7 +628,7 @@ def test_doctor_live_runs_the_round_trip(capsys, monkeypatch, tmp_path):
     from k0ntrol.cli import main
     from k0ntrol.providers import Check
 
-    monkeypatch.chdir(tmp_path)
+    with_user_config(monkeypatch, tmp_path)
     monkeypatch.setattr("k0ntrol.cli.free_checks", lambda cfg, **kw: [])
     monkeypatch.setattr(
         "k0ntrol.cli.live_checks",
@@ -579,7 +641,7 @@ def test_doctor_live_runs_the_round_trip(capsys, monkeypatch, tmp_path):
 def test_doctor_config_error_exits_1(capsys, monkeypatch, tmp_path):
     from k0ntrol.cli import main
 
-    monkeypatch.chdir(tmp_path)
+    with_user_config(monkeypatch, tmp_path)
     mem = tmp_path / ".k0-mem"
     mem.mkdir()
     (mem / "config.yaml").write_text("backend: cursor\n")

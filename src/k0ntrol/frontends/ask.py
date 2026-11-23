@@ -29,7 +29,7 @@ from k0ntrol.frontends.mentions import MentionError, mention_paths
 from k0ntrol.helpers import helper_invoker
 from k0ntrol.memory.refresh import refresh_memory
 from k0ntrol.otel import build_run_trace, trace_callbacks
-from k0ntrol.providers import free_checks, has_errors, report_lines
+from k0ntrol.providers import error_lines, free_checks, has_errors
 from k0ntrol.workflow.change import current_branch
 
 
@@ -111,7 +111,7 @@ def _prepare(
         services=(),  # local path: no GitHub auth, remote or search key
     )
     if has_errors(checks):
-        for line in report_lines(checks):
+        for line in error_lines(checks):
             write(line)
         return None
     try:
