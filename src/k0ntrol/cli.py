@@ -86,6 +86,9 @@ def _run_doctor(live: bool) -> int:
     except ConfigError as error:
         print(f"config error: {error}", file=sys.stderr)
         return 1
+    if needs_provider_setup(Path.home()):
+        print("no user config yet: run k0 to set up")
+        return 1
 
     checks = free_checks(cfg, root=Path.cwd())
     if live:

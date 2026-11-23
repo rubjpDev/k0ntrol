@@ -156,9 +156,8 @@ def _ask_nonempty(prompt: Prompt, label: str) -> str:
 _PROVIDERS = [
     ("ollama", "Ollama (local)"),
     ("bedrock", "Amazon Bedrock"),
-    ("lmstudio", "LM Studio (local)"),
     ("anthropic", "Anthropic API (untested)"),
-    ("openai", "OpenAI API (untested)"),
+    ("openai", "OpenAI API"),
     ("openrouter", "OpenRouter (untested)"),
     ("vertex", "Google Vertex (untested)"),
 ]
@@ -309,7 +308,7 @@ def _model_options(
         return _bedrock_options(tier)
     if provider in _CLAUDE_TIER_MODELS:
         return _claude_options(provider, tier)
-    return [(m, f"{m} (placeholder)") for m in _PLACEHOLDERS.get(provider, [])]
+    return [(m, m) for m in _PLACEHOLDERS.get(provider, [])]
 
 
 def _claude_options(provider: str, tier: str) -> list[tuple[str, str]]:
@@ -336,8 +335,11 @@ def _ask_model(prompt: Prompt, tier: str, options: list[tuple[str, str]]) -> str
 
 def _ask_effort(prompt: Prompt, tier: str) -> str | None:
     default = _TIER_EFFORT.get(tier, "none")
-    ordered = sorted(_EFFORTS, key=lambda option: option[0] != default)
-    choice = prompt.choose(f"Effort for {_TIER_QUESTION[tier]}", ordered)
+    options = [
+        (key, f"{label} (recommended)" if key == default else label)
+        for key, label in _EFFORTS
+    ]
+    choice = prompt.choose(f"Effort for {_TIER_QUESTION[tier]}", options)
     return None if choice == "none" else choice
 
 
