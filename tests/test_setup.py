@@ -277,7 +277,7 @@ def test_ollama_offers_installed_models_and_writes_the_config(tmp_path):
     assert data["agents"]["planner"] == {"provider": "ollama", "model": "llama3.1", "effort": "high"}
     assert data["agents"]["reviewer"] == data["agents"]["planner"]
     assert data["agents"]["implementer"] == {"provider": "ollama", "model": "qwen3:8b", "effort": "low"}
-    assert data["agents"]["researcher"] == data["agents"]["implementer"]
+    assert data["agents"]["researcher"] == data["agents"]["planner"]
     assert data["agents"]["chatty"] == {"provider": "ollama", "model": "qwen3:8b"}
     assert data["helpers"]["bulk_read"] == data["agents"]["chatty"]
     assert data["helpers"]["reflect"] == data["agents"]["chatty"]
@@ -431,7 +431,7 @@ def test_anthropic_offers_its_claude_ids_tier_first(tmp_path):
     assert [key for key, _ in models][0] == "claude-haiku-5-5"
     assert [label for _, label in models] == ["Claude Haiku 5.5", "Claude Opus 5.5", "Claude Sonnet 5.5"]
     assert screens._ask_model(Spy(), "middle", models) == "claude-haiku-5-5"
-    assert seen[0][0] == "Model for RESEARCHER and IMPLEMENTER"
+    assert seen[0][0] == "Model for IMPLEMENTER"
     assert seen[0][1][-1] == screens._OTHER
     openrouter = screens._model_options("openrouter", "strong", None)
     assert openrouter[0][0] == "anthropic/claude-opus-5.5"

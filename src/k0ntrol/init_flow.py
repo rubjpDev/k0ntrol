@@ -53,9 +53,12 @@ _CLAUDE_TIER_MODELS = {
 }
 
 # Default tiers: which roster entries share one model, and the Claude effort.
+# RESEARCHER answers the decisions a spec is built on, so it shares the
+# strong model with PLANNER and REVIEWER; IMPLEMENTER, the heaviest caller,
+# gets the middle tier to itself (#211).
 _TIER_ROSTER = {
-    "strong": ("planner", "reviewer"),
-    "middle": ("researcher", "implementer"),
+    "strong": ("planner", "researcher", "reviewer"),
+    "middle": ("implementer",),
     "light": ("chatty", "bulk_read", "reflect"),
 }
 _TIER_EFFORT = {"strong": "high", "middle": "medium"}

@@ -226,11 +226,7 @@ def test_init_maps_only_supported_agents_onto_their_tiers(tmp_path):
         "model": "claude-opus-5-5",
         "effort": "high",
     }
-    assert cfg["agents"]["researcher"] == {
-        "provider": "anthropic",
-        "model": "claude-sonnet-5-5",
-        "effort": "medium",
-    }
+    assert cfg["agents"]["researcher"] == cfg["agents"]["planner"]
     assert cfg["agents"]["implementer"] == {
         "provider": "anthropic",
         "model": "claude-sonnet-5-5",
@@ -263,10 +259,9 @@ def test_openai_init_asks_one_model_per_tier(tmp_path):
     prompts = " ".join(answers.prompts)
     assert "strong" in prompts and "middle" in prompts and "light" in prompts
     cfg = read_user_config(tmp_path / "home")
-    for name in ("planner", "reviewer"):
+    for name in ("planner", "researcher", "reviewer"):
         assert cfg["agents"][name]["model"] == "gpt-x-strong"
-    for name in ("researcher", "implementer"):
-        assert cfg["agents"][name]["model"] == "gpt-x-mid"
+    assert cfg["agents"]["implementer"]["model"] == "gpt-x-mid"
     assert cfg["agents"]["chatty"]["model"] == "gpt-x-light"
     assert cfg["helpers"]["bulk_read"]["model"] == "gpt-x-light"
     assert cfg["helpers"]["reflect"]["model"] == "gpt-x-light"
