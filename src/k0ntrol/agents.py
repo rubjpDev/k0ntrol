@@ -15,7 +15,7 @@ that is not that allowlist — off-allowlist tools get
 ``ToolError(denied="allowlist")``, the canonical refusal. Only ``BaseTool``
 instances are accepted: dict tools (provider built-ins) would bypass the
 allowlist check in the tool node — but for the one exception ADR 0017
-carves out: ``OPENAI_WEB_SEARCH`` may fill the ``web_search`` slot for
+carves out: a provider's own web search (``NATIVE_SEARCH_TOOLS``) may fill the ``web_search`` slot for
 PLANNER and RESEARCHER.
 """
 
@@ -53,7 +53,7 @@ from pydantic import BaseModel, Field, model_validator
 from k0ntrol.events import META_AGENT, META_EFFORT, META_HELPER, WARNING_EVENT
 from k0ntrol.memory.index import custom_rules_text, custom_topology_text
 from k0ntrol.providers import build_chat_model
-from k0ntrol.search import NATIVE_SEARCH_AGENTS, uses_native_search
+from k0ntrol.search import NATIVE_SEARCH_AGENTS, native_search_provider, uses_native_search
 from k0ntrol.tools.bulk_read import make_bulk_read
 from k0ntrol.tools.errors import ToolError
 from k0ntrol.tools.fetch_url import make_fetch_url
@@ -76,15 +76,26 @@ _TRACKER_TOOLS = ("read_work_item", "read_change_diff")
 
 _NETWORK_TOOLS = ("fetch_url", "web_search")
 
-# The provider built-in PLANNER and RESEARCHER get instead of k0's
-# ``web_search`` when ``uses_native_search`` says so (#182, ADR 0017): a
-# constant k0 owns, the one exception to "tools are only ``BaseTool``
-# instances". Binding it routes ``ChatOpenAI`` through the Responses API.
-OPENAI_WEB_SEARCH: dict[str, Any] = {"type": "web_search"}
-
-# OpenAI's hard cap on built-in tool calls per model call — a fixed k0
-# constant, not configurable (ADR 0017).
+# The cap on provider searches per model call — a fixed k0 constant, not
+# configurable (ADR 0017): OpenAI's ``max_tool_calls``, Anthropic's
+# ``max_uses``.
 NATIVE_SEARCH_MAX_CALLS = 5
+
+# The provider built-ins PLANNER and RESEARCHER get instead of k0's
+# ``web_search`` when ``uses_native_search`` says so (ADR 0017): constants
+# k0 owns, the one exception to "tools are only ``BaseTool`` instances".
+# Binding OpenAI's routes ``ChatOpenAI`` through the Responses API (#182);
+# Anthropic's carries its own cap (#209).
+OPENAI_WEB_SEARCH: dict[str, Any] = {"type": "web_search"}
+ANTHROPIC_WEB_SEARCH: dict[str, Any] = {
+    "type": "web_search_20260209",
+    "name": "web_search",
+    "max_uses": NATIVE_SEARCH_MAX_CALLS,
+}
+NATIVE_SEARCH_TOOLS: dict[str, dict[str, Any]] = {
+    "openai": OPENAI_WEB_SEARCH,
+    "anthropic": ANTHROPIC_WEB_SEARCH,
+}
 
 # The roster's tool allowlists (issue #12). `bulk_read` and `search_memory`
 # are on the base reads (#40); CHATTY's `read_work_item` joins when the
@@ -413,7 +424,7 @@ def agent_tools(
     tools: list[BaseTool | dict[str, Any]] = []
     for tool_name in names:
         if tool_name == "web_search" and uses_native_search(cfg or {}, name):
-            tools.append(OPENAI_WEB_SEARCH)
+            tools.append(NATIVE_SEARCH_TOOLS[native_search_provider(cfg or {}, name)])
         else:
             tools.append(factories[tool_name]())
     return tools
@@ -455,7 +466,11 @@ def build_agent(
         ToolErrorMiddleware(),
     ]
     if uses_native_search(cfg, name):
-        middleware.append(NativeSearchMiddleware(agent=name, model=entry["model"]))
+        middleware.append(
+            NativeSearchMiddleware(
+                agent=name, model=entry["model"], provider=entry["provider"]
+            )
+        )
     graph = create_agent(
         model,
         tools=checked,
@@ -580,19 +595,24 @@ class NativeSearchMiddleware(AgentMiddleware):
     """Bind the provider search's call cap; drop the tool if the model
     cannot use it (ADR 0017).
 
-    Every model call carries ``max_tool_calls`` so the provider's
-    searches stay capped. When the provider rejects the tool — the
-    configured model does not support web search — the call is retried
+    On OpenAI every model call carries ``max_tool_calls`` so the
+    provider's searches stay capped; Anthropic's tool carries its own
+    ``max_uses`` and gets no extra setting. When the provider rejects the
+    tool — the configured model does not support web search, or the
+    organization has it switched off — the call is retried
     once without it and the tool stays off for the rest of the agent
     run. One ``warning`` event names the agent and model; k0 never falls
     back to ``search.provider`` (Brave): a silent switch would hide a
     misconfiguration and could bill a second account.
     """
 
-    def __init__(self, *, agent: str, model: str) -> None:
+    def __init__(self, *, agent: str, model: str, provider: str = "openai") -> None:
         super().__init__()
         self._agent = agent
         self._model = model
+        self._cap = (
+            {"max_tool_calls": NATIVE_SEARCH_MAX_CALLS} if provider == "openai" else {}
+        )
         self._search_dropped = False
 
     def wrap_model_call(
@@ -601,10 +621,7 @@ class NativeSearchMiddleware(AgentMiddleware):
         handler: Callable[[ModelRequest], ModelResponse],
     ) -> ModelResponse:
         request = request.override(
-            model_settings={
-                **request.model_settings,
-                "max_tool_calls": NATIVE_SEARCH_MAX_CALLS,
-            }
+            model_settings={**request.model_settings, **self._cap}
         )
         if self._search_dropped:
             request = request.override(tools=_without_search(request.tools))
@@ -626,15 +643,19 @@ class NativeSearchMiddleware(AgentMiddleware):
 
 
 def _without_search(tools: Sequence[Any]) -> list[Any]:
-    return [tool for tool in tools if tool != OPENAI_WEB_SEARCH]
+    return [tool for tool in tools if tool not in NATIVE_SEARCH_TOOLS.values()]
+
+
+_WEB_SEARCH = re.compile(r"web[ _]search", re.IGNORECASE)
 
 
 def _unsupported_search(error: Exception) -> bool:
-    """The OpenAI SDK's ``BadRequestError`` naming ``web_search``: the
-    model cannot use the tool. Matched on the class name — the
-    ``langchain-openai`` extra may not be installed — like
+    """A provider SDK's ``BadRequestError`` naming web search: the model
+    cannot use the tool (``web_search``, ``web_search_20260209``), or the
+    organization has it off ("Web search is not enabled"). Matched on the
+    class name — the provider extras may not be installed — like
     ``_TRANSIENT_ERROR_TYPES``."""
-    return "web_search" in str(error) and any(
+    return bool(_WEB_SEARCH.search(str(error))) and any(
         cls.__name__ == "BadRequestError" for cls in type(error).__mro__
     )
 
@@ -660,7 +681,7 @@ def _tool_slot(agent: str, item: BaseTool | dict[str, Any]) -> str:
     the one provider built-in PLANNER and RESEARCHER may carry (ADR 0017)."""
     if isinstance(item, BaseTool):
         return item.name
-    if item == OPENAI_WEB_SEARCH and agent in NATIVE_SEARCH_AGENTS:
+    if agent in NATIVE_SEARCH_AGENTS and item in NATIVE_SEARCH_TOOLS.values():
         return "web_search"
     raise TypeError(f"tools must be BaseTool instances, got {item!r}")
 

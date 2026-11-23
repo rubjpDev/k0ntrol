@@ -18,6 +18,7 @@ from pydantic import ValidationError
 from fakes import BadRequestError, FakeChatModel, FakeTracker, cfg_with
 from k0ntrol.agents import (
     ALLOWLISTS,
+    ANTHROPIC_WEB_SEARCH,
     NATIVE_SEARCH_MAX_CALLS,
     OPENAI_WEB_SEARCH,
     MissingStructuredOutput,
@@ -161,13 +162,16 @@ def _native_cfg(agent="planner", provider="openai", **search):
     return cfg
 
 
+@pytest.mark.parametrize("provider", ["openai", "anthropic"])
 @pytest.mark.parametrize("agent", ["planner", "researcher"])
-def test_native_search_keys_on_the_k0_provider(agent):
-    cfg = _native_cfg(agent)
+def test_native_search_keys_on_the_k0_provider(agent, provider):
+    cfg = _native_cfg(agent, provider)
     assert uses_native_search(cfg, agent) is True
 
 
-@pytest.mark.parametrize("provider", ["lmstudio", "openai_compatible", "anthropic"])
+@pytest.mark.parametrize(
+    "provider", ["lmstudio", "openai_compatible", "bedrock", "openrouter"]
+)
 def test_native_search_follows_the_k0_provider_name(provider):
     # lmstudio and openai_compatible share LangChain's "openai"
     # model_provider — they still use search.provider (ADR 0017).
@@ -223,6 +227,24 @@ def test_native_search_binds_the_tool_and_the_call_cap(tmp_path):
 
     assert OPENAI_WEB_SEARCH in model.bound_tools
     assert model.bind_kwargs["max_tool_calls"] == NATIVE_SEARCH_MAX_CALLS
+
+
+def test_anthropic_native_search_binds_its_own_capped_tool(tmp_path):
+    """On ``anthropic`` the slot carries Anthropic's web search, capped by
+    its own ``max_uses``; ``max_tool_calls`` is OpenAI's and never sent (#209)."""
+    model = _scripted(_planner_round())
+    cfg = _native_cfg(provider="anthropic")
+    tools = agent_tools(
+        "planner", root=tmp_path, cfg=cfg, tracker=_tracker(), init=_init(model)
+    )
+    agent = build_agent("planner", cfg, tools, root=tmp_path, init=_init(model))
+
+    agent.invoke([HumanMessage("plan")])
+
+    assert ANTHROPIC_WEB_SEARCH in model.bound_tools
+    assert OPENAI_WEB_SEARCH not in model.bound_tools
+    assert ANTHROPIC_WEB_SEARCH["max_uses"] == NATIVE_SEARCH_MAX_CALLS
+    assert "max_tool_calls" not in model.bind_kwargs
 
 
 def test_native_search_never_binds_both_search_tools(tmp_path):
@@ -310,8 +332,8 @@ def _planner_round(questions=None):
     )
 
 
-def _native_agent(tmp_path, model, **tool_kwargs):
-    cfg = _native_cfg()
+def _native_agent(tmp_path, model, provider="openai", **tool_kwargs):
+    cfg = _native_cfg(provider=provider)
     tools = agent_tools(
         "planner",
         root=tmp_path,
@@ -373,6 +395,28 @@ def test_an_unsupported_model_retries_without_the_tool(tmp_path):
         event for event in _read_events(path) if event.get("kind") == "warning"
     ]
     assert len(warnings) == 1
+
+
+@pytest.mark.parametrize(
+    "rejection",
+    [
+        "400 tools.0: 'web_search_20260209' is not supported on this model",
+        "400 Web search is not enabled for this organization",
+    ],
+)
+def test_an_anthropic_rejection_drops_the_tool_and_warns(tmp_path, rejection):
+    model = _scripted(BadRequestError(rejection), _planner_round())
+    agent = _native_agent(tmp_path, model, provider="anthropic")
+    handler, path = _event_log(tmp_path)
+
+    agent.invoke([HumanMessage("plan")], config={"callbacks": [handler]})
+
+    assert len(model.invocations) == 2
+    assert ANTHROPIC_WEB_SEARCH not in model.bound_tools
+    (warning,) = [
+        event for event in _read_events(path) if event.get("kind") == "warning"
+    ]
+    assert warning["reason"] == "web search unsupported"
 
 
 def test_other_bad_request_errors_still_fail_the_run(tmp_path):

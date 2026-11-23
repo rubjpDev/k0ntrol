@@ -596,11 +596,17 @@ def _web_searches(message: Any | None) -> int | None:
 def _search_calls(blocks: Any) -> int:
     if not isinstance(blocks, list):
         return 0
-    return sum(
-        1
-        for block in blocks
-        if isinstance(block, dict) and block.get("type") == "web_search_call"
-    )
+    return sum(1 for block in blocks if _is_search_call(block))
+
+
+def _is_search_call(block: Any) -> bool:
+    """OpenAI's ``web_search_call`` item, or Anthropic's ``server_tool_use``
+    block named ``web_search`` (#209) — never the result blocks."""
+    if not isinstance(block, dict):
+        return False
+    if block.get("type") == "web_search_call":
+        return True
+    return block.get("type") == "server_tool_use" and block.get("name") == "web_search"
 
 
 # --- Progress renderer ----------------------------------------------------

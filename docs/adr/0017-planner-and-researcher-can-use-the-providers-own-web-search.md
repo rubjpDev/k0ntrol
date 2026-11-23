@@ -2,7 +2,7 @@
 
 From 0.1.0, `search.native: true` in config lets PLANNER and RESEARCHER search with their model provider's own web search tool instead of k0's `web_search`. It is off by default. 0.1.0 wires one provider, `openai`: an agent on it gets OpenAI's built-in `{"type": "web_search"}` tool, which routes its model calls through the Responses API. Every other case keeps today's path: an agent on any other provider, or any agent while `search.native` is off, uses k0's `web_search` through `search.provider` (Brave), or has no search when that is unset. `fetch_url` is unchanged. OpenAI bills each search to the user's own key on top of tokens, and switching search on is the user's choice to pay for it. We chose this because the user already holds the key, the provider's search needs no second account or server, and the risk ADR 0013 contained is unchanged: the only agents that search have no write tools, and what they produce reaches a human at a gate before anything is built.
 
-Anthropic, OpenRouter and Vertex also offer their own search. Each can be wired later by its own ticket under the rules below, without a new ADR. Bedrock through Converse and the local providers (`ollama`, `lmstudio`, `openai_compatible`) have no provider search and always use `search.provider`.
+Anthropic is wired too (#209): its tool `web_search_20260209` carries its own `max_uses` cap, so Anthropic calls get no `max_tool_calls`. OpenRouter and Vertex also offer their own search. Each can be wired later by its own ticket under the rules below, without a new ADR. Bedrock through Converse and the local providers (`ollama`, `lmstudio`, `openai_compatible`) have no provider search and always use `search.provider`.
 
 The rules:
 

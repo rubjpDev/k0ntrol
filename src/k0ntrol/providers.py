@@ -32,6 +32,7 @@ from k0ntrol.search import (
     NATIVE_SEARCH_AGENTS,
     SEARCH_PROVIDERS,
     SearchProvider,
+    native_search_provider,
     search_provider_name,
     uses_native_search,
 )
@@ -309,7 +310,7 @@ def _search_check(cfg: dict, environ: Mapping[str, str]) -> Check:
             f"{_agent_names(uncovered)} will have no web search. "
             "Set search.provider to enable it.",
         )
-    return Check("web search", "ok", _search_detail(name, provider, native))
+    return Check("web search", "ok", _search_detail(cfg, name, provider, native))
 
 
 def _native_agents(cfg: dict) -> list[str]:
@@ -336,6 +337,7 @@ def _search_provider_error(
 
 
 def _search_detail(
+    cfg: dict,
     name: str | None,
     provider: SearchProvider | None,
     native: list[str],
@@ -343,9 +345,19 @@ def _search_detail(
     parts = []
     if provider is not None:
         parts.append(f"{name} credential {provider.key_env} set")
-    if native:
-        parts.append(f"{_agent_names(native)} on OpenAI's web search")
+    parts.extend(_native_detail(cfg, native))
     return "; ".join(parts)
+
+
+def _native_detail(cfg: dict, native: list[str]) -> list[str]:
+    """``PLANNER on OpenAI's web search``, one part per provider (#209)."""
+    by_provider: dict[str, list[str]] = {}
+    for agent in native:
+        by_provider.setdefault(native_search_provider(cfg, agent), []).append(agent)
+    return [
+        f"{_agent_names(agents)} on {_KEY_OWNERS.get(owner, owner)}'s web search"
+        for owner, agents in by_provider.items()
+    ]
 
 
 def _agent_names(agents: list[str]) -> str:

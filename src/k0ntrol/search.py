@@ -59,22 +59,33 @@ def search_provider_name(cfg: dict) -> str | None:
 # for (ADR 0017): the read-only network agents, never a writing one.
 NATIVE_SEARCH_AGENTS = ("planner", "researcher")
 
+# The k0 providers whose own web search is wired (ADR 0017): OpenAI
+# (#182) and Anthropic (#209). Every other provider keeps search.provider.
+NATIVE_SEARCH_PROVIDERS = ("openai", "anthropic")
+
 
 def uses_native_search(cfg: dict, agent: str) -> bool:
     """True when ``agent`` searches with its provider's own web search.
 
     Only with ``search.native: true``, only PLANNER and RESEARCHER, and
-    only on the k0 provider ``openai`` — never on LangChain's
-    ``model_provider`` name, which ``lmstudio`` and ``openai_compatible``
-    share (ADR 0017).
+    only on a k0 provider in ``NATIVE_SEARCH_PROVIDERS`` — never on
+    LangChain's ``model_provider`` name, which ``lmstudio`` and
+    ``openai_compatible`` share with ``openai`` (ADR 0017).
     """
     search = cfg.get("search")
     if not isinstance(search, dict) or search.get("native") is not True:
         return False
     if agent not in NATIVE_SEARCH_AGENTS:
         return False
+    return native_search_provider(cfg, agent) in NATIVE_SEARCH_PROVIDERS
+
+
+def native_search_provider(cfg: dict, agent: str) -> str:
+    """The k0 provider ``agent`` runs on, as its ``agents:`` entry names
+    it, or ``""`` when the entry names none."""
     entry = (cfg.get("agents") or {}).get(agent) or {}
-    return entry.get("provider") == "openai"
+    provider = entry.get("provider")
+    return provider if isinstance(provider, str) else ""
 
 
 def _brave_request(endpoint: str, query: str, api_key: str) -> SearchRequest:

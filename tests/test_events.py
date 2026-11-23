@@ -598,6 +598,35 @@ def test_model_event_counts_the_calls_web_searches(tmp_path):
     assert "example.com" not in json.dumps(event)
 
 
+def test_model_event_counts_anthropic_web_searches(tmp_path):
+    """Anthropic's server searches: ``server_tool_use`` blocks named
+    ``web_search``, the shape langchain-anthropic keeps in
+    ``AIMessage.content`` (#209). The result blocks are not counted."""
+    from uuid import uuid4
+
+    from langchain_core.outputs import LLMResult
+
+    handler, path = make_handler(tmp_path)
+    run_id = uuid4()
+    handler.on_chat_model_start({}, [], run_id=run_id, metadata={"k0_agent": "planner"})
+    message = AIMessage(
+        content=[
+            {"type": "server_tool_use", "id": "s1", "name": "web_search", "input": {"query": "q"}},
+            {"type": "web_search_tool_result", "tool_use_id": "s1", "content": []},
+            {"type": "server_tool_use", "id": "s2", "name": "web_search", "input": {"query": "q2"}},
+            {"type": "server_tool_use", "id": "s3", "name": "web_fetch", "input": {"url": "u"}},
+            {"type": "text", "text": "answer"},
+        ]
+    )
+    handler.on_llm_end(
+        LLMResult(generations=[[ChatGeneration(message=message)]]),
+        run_id=run_id,
+    )
+    (event,) = read_events(path)
+    assert event["web_searches"] == 2
+    assert "q2" not in json.dumps(event)
+
+
 def test_model_event_omits_web_searches_when_the_call_ran_none(tmp_path):
     from uuid import uuid4
 
