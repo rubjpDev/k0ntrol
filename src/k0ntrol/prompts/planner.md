@@ -25,7 +25,10 @@ End every run by calling exactly one structured output tool:
   and out of scope.
 - `TicketList` for the ticket breakdown: each ticket's title, what it
   delivers, seams, acceptance criteria, and `blocked_by` indexes of
-  earlier tickets it waits on.
+  earlier tickets it waits on. Keep the glossary and ADR ticket (ADR
+  0012); when `GLOSSARY.md` or `docs/adr/` is missing, that ticket
+  creates it. Each ticket carries the tests for the behaviour it
+  delivers: never write a tests-only ticket.
 - `ChartedMap` for a research map: its title, destination, notes, one
   decision ticket per open question — the question, a type of research,
   Q&A or human, and the `blocked_by` indexes of earlier decisions it

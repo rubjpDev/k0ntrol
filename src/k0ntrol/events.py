@@ -249,6 +249,7 @@ class EventWriter:
         version: str | None = None,
         resumed: bool | None = None,
         session: str | None = None,
+        question: str | None = None,
     ) -> dict:
         """Emit `run_start`. `work_item`, `resumed` and `session` (the REPL
         sitting's id) only when they apply."""
@@ -260,6 +261,7 @@ class EventWriter:
             version=version,
             resumed=resumed,
             session=session,
+            question=question,
         )
 
     def gate(

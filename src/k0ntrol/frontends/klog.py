@@ -109,9 +109,12 @@ def _model_cost(event: dict) -> tuple[float | None, bool]:
     return estimate, estimate is not None
 
 
+#: The run_end outcomes that make a run's row red (#205).
+RED_OUTCOMES: frozenset[str] = frozenset({"failed", "paused"})
+
 _ALSO_BAD: dict[str, Callable[[dict], bool]] = {
     "gate": lambda event: event.get("result") == "fail",
-    "run_end": lambda event: event.get("outcome") != "done",
+    "run_end": lambda event: event.get("outcome") in RED_OUTCOMES,
 }
 
 
@@ -157,7 +160,13 @@ def _usage(models: list[dict]) -> dict:
 
 
 def _failures(events: list[dict]) -> int:
-    return sum(1 for event in events if event.get("flag"))
+    return sum(1 for event in events if event.get("flag") == "fail")
+
+
+def _denials(events: list[dict]) -> int:
+    """Guard refusals (``path_guard``, an unset search provider): expected,
+    so counted apart from failures (#205)."""
+    return sum(1 for event in events if event.get("flag") == "denied")
 
 
 def _run_row(key: str, events: list[dict]) -> dict:
@@ -174,6 +183,8 @@ def _run_row(key: str, events: list[dict]) -> dict:
         "duration_ms": _duration_ms(events, end),
         "outcome": end.get("outcome") or (None if is_chat else "running"),
         "failures": _failures(events),
+        "denials": _denials(events),
+        "flagged": end.get("outcome") in RED_OUTCOMES,
         "events": len(events),
     }
     return row | _usage(models)
@@ -208,6 +219,7 @@ def _totals(events: list[dict], models: list[dict], runs: list[dict]) -> dict:
         "runs": sum(1 for row in runs if row["kind"] != "chat"),
         "chats": sum(1 for row in runs if row["kind"] == "chat"),
         "failures": _failures(events),
+        "denials": _denials(events),
     }
 
 

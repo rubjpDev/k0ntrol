@@ -11,6 +11,8 @@ PRICES: dict[str, tuple[float, float]] = {
     "qwen.qwen3-coder-next": (0.50, 1.20),
     "us.amazon.nova-pro-v1:0": (0.80, 3.20),
     "us.amazon.nova-lite-v1:0": (0.06, 0.24),
+    # OpenAI's preset (#205): an estimate like the rest.
+    "gpt-6-luna": (0.10, 0.50),
 }
 
 # Models that run on the user's own machine cost nothing per token.

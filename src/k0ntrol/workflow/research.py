@@ -49,6 +49,7 @@ from k0ntrol.workflow.qa import (
 from k0ntrol.workflow.routers import (
     _exhausted,
     route_after_chart,
+    route_after_map_gate,
     route_after_decision_planner,
     route_after_pick,
     route_after_researcher,
@@ -66,6 +67,7 @@ def build_research_graph(
     """Compile the ``/research`` graph for one run context."""
     graph = StateGraph(RunState)
     graph.add_node("planner", make_chart_node(ctx))
+    graph.add_node("map_gate", make_map_gate(ctx))
     graph.add_node("publish_map", make_publish_map(ctx))
     graph.add_node("publish_decisions", make_publish_decisions(ctx))
     graph.add_node("pick_decision", make_pick_decision(ctx))
@@ -78,6 +80,7 @@ def build_research_graph(
     graph.add_node("limit_hit", make_limit_hit(ctx))
     graph.add_conditional_edges(START, route_research_start)
     graph.add_conditional_edges("planner", route_after_chart)
+    graph.add_conditional_edges("map_gate", route_after_map_gate)
     graph.add_edge("publish_map", "publish_decisions")
     graph.add_edge("publish_decisions", END)
     graph.add_conditional_edges("pick_decision", route_after_pick)
@@ -113,6 +116,29 @@ def make_chart_node(ctx: RunContext) -> Callable[[dict], dict]:
                 merged, "planner", "planner", _last_output(result)
             )
         return updates
+
+    return node
+
+
+def make_map_gate(ctx: RunContext) -> Callable[[dict], dict]:
+    """The Map gate: the drafted Map before anything is published (#205).
+    ``ok`` publishes it; ``redo [feedback]`` charts again. Abandoning the
+    paused run publishes nothing."""
+
+    def node(state: dict) -> dict:
+        chart = state["map"]
+        decision = interrupt(
+            {
+                "gate": "map",
+                "question": "publish this Map?",
+                "answers": ["ok", "redo"],
+                "detail": f"# {chart['title']}\n\n{map_body(chart)}",
+            }
+        )
+        word, _, feedback = str(decision).strip().partition(" ")
+        if word.lower() == "ok":
+            return {"map_feedback": None}
+        return {"map": None, "map_feedback": feedback.strip() or "chart it again"}
 
     return node
 
@@ -202,7 +228,9 @@ def chart_brief(state: dict) -> str:
         "blocked_by indexes of the earlier decisions they wait on), "
         "what is not yet specified and what is out of scope."
     )
-    if state.get("planner_attempts"):
+    if state.get("map_feedback"):
+        text += f"\n\nThe human sent the last map back: {state['map_feedback']}"
+    elif state.get("planner_attempts"):
         text += (
             "\n\nYour last answer did not chart a map — answer with ChartedMap."
         )

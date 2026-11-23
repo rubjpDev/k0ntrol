@@ -227,9 +227,9 @@ def start(
             ctx.writer.run_start(
                 kind,
                 work_item=item.qualified_ref if item else None,
-                branch=current_branch(root),
                 version=__version__,
                 session=session,
+                **_header(kind, item, input_text, root),
             )
             graph.invoke(
                 _initial_state(
@@ -564,6 +564,14 @@ def _implement_preflight(kind: str, item, root: Path, run_id: str) -> None:
         raise RunRefused("/implement needs a git repository")
     if item is None:
         _snapshot_worktree(root, run_id)
+
+
+def _header(kind: str, item, input_text: str, root: Path) -> dict:
+    """What the run header names: a ``/research <question>`` its question,
+    every other run its branch (#205)."""
+    if kind == "research" and item is None:
+        return {"question": input_text}
+    return {"branch": current_branch(root)}
 
 
 _LOCAL_ONLY = (

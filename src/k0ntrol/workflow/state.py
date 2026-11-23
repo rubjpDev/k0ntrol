@@ -120,6 +120,7 @@ class RunState(TypedDict, total=False):
 
     # /research (#124): PLANNER's charted map, then the published refs.
     map: dict | None  # the ChartedMap as a plain dict
+    map_feedback: str | None  # the Map gate's redo feedback (#205)
     decision_refs: list[str]  # child work-item refs, one per decision
 
     # /research #<n> (#125): the map's next unblocked decision ticket.
