@@ -2188,3 +2188,71 @@ def test_abandoning_a_reconciled_run_keeps_the_draft_and_posts_no_gate(tmp_path)
     assert not any(
         "Gate passed" in c.body for c in tracker.read_work_item("1").comments
     )
+
+
+GENERATED = ".k0-mem/Project_context/** linguist-generated=true"
+
+
+def test_the_graph_refresh_is_its_own_k0_commit(tmp_path):
+    """The rescan lands as ``k0: refresh project context``, never inside
+    the change's own ``#<n>`` commit (#204)."""
+    tracker, _pending = to_review_gate(tmp_path)
+
+    messages = [call[1] for call in tracker.calls if call[0] == "commit"]
+    assert "k0: refresh project context" in messages
+    assert not any(m.endswith("update memory") for m in messages)
+
+
+def test_the_review_gate_lists_every_pushed_file(tmp_path):
+    tracker, pending = to_review_gate(tmp_path)
+
+    assert "## Files pushed" in pending.detail
+    assert "- calc.py" in pending.detail
+    assert "- tests/test_calc.py" in pending.detail
+
+
+def test_the_tracker_path_marks_the_graph_generated(tmp_path):
+    to_review_gate(tmp_path)
+
+    shown = subprocess.run(
+        ["git", "show", "HEAD:.gitattributes"], cwd=tmp_path,
+        capture_output=True, text=True, check=True,
+    ).stdout
+    assert GENERATED in shown.splitlines()
+
+
+def test_a_working_tree_run_without_origin_warns_once_before_any_model_call(tmp_path):
+    git_repo(tmp_path)
+    shown: list[str] = []
+    calls: list[int] = []
+    seams = seams_model()
+    original = seams._generate
+
+    def counted(*a, **k):
+        calls.append(len(shown))
+        return original(*a, **k)
+
+    seams._generate = counted  # type: ignore[method-assign]
+
+    pending = run_implement(tmp_path, implement_cfg(), seams, write=shown.append)
+
+    assert isinstance(pending, Pending)
+    warned = [i for i, line in enumerate(shown) if "no 'origin' remote" in line]
+    assert len(warned) == 1
+    assert calls and warned[0] < calls[0]
+
+
+def test_pushed_files_collapse_the_graph_and_keep_mem_md():
+    from k0ntrol.workflow.change import pushed_file_lines
+
+    paths = [
+        ".k0-mem/Mem.md",
+        ".k0-mem/Project_context/a.md",
+        ".k0-mem/Project_context/b.md",
+        "src/x.py",
+    ]
+    assert pushed_file_lines(paths) == [
+        "- .k0-mem/Mem.md",
+        "- src/x.py",
+        "- 2 knowledge-graph files refreshed",
+    ]

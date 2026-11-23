@@ -68,6 +68,7 @@ from k0ntrol.workflow.change import (  # noqa: E402
     dirty_paths,
     drop_worktree_snapshot,
     existing_branch,
+    has_origin,
     is_git_repo,
     snapshot_worktree,
     worktree_snapshot_dir,
@@ -217,6 +218,7 @@ def start(
         graph = _BUILDERS[kind](ctx, saver)
         run_id = new_run_id()
         _implement_preflight(kind, item, root, run_id)
+        _warn_local_only(kind, item, root, write)
         _bind_events(ctx, root, run_id, write)
         ctx.trace = tracing(run_id)
         session_id = item.qualified_ref if item else _sitting_session(ctx)
@@ -562,6 +564,18 @@ def _implement_preflight(kind: str, item, root: Path, run_id: str) -> None:
         raise RunRefused("/implement needs a git repository")
     if item is None:
         _snapshot_worktree(root, run_id)
+
+
+_LOCAL_ONLY = (
+    "no 'origin' remote: the change stays on your local branch; nothing is pushed"
+)
+
+
+def _warn_local_only(kind: str, item, root: Path, write) -> None:
+    """A working-tree ``/implement`` runs without a remote, but says so
+    before any model call (#179, #204)."""
+    if kind == "implement" and item is None and write and not has_origin(root):
+        write(_LOCAL_ONLY)
 
 
 def _tracker_for(kind: str, cfg: dict, root: Path, tracker, *, required: bool):

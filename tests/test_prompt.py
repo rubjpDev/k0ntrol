@@ -364,3 +364,82 @@ def test_keys_typed_ahead_in_a_real_terminal_are_not_dropped():
         proc.kill()
         proc.wait()
         os.close(main)
+
+
+def test_a_picker_flushes_pending_input_once_before_it_draws():
+    """Keys typed before the picker exists are not answers to it (#204)."""
+    console = Console(record=True, width=80)
+    keys = iter(["enter"])
+    flushed = []
+    prompt = Prompt(
+        console, commands={}, tty=True, read_key=lambda: next(keys),
+        flush=lambda: flushed.append(console.export_text(clear=False)),
+    )
+
+    assert prompt.choose("Q", [("a", "A"), ("b", "B")]) == "a"
+    assert flushed == [""]
+
+
+def test_a_disabled_option_cannot_be_picked_by_any_key():
+    keys = iter(["2", "down", "enter", "up", "enter"])
+    prompt = Prompt(
+        Console(record=True, width=80), commands={}, tty=True,
+        read_key=lambda: next(keys),
+    )
+
+    assert prompt.choose("Q", [("a", "A"), ("b", "B")], disabled={"b"}) == "a"
+
+
+def test_a_disabled_option_cannot_be_picked_by_line():
+    answers = iter(["b", "2", "a"])
+    prompt = Prompt(
+        Console(record=True, width=80), commands={}, tty=False,
+        read_input=lambda _p: next(answers),
+    )
+
+    assert prompt.choose("Q", [("a", "A"), ("b", "B")], disabled={"b"}) == "a"
+
+
+def test_keys_typed_before_a_real_terminal_picker_are_flushed():
+    """Enter typed while the run is busy must not answer the next picker."""
+    import select
+    import subprocess
+    import sys
+    import time
+
+    child = (
+        "import time\n"
+        "from rich.console import Console\n"
+        "from k0ntrol.frontends.prompt import Prompt, flush_pending_input, read_key\n"
+        "p = Prompt(Console(), commands={}, tty=True, read_key=read_key,"
+        " flush=flush_pending_input)\n"
+        "print('BUSY', flush=True)\n"
+        "time.sleep(1)\n"
+        "print('GOT', p.choose('Q', [('a', 'A'), ('b', 'B')]), flush=True)\n"
+    )
+    main, side = os.openpty()
+    proc = subprocess.Popen(
+        [sys.executable, "-c", child], stdin=side, stdout=side, stderr=side,
+    )
+    os.close(side)
+
+    def read_until(marker: bytes, seconds: float) -> bytes:
+        out, end = b"", time.time() + seconds
+        while marker not in out and time.time() < end:
+            if select.select([main], [], [], 0.05)[0]:
+                try:
+                    out += os.read(main, 4096)
+                except OSError:
+                    break
+        return out
+
+    try:
+        assert b"BUSY" in read_until(b"BUSY", 10)
+        os.write(main, b"\x1b[B\r")
+        assert b"to pick" in read_until(b"to pick", 10)
+        os.write(main, b"\r")
+        assert b"GOT a" in read_until(b"GOT", 5)
+    finally:
+        proc.kill()
+        proc.wait()
+        os.close(main)

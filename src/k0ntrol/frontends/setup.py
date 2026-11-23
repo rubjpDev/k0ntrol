@@ -108,7 +108,8 @@ def _ask_vcs(root: Path, prompt: Prompt) -> str:
     detected = detect_vcs(root)
     hosts = sorted(_VCS_HOSTS, key=lambda host: host != detected)
     options = [(host, _host_label(host, detected)) for host in hosts]
-    return prompt.choose("Where is this repo's code hosted?", options)
+    coming = {host for host in hosts if host != "github"}
+    return prompt.choose("Where is this repo's code hosted?", options, disabled=coming)
 
 
 def _host_label(host: str, detected: str | None) -> str:
@@ -119,7 +120,8 @@ def _host_label(host: str, detected: str | None) -> str:
 
 def _ask_tracker(vcs: str, prompt: Prompt) -> str:
     options = [(name, _tracker_label(name)) for name in VCS_TRACKERS[vcs]]
-    return prompt.choose("Which issue tracker does this repo use?", options)
+    coming = {name for name in VCS_TRACKERS[vcs] if name != "github"}
+    return prompt.choose("Which issue tracker does this repo use?", options, disabled=coming)
 
 
 def _tracker_label(name: str) -> str:

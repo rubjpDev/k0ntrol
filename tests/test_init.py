@@ -586,3 +586,4 @@ def test_cli_init_accepts_tracker_and_provider_flags(
         (tmp_path / "home" / ".k0ntrol" / "config.yaml").read_text()
     )
     assert cfg["agents"]["reviewer"]["model"] == "claude-opus-5-5"
+

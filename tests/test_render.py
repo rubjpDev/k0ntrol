@@ -572,3 +572,11 @@ def test_gate_markdown_headings_are_not_underlined_like_links() -> None:
     ansi = console.export_text(styles=True)
     heading = ansi[ansi.index("Review", ansi.index("Review gate") + 6) - 40:]
     assert not re.search(r"\x1b\[(?:\d+;)*4(?:;\d+)*m[^\x1b]*Review", heading)
+
+
+def test_a_ctrl_c_model_call_is_a_pause_not_a_failure(
+    renderer: LiveRenderer, console: Console
+) -> None:
+    """Ctrl-C mid-call is the user pausing the run (#204)."""
+    renderer(model("coder", ok=False, paused=True))
+    assert not any("model call failed" in line for line in lines_of(console))
