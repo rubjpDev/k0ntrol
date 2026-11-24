@@ -1,0 +1,3 @@
+# The pivot ships as 0.1.0, with a closed list of runtime dependencies
+
+The LangGraph pivot changes the runtime, the dependencies and the model backend, so it ships as 0.1.0 (released first as 0.1.0-unstable), not as 0.0.4. The old rule that the only runtime dependencies are `pyyaml` and `rich` becomes a closed list: today that list is `pyyaml` and `rich`, and each addition, such as LangGraph, LangChain and the provider packages, needs the human's approval and its own ADR. We chose a closed list over a free hand because the pivot needs third-party packages, and every runtime dependency is a cost to install, audit and pin. A list that only grows through a recorded decision keeps that cost visible.

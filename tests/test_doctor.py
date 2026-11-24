@@ -1,0 +1,689 @@
+"""`k0 doctor`: free checks (no tokens spent) plus the --live round trip."""
+
+import pytest
+
+from fakes import FakeChatModel, cfg_with, recording_init
+
+
+def ok_run(argv, root):
+    """Every shell check succeeds."""
+    return (0, "")
+
+
+def ok_fetch(url, payload=None):
+    """Every local server answers; models exist and can call tools."""
+    if url.endswith("/api/show"):
+        return {"capabilities": ["completion", "tools"]}
+    if url.endswith("/models"):
+        return {"data": []}
+    return {"version": "0.0.0"}
+
+
+def ok_importable(module):
+    return True
+
+
+def free_checks(cfg, **overrides):
+    from k0ntrol.providers import free_checks as real
+
+    seams = {
+        "init": recording_init([], profiles={"any": {"tool_calling": True}}),
+        "importable": ok_importable,
+        "fetch": ok_fetch,
+        "run": ok_run,
+        "environ": {"ANTHROPIC_API_KEY": "x", "OPENAI_API_KEY": "x",
+                    "OPENROUTER_API_KEY": "x"},
+        "root": None,
+    }
+    seams.update(overrides)
+    return real(cfg, **seams)
+
+
+def errors(checks):
+    return [c for c in checks if c.status == "error"]
+
+
+def warnings(checks):
+    return [c for c in checks if c.status == "warning"]
+
+
+def anthropic_cfg(**overrides):
+    return cfg_with(
+        agent_entries={"coder": {"provider": "anthropic", "model": "claude-x"}},
+        helpers={"reflect": {"provider": "anthropic", "model": "claude-x"}},
+        providers=overrides.pop("providers", None),
+    )
+
+
+def test_all_green_config_reports_only_ok():
+    cfg = anthropic_cfg()
+    cfg["search"] = {"provider": "brave"}
+    checks = free_checks(
+        cfg, environ={"ANTHROPIC_API_KEY": "x", "BRAVE_SEARCH_API_KEY": "fake-search-key"}
+    )
+    assert errors(checks) == []
+    assert warnings(checks) == []
+    assert any(c.name == "config" and c.status == "ok" for c in checks)
+    assert any(
+        c.name == "web search" and c.status == "ok" and "brave" in c.detail
+        for c in checks
+    )
+    assert all("fake-search-key" not in c.detail for c in checks)
+
+
+def test_unconfigured_search_warns_which_agents_lack_web_search():
+    checks = free_checks(anthropic_cfg())
+    assert any(
+        c.name == "web search"
+        and "PLANNER and RESEARCHER will have no web search" in c.detail
+        for c in warnings(checks)
+    )
+    assert errors(checks) == []
+
+
+def test_search_provider_without_a_key_reports_the_variable_to_set():
+    cfg = anthropic_cfg()
+    cfg["search"] = {"provider": "brave"}
+    checks = free_checks(cfg)
+    assert any(
+        c.name == "web search" and "set BRAVE_SEARCH_API_KEY" in c.detail
+        for c in errors(checks)
+    )
+
+
+def test_unknown_search_provider_reports_an_error_with_supported_providers():
+    cfg = anthropic_cfg()
+    cfg["search"] = {"provider": "braev"}
+    checks = free_checks(cfg)
+    assert any(
+        c.name == "web search" and "braev" in c.detail and "brave" in c.detail
+        for c in errors(checks)
+    )
+
+
+def test_native_search_agents_need_no_search_provider():
+    """PLANNER and RESEARCHER on OpenAI's search: no ``search.provider``
+    key needed, the check is ok and names them (#182)."""
+    cfg = cfg_with(
+        agent_entries={
+            "planner": {"provider": "openai", "model": "gpt-x"},
+            "researcher": {"provider": "openai", "model": "gpt-y"},
+        }
+    )
+    cfg["search"] = {"native": True}
+    checks = free_checks(cfg)
+    (check,) = [c for c in checks if c.name == "web search"]
+    assert check.status == "ok"
+    assert "PLANNER" in check.detail and "RESEARCHER" in check.detail
+    assert "OpenAI" in check.detail
+    assert errors(checks) == []
+
+
+def test_native_search_names_each_agents_provider():
+    """PLANNER on OpenAI's search and RESEARCHER on Anthropic's: both
+    covered, no ``search.provider`` needed (#209)."""
+    cfg = cfg_with(
+        agent_entries={
+            "planner": {"provider": "openai", "model": "gpt-x"},
+            "researcher": {"provider": "anthropic", "model": "claude-x"},
+        }
+    )
+    cfg["search"] = {"native": True}
+    checks = free_checks(cfg)
+    (check,) = [c for c in checks if c.name == "web search"]
+    assert check.status == "ok"
+    assert "PLANNER on OpenAI's web search" in check.detail
+    assert "RESEARCHER on Anthropic's web search" in check.detail
+
+
+def test_an_unused_search_provider_needs_no_credential():
+    """Both search agents on Anthropic's own search: a configured Brave
+    without its key is unused, so it neither errors nor blocks a run
+    (#210 review)."""
+    cfg = cfg_with(
+        agent_entries={
+            "planner": {"provider": "anthropic", "model": "claude-x"},
+            "researcher": {"provider": "anthropic", "model": "claude-y"},
+        }
+    )
+    cfg["search"] = {"native": True, "provider": "brave"}
+    checks = free_checks(cfg, environ={"ANTHROPIC_API_KEY": "x"})
+    (check,) = [c for c in checks if c.name == "web search"]
+    assert check.status == "ok"
+    assert "Anthropic" in check.detail and "brave" not in check.detail
+    assert errors(checks) == []
+
+
+def test_native_search_covers_only_the_agents_on_a_wired_provider():
+    """RESEARCHER on a provider without native search still needs
+    ``search.provider``; the warning names only that agent (#182)."""
+    cfg = cfg_with(
+        agent_entries={
+            "planner": {"provider": "openai", "model": "gpt-x"},
+            "researcher": {"provider": "bedrock", "model": "qwen-x"},
+        }
+    )
+    cfg["search"] = {"native": True}
+    checks = free_checks(cfg)
+    (check,) = [c for c in checks if c.name == "web search"]
+    assert check.status == "warning"
+    assert "RESEARCHER" in check.detail
+    assert "PLANNER" not in check.detail
+
+
+def test_native_search_alongside_a_search_provider():
+    cfg = cfg_with(
+        agent_entries={
+            "planner": {"provider": "openai", "model": "gpt-x"},
+            "researcher": {"provider": "bedrock", "model": "qwen-x"},
+        }
+    )
+    cfg["search"] = {"native": True, "provider": "brave"}
+    checks = free_checks(cfg, environ={"BRAVE_SEARCH_API_KEY": "x"})
+    (check,) = [c for c in checks if c.name == "web search"]
+    assert check.status == "ok"
+    assert "brave" in check.detail and "PLANNER" in check.detail
+
+
+def test_unknown_provider_is_an_error_naming_it():
+    cfg = cfg_with(agent_entries={"coder": {"provider": "litellm", "model": "m"}})
+    checks = free_checks(cfg)
+    assert any(
+        c.status == "error" and "litellm" in c.detail and "coder" in c.name
+        for c in checks
+    )
+
+
+def test_unknown_provider_in_the_providers_map_is_a_warning():
+    cfg = cfg_with(
+        agent_entries={"coder": {"provider": "anthropic", "model": "m"}},
+        providers={"ollmaa": {"base_url": "http://x"}},
+    )
+    checks = free_checks(cfg)
+    assert any(
+        c.status == "warning" and "ollmaa" in c.detail for c in checks
+    )
+
+
+def test_missing_extra_is_an_error_naming_the_extra():
+    checks = free_checks(anthropic_cfg(), importable=lambda module: False)
+    assert any(
+        c.status == "error" and 'uv tool install "k0ntrol[anthropic]"' in c.detail
+        for c in checks
+    )
+
+
+def test_missing_required_credential_is_an_error_naming_only_the_var():
+    checks = free_checks(anthropic_cfg(), environ={})
+    cred = [c for c in errors(checks) if "ANTHROPIC_API_KEY" in c.detail]
+    assert cred, "expected a missing-credential error naming the env var"
+
+
+def openai_cfg():
+    return cfg_with(
+        agent_entries={"planner": {"provider": "openai", "model": "gpt-6-luna"},
+                       "chatty": {"provider": "openai", "model": "gpt-6-luna"}},
+        helpers={"reflect": {"provider": "openai", "model": "gpt-6-luna"}},
+    )
+
+
+def test_a_missing_key_is_one_actionable_line_and_skips_the_model_builds():
+    def langchain_init(model, **kwargs):
+        raise ValueError("Missing credentials. Please pass an `api_key`, "
+                         "`workload_identity`, or set OPENAI_ADMIN_KEY")
+
+    checks = free_checks(openai_cfg(), environ={}, init=langchain_init)
+
+    lines = [c.detail for c in errors(checks)]
+    assert lines == ["OpenAI key missing: export OPENAI_API_KEY=…"]
+
+
+def test_a_langchain_credential_error_maps_to_k0s_own_message():
+    def langchain_init(model, **kwargs):
+        raise ValueError("Missing credentials. Please pass an `api_key`")
+
+    cfg = cfg_with(agent_entries={"chatty": {"provider": "openai_compatible", "model": "m"}})
+    checks = free_checks(cfg, environ={}, init=langchain_init)
+
+    details = [c.detail for c in errors(checks)]
+    assert details == ["cannot build model: OPENAI_COMPATIBLE_API_KEY is not set"]
+
+
+def test_cloud_chain_without_env_hints_is_a_warning_not_an_error():
+    cfg = cfg_with(agent_entries={"coder": {"provider": "bedrock", "model": "m"}})
+    checks = free_checks(cfg, environ={})
+    assert any(
+        c.status == "warning" and "bedrock" in c.name for c in checks
+    )
+    assert not any(
+        "credential" in c.detail and c.status == "error" for c in errors(checks)
+    )
+
+
+def test_profile_without_tool_calling_is_an_error():
+    init = recording_init([], profiles={"any": {"tool_calling": False}})
+    checks = free_checks(anthropic_cfg(), init=init)
+    assert any(
+        c.status == "error" and "tool" in c.detail for c in checks
+    )
+
+
+def test_profile_unknown_is_a_warning():
+    init = recording_init([], profiles={"any": None})
+    checks = free_checks(anthropic_cfg(), init=init)
+    assert any(
+        c.status == "warning" and "tool" in c.detail.lower() for c in checks
+    )
+
+
+def test_ollama_num_ctx_below_64k_is_a_warning():
+    cfg = cfg_with(
+        agent_entries={"coder": {"provider": "ollama", "model": "m"}},
+        providers={"ollama": {"params": {"num_ctx": 8192}}},
+    )
+    checks = free_checks(cfg)
+    assert any(
+        c.status == "warning" and "num_ctx" in c.detail for c in checks
+    )
+
+
+def test_dropped_effort_is_a_warning():
+    init = recording_init(
+        [], profiles={"any": {"tool_calling": True, "reasoning_effort_levels": ["low"]}}
+    )
+    cfg = cfg_with(
+        agent_entries={
+            "coder": {"provider": "anthropic", "model": "m", "effort": "high"}
+        }
+    )
+    checks = free_checks(cfg, init=init)
+    assert any(
+        c.status == "warning" and "effort" in c.detail and "high" in c.detail
+        for c in checks
+    )
+
+
+def test_subset_checks_only_the_named_entries():
+    cfg = cfg_with(
+        agent_entries={
+            "coder": {"provider": "anthropic", "model": "m"},
+            "reviewer": {"provider": "openai", "model": "m"},
+        },
+    )
+    checks = free_checks(cfg, names=["agents.coder"], environ={})
+    detail = " ".join(c.detail for c in checks)
+    assert "OPENAI_API_KEY" not in detail
+    assert "ANTHROPIC_API_KEY" in detail
+
+
+def test_names_from_both_rosters_select_across_kinds():
+    cfg = cfg_with(
+        agent_entries={"coder": {"provider": "anthropic", "model": "m"}},
+        helpers={"reflect": {"provider": "openai", "model": "m"}},
+    )
+    checks = free_checks(cfg, names=["helpers.reflect"], environ={})
+    detail = " ".join(c.detail for c in checks)
+    assert "OPENAI_API_KEY" in detail
+    assert "ANTHROPIC_API_KEY" not in detail
+
+
+def ollama_cfg(**providers):
+    return cfg_with(
+        agent_entries={"coder": {"provider": "ollama", "model": "qwen3:8b"}},
+        providers=providers or None,
+    )
+
+
+def test_gh_missing_from_path_is_an_error():
+    def run(argv, root):
+        return (None, "cannot run gh")
+
+    checks = free_checks(anthropic_cfg(), run=run)
+    assert any(c.name == "gh" and c.status == "error" for c in checks)
+
+
+def test_gh_auth_failure_is_an_error():
+    def run(argv, root):
+        if argv[:2] == ["gh", "auth"]:
+            return (4, "You are not logged into any GitHub hosts")
+        return (0, "git@github.com:x/y.git\n")
+
+    checks = free_checks(anthropic_cfg(), run=run)
+    assert any(c.name == "gh" and c.status == "error" for c in checks)
+
+
+def test_no_git_remote_is_an_error():
+    def run(argv, root):
+        if argv[0] == "git":
+            return (2, "")
+        return (0, "")
+
+    checks = free_checks(anthropic_cfg(), run=run)
+    assert any(c.name == "remote" and c.status == "error" for c in checks)
+
+
+def test_remote_url_is_never_printed():
+    def run(argv, root):
+        if argv[0] == "git":
+            return (0, "https://user:ghp_secret@github.com/x/y.git\n")
+        return (0, "")
+
+    checks = free_checks(anthropic_cfg(), run=run)
+    assert all("ghp_secret" not in c.detail for c in checks)
+
+
+def test_ollama_unreachable_is_an_error():
+    def fetch(url, payload=None):
+        raise ConnectionError("refused")
+
+    checks = free_checks(ollama_cfg(), fetch=fetch)
+    assert any(
+        c.name == "provider ollama" and c.status == "error"
+        and "not reachable" in c.detail for c in checks
+    )
+
+
+def test_ollama_model_not_pulled_is_an_error():
+    import urllib.error
+
+    def fetch(url, payload=None):
+        if url.endswith("/api/show"):
+            raise urllib.error.HTTPError(url, 404, "not found", {}, None)
+        return {"version": "0"}
+
+    checks = free_checks(ollama_cfg(), fetch=fetch)
+    assert any(
+        c.status == "error" and "qwen3:8b" in c.detail and "not pulled" in c.detail
+        for c in checks
+    )
+
+
+def test_ollama_model_without_tools_capability_is_an_error():
+    def fetch(url, payload=None):
+        if url.endswith("/api/show"):
+            return {"capabilities": ["completion"]}
+        return {"version": "0"}
+
+    checks = free_checks(ollama_cfg(), fetch=fetch)
+    assert any(
+        c.status == "error" and "cannot call tools" in c.detail for c in checks
+    )
+
+
+def test_ollama_model_with_tools_capability_is_ok():
+    checks = free_checks(ollama_cfg())
+    assert any(
+        c.name == "provider ollama" and c.status == "ok" and "tools" in c.detail
+        for c in checks
+    )
+    assert not any(
+        c.status == "warning" and "tool" in c.detail.lower() and "ollama" in c.name
+        for c in checks
+    )
+
+
+def test_lmstudio_unreachable_is_an_error():
+    cfg = cfg_with(agent_entries={"chatty": {"provider": "lmstudio", "model": "m"}})
+
+    def fetch(url, payload=None):
+        raise ConnectionError("refused")
+
+    checks = free_checks(cfg, fetch=fetch)
+    assert any(
+        c.name == "provider lmstudio" and c.status == "error"
+        and "not reachable" in c.detail for c in checks
+    )
+
+
+def test_lmstudio_model_not_loaded_is_an_error():
+    cfg = cfg_with(agent_entries={"chatty": {"provider": "lmstudio", "model": "m1"}})
+
+    def fetch(url, payload=None):
+        return {"data": [{"id": "other-model"}]}
+
+    checks = free_checks(cfg, fetch=fetch)
+    assert any(
+        c.name == "provider lmstudio" and c.status == "error"
+        and "not loaded" in c.detail for c in checks
+    )
+
+
+def test_lmstudio_loaded_model_is_ok_but_tool_calling_warns():
+    cfg = cfg_with(agent_entries={"chatty": {"provider": "lmstudio", "model": "m1"}})
+
+    def fetch(url, payload=None):
+        return {"data": [{"id": "m1"}]}
+
+    checks = free_checks(cfg, fetch=fetch)
+    assert any(
+        c.name == "provider lmstudio" and c.status == "ok" for c in checks
+    )
+    assert any(c.status == "warning" and "--live" in c.detail for c in checks)
+
+
+# --- services: the non-model checks a command path asks for (#179) -------------
+
+
+def test_an_empty_services_list_runs_no_service_checks():
+    """A path that can use none of the services never shells out for them."""
+    def run(argv, root):
+        raise AssertionError("a local path runs no gh/git service check")
+
+    cfg = anthropic_cfg()
+    cfg["search"] = {"provider": "brave"}
+    checks = free_checks(
+        cfg, services=(), run=run, environ={"ANTHROPIC_API_KEY": "x"}
+    )
+    assert errors(checks) == []
+    assert not any(c.name in ("gh", "remote", "web search") for c in checks)
+
+
+def test_the_github_service_gates_on_gh_auth_and_the_origin_remote():
+    def run(argv, root):
+        if argv[0] == "gh":
+            return (4, "not logged in")
+        return (2, "")
+
+    checks = free_checks(anthropic_cfg(), services=("github",), run=run)
+    assert any(c.name == "gh" and c.status == "error" for c in checks)
+    assert any(c.name == "remote" and c.status == "error" for c in checks)
+    assert not any(c.name == "web search" for c in checks)
+
+
+def test_the_search_service_gates_on_the_search_credential_only():
+    def run(argv, root):
+        raise AssertionError("the search service never touches gh or git")
+
+    cfg = anthropic_cfg()
+    cfg["search"] = {"provider": "brave"}
+    checks = free_checks(cfg, services=("search",), run=run)
+    assert any(c.name == "web search" and c.status == "error" for c in checks)
+    assert not any(c.name in ("gh", "remote") for c in checks)
+
+
+def test_an_unknown_service_is_refused():
+    """A mistyped service must not silently under-check the path."""
+    with pytest.raises(ValueError, match="unknown service"):
+        free_checks(anthropic_cfg(), services=("githubb",))
+
+
+# --- --live: one tiny tool-call round trip per distinct (provider, model) ---
+
+
+def live_checks(cfg, init, **overrides):
+    from k0ntrol.providers import live_checks as real
+
+    return real(cfg, init=init, **overrides)
+
+
+def test_live_makes_one_call_per_distinct_provider_model():
+    from fakes import FakeReply
+
+    calls = []
+    models = {}
+    reply = FakeReply(tool_calls=[{"name": "ping"}])
+
+    def init(model, *, model_provider=None, **kwargs):
+        calls.append(model)
+        models[model] = FakeChatModel(model, model_provider, kwargs, reply=reply)
+        return models[model]
+
+    cfg = cfg_with(
+        agent_entries={
+            "coder": {"provider": "anthropic", "model": "claude-x"},
+            "reviewer": {"provider": "anthropic", "model": "claude-x"},
+            "chatty": {"provider": "anthropic", "model": "claude-y"},
+        },
+    )
+    checks = live_checks(cfg, init)
+
+    assert calls == ["claude-x", "claude-y"]  # one build per distinct pair
+    invokes = sum(len(m.invocations) for m in models.values())
+    assert invokes == 2
+    assert sum(c.status == "ok" for c in checks) == 2
+
+
+def test_live_answer_without_a_tool_call_is_an_error():
+    from fakes import FakeReply
+
+    init = recording_init([], replies={"m": FakeReply(tool_calls=[])})
+    cfg = cfg_with(agent_entries={"coder": {"provider": "anthropic", "model": "m"}})
+    checks = live_checks(cfg, init)
+    assert any(
+        c.status == "error" and "tool call" in c.detail for c in checks
+    )
+
+
+def test_live_failure_is_an_error():
+    def init(model, *, model_provider=None, **kwargs):
+        raise RuntimeError("401 unauthorized")
+
+    cfg = cfg_with(agent_entries={"coder": {"provider": "anthropic", "model": "m"}})
+    checks = live_checks(cfg, init)
+    assert any(
+        c.status == "error" and "401" in c.detail for c in checks
+    )
+
+
+def test_live_credential_failure_uses_k0s_own_message():
+    def init(model, *, model_provider=None, **kwargs):
+        raise ValueError("Missing credentials. Please pass an `api_key`")
+
+    cfg = cfg_with(agent_entries={"coder": {"provider": "openai", "model": "m"}})
+    details = [c.detail for c in errors(live_checks(cfg, init))]
+    assert details == ["openai:m live call failed: OPENAI_API_KEY is not set"]
+
+
+def test_live_binds_tools_without_forcing_tool_choice():
+    from fakes import FakeReply
+
+    calls = []
+    reply = FakeReply(tool_calls=[{"name": "ping"}])
+    init = recording_init(calls, replies={"m": reply})
+    cfg = cfg_with(agent_entries={"coder": {"provider": "anthropic", "model": "m"}})
+    live_checks(cfg, init)
+
+    for call in calls:
+        assert "tool_choice" not in call["kwargs"]
+
+
+def test_live_respects_the_names_subset():
+    from fakes import FakeReply
+
+    calls = []
+    reply = FakeReply(tool_calls=[{"name": "ping"}])
+    init = recording_init(calls, replies={"m": reply})
+    cfg = cfg_with(
+        agent_entries={
+            "coder": {"provider": "anthropic", "model": "m"},
+            "reviewer": {"provider": "openai", "model": "n"},
+        }
+    )
+    checks = live_checks(cfg, init, names=["agents.coder"])
+    assert {c.name for c in checks} == {"agents.coder"}
+    assert all(call["model"] == "m" for call in calls)
+
+
+# --- the `k0 doctor` command ---
+
+
+def with_user_config(monkeypatch, tmp_path):
+    home = tmp_path / "home"
+    (home / ".k0ntrol").mkdir(parents=True)
+    (home / ".k0ntrol" / "config.yaml").write_text(
+        "agents:\n  chatty: {provider: anthropic, model: claude-x}\n")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.chdir(tmp_path)
+
+
+def test_doctor_on_a_fresh_home_prints_only_the_setup_hint(capsys, monkeypatch, tmp_path):
+    from k0ntrol.cli import main
+
+    monkeypatch.chdir(tmp_path)
+
+    def refuse(cfg, **kw):
+        raise AssertionError("checks ran with no user config")
+
+    monkeypatch.setattr("k0ntrol.cli.free_checks", refuse)
+    assert main(["doctor"]) == 1
+    assert capsys.readouterr().out == "no user config yet: run k0 to set up\n"
+
+
+def test_doctor_exits_0_when_checks_pass(capsys, monkeypatch, tmp_path):
+    from k0ntrol.cli import main
+    from k0ntrol.providers import Check
+
+    with_user_config(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        "k0ntrol.cli.free_checks",
+        lambda cfg, **kw: [Check("config", "ok", "valid"),
+                           Check("provider anthropic", "warning", "low num_ctx")],
+    )
+    assert main(["doctor"]) == 0
+    out = capsys.readouterr().out
+    assert "warning: provider anthropic: low num_ctx" in out
+    assert "unsandboxed" in out
+    assert "Langfuse" in out
+
+
+def test_doctor_exits_1_on_an_error(capsys, monkeypatch, tmp_path):
+    from k0ntrol.cli import main
+    from k0ntrol.providers import Check
+
+    with_user_config(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        "k0ntrol.cli.free_checks",
+        lambda cfg, **kw: [Check("gh", "error", "gh is not on PATH")],
+    )
+    assert main(["doctor"]) == 1
+    assert "error: gh: gh is not on PATH" in capsys.readouterr().out
+
+
+def test_doctor_live_runs_the_round_trip(capsys, monkeypatch, tmp_path):
+    from k0ntrol.cli import main
+    from k0ntrol.providers import Check
+
+    with_user_config(monkeypatch, tmp_path)
+    monkeypatch.setattr("k0ntrol.cli.free_checks", lambda cfg, **kw: [])
+    monkeypatch.setattr(
+        "k0ntrol.cli.live_checks",
+        lambda cfg, **kw: [Check("agents.coder", "ok", "anthropic:m made a tool call")],
+    )
+    assert main(["doctor", "--live"]) == 0
+    assert "made a tool call" in capsys.readouterr().out
+
+
+def test_doctor_config_error_exits_1(capsys, monkeypatch, tmp_path):
+    from k0ntrol.cli import main
+
+    with_user_config(monkeypatch, tmp_path)
+    mem = tmp_path / ".k0-mem"
+    mem.mkdir()
+    (mem / "config.yaml").write_text("backend: cursor\n")
+
+    def refuse(**kw):
+        raise AssertionError("checks ran on invalid config")
+
+    monkeypatch.setattr("k0ntrol.cli.free_checks", refuse)
+    assert main(["doctor"]) == 1
+    assert "config error:" in capsys.readouterr().err

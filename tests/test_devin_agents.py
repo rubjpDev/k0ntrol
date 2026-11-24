@@ -1,0 +1,123 @@
+import re
+from pathlib import Path
+
+import pytest
+import yaml
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+DEVIN_AGENTS = REPO_ROOT / ".devin" / "agents"
+LEGACY_AGENTS = REPO_ROOT / ".claude" / "agents"
+
+
+def parse_frontmatter(path: Path) -> tuple[dict, str]:
+    assert path.exists(), f"missing file: {path}"
+    match = re.fullmatch(r"---\n(.*?)\n---\n(.*)", path.read_text(), re.DOTALL)
+    assert match, f"{path} has no YAML frontmatter block"
+    return yaml.safe_load(match.group(1)), match.group(2)
+
+
+@pytest.mark.parametrize(
+    ("profile", "model"),
+    [
+        ("standards-reviewer", "swe-2-flash-medium"),
+        ("spec-reviewer", "swe-2-flash-high"),
+        ("spec-reviewer-max", "swe-2-max"),
+        ("researcher", "gpt-6.1-sol-high"),
+        ("merger", "swe-2-flash-medium"),
+        ("design-variant", "gpt-6.1-sol-high"),
+        ("swe-worker-flash-max", "swe-2-flash-max"),
+    ],
+)
+def test_migrated_profile_matches_legacy(profile: str, model: str) -> None:
+    devin_fm, devin_body = parse_frontmatter(DEVIN_AGENTS / f"{profile}.md")
+    legacy_fm, legacy_body = parse_frontmatter(LEGACY_AGENTS / f"{profile}.md")
+
+    assert devin_fm["name"] == profile
+    assert devin_fm["model"] == model
+    assert devin_fm["description"] == legacy_fm["description"]
+    assert devin_body == legacy_body
+    assert "tools" not in devin_fm
+
+    if profile in ("standards-reviewer", "spec-reviewer", "spec-reviewer-max", "design-variant"):
+        assert devin_fm["allowed-tools"] == ["read", "grep", "glob", "exec"]
+    else:
+        assert "allowed-tools" not in devin_fm
+
+
+def test_swe_worker_profile() -> None:
+    fm, _body = parse_frontmatter(DEVIN_AGENTS / "swe-worker.md")
+    assert fm["name"] == "swe-worker"
+    assert fm["model"] == "swe-2-flash-high"
+
+
+def test_every_devin_profile_pins_a_known_model() -> None:
+    for path in DEVIN_AGENTS.glob("*.md"):
+        fm, _body = parse_frontmatter(path)
+        assert fm["model"] in (
+            "swe-2-flash-medium",
+            "swe-2-flash-high",
+            "swe-2-flash-max",
+            "swe-2-max",
+            "gpt-6.1-sol-high",
+        ), path.name
+
+
+def routing_section() -> str:
+    text = (REPO_ROOT / "AGENTS.md").read_text()
+    match = re.search(r"### Subagent routing\n(.*?)\n### Issue tracker", text, re.DOTALL)
+    assert match, "AGENTS.md has no Subagent routing section"
+    return match.group(1)
+
+
+def test_agents_routing_section() -> None:
+    section = routing_section()
+
+    assert ".devin/agents/" in section
+    for name in (
+        "standards-reviewer",
+        "spec-reviewer",
+        "researcher",
+        "merger",
+        "swe-worker",
+        "design-variant",
+        "swe-worker-flash-max",
+        "spec-reviewer-max",
+    ):
+        assert name in section
+    assert "before the orchestrator session starts" in section
+    assert "devin --model" in section
+    assert "minimal environment" in section
+    assert "server-reported model" in section
+    assert "implementer" in section
+    assert "exploration" in section
+    assert "other designers" in section
+    assert "The other agents inherit." not in section
+
+
+def test_code_review_skill_uses_named_profiles() -> None:
+    text = (REPO_ROOT / ".agents" / "skills" / "code-review" / "SKILL.md").read_text()
+
+    assert "Task spawns" not in text
+    assert "two Task calls" not in text
+    assert "Spec on inherit" not in text
+    assert "same model as the parent" not in text
+    assert "standards-reviewer" in text
+    assert "spec-reviewer" in text
+
+
+DEVIN_TO_CLAUDE_EFFORT = {
+    "swe-2-flash-medium": "medium",
+    "swe-2-flash-high": "high",
+    "swe-2-flash-max": "max",
+    "swe-2-max": "max",
+    "gpt-6.1-sol-high": "high",
+}
+
+
+@pytest.mark.parametrize("path", sorted(DEVIN_AGENTS.glob("*.md")), ids=lambda p: p.stem)
+def test_claude_profile_mirrors_devin_tier(path: Path) -> None:
+    devin_fm, _devin_body = parse_frontmatter(path)
+    claude_fm, _claude_body = parse_frontmatter(LEGACY_AGENTS / path.name)
+
+    assert claude_fm["model"] == "sonnet"
+    assert claude_fm["effort"] == DEVIN_TO_CLAUDE_EFFORT[devin_fm["model"]]

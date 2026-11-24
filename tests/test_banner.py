@@ -1,3 +1,6 @@
+from rich.text import Text
+
+from k0ntrol.frontends.badges import service_badges
 from k0ntrol.frontends.banner import color_enabled, render_banner
 from k0ntrol.frontends.logo import LOGO
 
@@ -17,8 +20,8 @@ def test_logo_is_the_decided_art():
 
 def test_plain_banner_has_logo_fields_and_no_ansi():
     text = render_banner(
-        version="0.0.1.dev0",
-        backend="cursor",
+        version="0.1.0.dev0",
+        provider="ollama",
         cwd="/work/repo",
         color=False,
     )
@@ -26,23 +29,34 @@ def test_plain_banner_has_logo_fields_and_no_ansi():
     assert "▄█████▙" in text
     assert "/work/repo" in text
     assert "\x1b" not in text
-    version_rows = [line for line in text.splitlines() if "k0ntrol v0.0.1.dev0" in line]
+    version_rows = [line for line in text.splitlines() if "k0ntrol v0.1.0.dev0" in line]
     assert len(version_rows) == 1
     assert "▟" in version_rows[0]
     assert "▄█████▙" not in version_rows[0]
     body = "\n".join(line for line in text.splitlines() if line.startswith("│"))
-    assert "k0ntrol v0.0.1.dev0" in body
-    assert "cursor" in body
-    start = body.index("k0ntrol v0.0.1.dev0")
-    middle = body.index("cursor", start)
+    assert "k0ntrol v0.1.0.dev0" in body
+    assert "ollama" in body
+    start = body.index("k0ntrol v0.1.0.dev0")
+    middle = body.index("ollama", start)
     end = body.index("/work/repo", middle)
     assert "\n\n" not in body[start:end]
 
 
+def test_banner_without_a_provider_skips_the_line():
+    text = render_banner(
+        version="0.1.0.dev0",
+        provider=None,
+        cwd="/work/repo",
+        color=False,
+    )
+    assert "k0ntrol v0.1.0.dev0" in text
+    assert "/work/repo" in text
+
+
 def test_color_banner_uses_the_decided_palette():
     text = render_banner(
-        version="0.0.1.dev0",
-        backend="cursor",
+        version="0.1.0.dev0",
+        provider="ollama",
         cwd="/work",
         color=True,
     )
@@ -50,6 +64,19 @@ def test_color_banner_uses_the_decided_palette():
     assert "\x1b[38;2;156;163;175m" in text
     assert "\x1b[38;2;94;234;212m" in text
     assert "\x1b[38;2;167;139;250m" in text
+
+
+def test_a_pinned_width_survives_a_dumb_ambient_terminal(monkeypatch):
+    monkeypatch.setenv("TERM", "dumb")
+    badges = service_badges(tracker="linear", vcs="github", provider="anthropic")
+
+    text = render_banner(
+        version="0.1.0", provider="anthropic", cwd="/w",
+        color=True, badges=badges, width=120,
+    )
+
+    assert Text.from_ansi(text.splitlines()[0]).cell_len == 120
+    assert "Anthropic" in Text.from_ansi(text).plain
 
 
 def test_color_enabled_follows_no_color_and_tty(monkeypatch):

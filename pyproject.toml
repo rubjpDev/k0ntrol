@@ -1,6 +1,6 @@
 [project]
 name = "k0ntrol"
-version = "0.0.1.dev0"
+version = "0.1.0"
 description = "Local harness for coding agents: deterministic routing, TDD loop, human gates."
 requires-python = ">=3.11"
 license = "Apache-2.0"
@@ -8,13 +8,40 @@ license-files = ["LICENSE"]
 dependencies = [
     "pyyaml>=6",
     "rich>=13",
+    "langgraph>=1.2.17,<1.3",
+    "langchain>=1.4.7,<1.5",
+    "langgraph-checkpoint-sqlite>=3.1.2,<3.2",
 ]
+
+[project.optional-dependencies]
+ollama = ["langchain-ollama>=1.1.0,<2"]
+openai = ["langchain-openai>=1.7.2,<2"]
+anthropic = ["langchain-anthropic>=1.7.6,<2"]
+openrouter = ["langchain-openrouter>=0.2.9,<1"]
+aws = ["langchain-aws>=1.9.0,<2"]
+google = ["langchain-google-genai>=4.4.2,<5"]
+langfuse = ["langfuse>=5.0.4,<6"]
+# The same OpenTelemetry pins langfuse 5.x needs, without langfuse itself.
+otel = [
+    "opentelemetry-api>=1.45.0,<2",
+    "opentelemetry-sdk>=1.45.0,<2",
+    "opentelemetry-exporter-otlp-proto-http>=1.45.0,<2",
+]
+# Every provider at once: `uv tool install --editable ".[all]"` gives a global `k0`.
+all = ["k0ntrol[ollama,openai,anthropic,openrouter,aws,google]"]
 
 [project.scripts]
 k0 = "k0ntrol.cli:main"
 
 [dependency-groups]
-dev = ["pytest>=8"]
+dev = [
+    "complexipy>=8.0.1",
+    "mypy>=1.15",
+    "pytest>=8",
+    "pytest-cov>=7.1.0",
+    "pytest-xdist>=3.8.0",
+    "types-pyyaml>=6.0.12.20261111",
+]
 
 [build-system]
 requires = ["hatchling>=1.27"]
@@ -22,3 +49,19 @@ build-backend = "hatchling.build"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+addopts = "-n auto"
+
+[tool.mypy]
+python_version = "3.11"
+warn_unused_ignores = true
+
+# opentelemetry.* ships only in the optional `otel` extra.
+[[tool.mypy.overrides]]
+module = ["opentelemetry", "opentelemetry.*"]
+ignore_missing_imports = true
+
+# langgraph's StateGraph generics reject dict-in/dict-out node callables;
+# only the graph-wiring modules are exempt, and only for call-overload.
+[[tool.mypy.overrides]]
+module = ["k0ntrol.workflow.fast", "k0ntrol.workflow.full", "k0ntrol.workflow.implement", "k0ntrol.workflow.plan", "k0ntrol.workflow.research", "k0ntrol.workflow.triage"]
+disable_error_code = ["call-overload"]

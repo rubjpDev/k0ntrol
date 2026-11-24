@@ -1,0 +1,210 @@
+"""The k0-owned Tracker protocol: work items plus code-host changes.
+
+The harness does every tracker write in code through this protocol.
+Agents never see it directly; they get read-only tools built on it.
+There is no merge method: the human merges.
+"""
+
+from collections.abc import Iterable
+from dataclasses import dataclass, field
+import re
+from typing import Protocol, runtime_checkable
+
+#: Tracker authors whose content may reach an agent (ADR 0006).
+TRUSTED_ASSOCIATIONS = frozenset({"OWNER", "MEMBER", "COLLABORATOR"})
+
+
+def is_trusted_author(
+    author: str, author_association: str, trusted_authors: Iterable[str] = ()
+) -> bool:
+    """Whether this author's content may reach an agent.
+
+    A trusted association, or a login the repo's config expressly lists
+    in ``trusted_authors`` — GitHub-verified provenance for GitHub App
+    identities, which post as ``NONE`` under a ``<app-slug>[bot]`` login
+    only the App itself can use (#176, ADR 0016).
+    """
+    return author_association in TRUSTED_ASSOCIATIONS or author in trusted_authors
+
+#: The marker ``ensure_work_item`` appends to a work item k0 creates.
+_K0_ITEM_MARKER = re.compile(r"<!-- k0:run=\S+ node=\S+ -->\s*$")
+
+
+def comment_marker(run: str, node: str) -> str:
+    """The idempotency marker every k0 comment carries."""
+    return f"<!-- k0:run={run} node={node} -->"
+
+
+class TrackerError(Exception):
+    """A tracker operation failed; the run stops resumable, never stuck."""
+
+
+@dataclass(frozen=True)
+class Comment:
+    author: str
+    author_association: str
+    body: str
+
+
+@dataclass(frozen=True)
+class WorkItem:
+    ref: str
+    title: str
+    body: str
+    state: str  # "open" | "closed"
+    url: str
+    author: str
+    author_association: str
+    comments: tuple[Comment, ...] = field(default_factory=tuple)
+
+    @property
+    def qualified_ref(self) -> str:
+        """`<owner>/<repo>#<n>` for the `work_item` event field."""
+        parts = self.url.rstrip("/").split("/")
+        if len(parts) >= 4 and parts[-2] == "issues":
+            return f"{parts[-4]}/{parts[-3]}#{parts[-1]}"
+        return self.ref
+
+
+def is_k0_work_item(item: WorkItem) -> bool:
+    """Whether k0 created this work item: its body ends with the run marker
+    ``ensure_work_item`` appends. A marker quoted mid-body doesn't count.
+    """
+    return bool(_K0_ITEM_MARKER.search(item.body))
+
+
+@dataclass(frozen=True)
+class ChildWorkItem:
+    ref: str
+    title: str
+    state: str
+    labels: tuple[str, ...] = field(default_factory=tuple)
+
+
+@dataclass(frozen=True)
+class Change:
+    ref: str
+    branch: str
+    title: str
+    state: str  # "open" | "merged" | "closed"
+    is_draft: bool
+    url: str
+    head_sha: str | None = None  # the published head; None when unknown (#175)
+
+
+class WorkItems(Protocol):
+    """Work-item operations: GitHub Issues, later GitLab/Linear/Jira."""
+
+    def read_work_item(self, ref: str) -> WorkItem:
+        """Read a work item's body and comments."""
+        ...
+
+    def create_work_item(self, title: str, body: str) -> WorkItem:
+        """Create a work item and return it."""
+        ...
+
+    def ensure_work_item(self, title: str, body: str, *, run: str, node: str) -> WorkItem:
+        """Create a marked work item, or recover the one already created."""
+        ...
+
+    def create_child_work_item(
+        self, parent: str, title: str, body: str, *, run: str, node: str
+    ) -> WorkItem:
+        """Create a marked work item and attach it as a child of `parent`."""
+        ...
+
+    def list_children(self, parent: str) -> tuple[ChildWorkItem, ...]:
+        """List `parent`'s children in tracker order."""
+        ...
+
+    def list_blockers(self, ref: str) -> tuple[ChildWorkItem, ...]:
+        """List the work items blocking `ref`."""
+        ...
+
+    def edit_work_item_body(self, ref: str, body: str) -> None:
+        """Replace a work item's body."""
+        ...
+
+    def comment_work_item(self, ref: str, body: str, *, run: str, node: str) -> None:
+        """Post a marked comment; a no-op when the marker already exists."""
+        ...
+
+    def add_label(self, ref: str, label: str) -> None:
+        """Add an existing label to a work item."""
+        ...
+
+    def remove_label(self, ref: str, label: str) -> None:
+        """Remove a label; a no-op when the label is absent."""
+        ...
+
+    def ensure_label(self, name: str) -> None:
+        """Create the label in the tracker unless it already exists."""
+        ...
+
+    def find_comment(self, ref: str, marker: str) -> Comment | None:
+        """Return the first work-item comment containing the marker."""
+        ...
+
+    def link_blocked_by(self, ref: str, blocker: str) -> None:
+        """Link `ref` as blocked by `blocker`; a no-op when already linked."""
+        ...
+
+    def close_work_item(self, ref: str, body: str, *, run: str, node: str) -> None:
+        """Post a marked comment, then close the work item."""
+        ...
+
+    def read_labels(self, ref: str) -> set[str]:
+        """Return the work item's current label names."""
+        ...
+
+
+class Changes(Protocol):
+    """Change operations: branches and pull requests on the code host."""
+
+    def create_branch(self, branch: str, base: str) -> None:
+        """Create `branch` from `origin/<base>` and check it out."""
+        ...
+
+    def commit(self, message: str) -> bool:
+        """Commit the whole tree; False when there is nothing to commit."""
+        ...
+
+    def push(self, branch: str) -> None:
+        """Push `branch` to the code host."""
+        ...
+
+    def open_change(self, branch: str, base: str, title: str, body: str) -> Change:
+        """Open the draft change once; return the open one if it exists."""
+        ...
+
+    def mark_change_ready(self, ref: str) -> None:
+        """Take the change out of draft."""
+        ...
+
+    def post_review(self, ref: str, body: str, *, run: str, node: str) -> None:
+        """Post a marked COMMENT review; a no-op when the marker exists."""
+        ...
+
+    def comment_change(self, ref: str, body: str, *, run: str, node: str) -> None:
+        """Post a marked comment on the change; no-op when the marker exists."""
+        ...
+
+    def find_change_comment(self, ref: str, marker: str) -> Comment | None:
+        """Return the first change comment containing the marker."""
+        ...
+
+    def read_change(self, branch: str) -> Change | None:
+        """Read the change for a branch, or None when there is none."""
+        ...
+
+    def read_change_diff(self, ref: str) -> str:
+        """Read the change's diff."""
+        ...
+
+
+@runtime_checkable
+class Tracker(WorkItems, Changes, Protocol):
+    """The full tracker: work items plus, for code hosts, changes."""
+
+    #: Extra author logins whose content is trusted on read (#176).
+    trusted_authors: tuple[str, ...]

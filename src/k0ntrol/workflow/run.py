@@ -1,0 +1,1165 @@
+"""The run module: the one seam between the REPL and the graphs.
+
+``start(kind, input) -> Result`` and ``resume(run_id, decision) -> Result``,
+where ``Result`` is ``Outcome(done|stuck|rejected)`` or
+``Pending(gate, what to show)``. Gates never read input inside the graph:
+the REPL shows the ``Pending``, reads the answer and calls ``resume``.
+Progress reaches the REPL through the event writer, never return values.
+
+Checkpoints are a ``SqliteSaver`` at ``.k0-mem/checkpoints.sqlite`` with
+``durability="sync"``, strict msgpack and ``thread_id`` = run id, so a run
+survives the process dying: a later ``resume`` compiles a fresh graph on
+the same DB and picks up at the gate.
+
+One run per checkout (ADR 0007). ``#<n>`` for the open run's own
+work item gets it back as ``Unfinished`` (#46), and so does a text task
+when the open run is of the same kind and has no work item to name: the
+REPL asks whether to resume it, and ``abandon`` drops its checkpoint
+thread on a ``n`` (#69: not while the tree is dirty). Any other second
+run is refused with the command that resumes the open one, or a
+git-worktree hint.
+"""
+
+import os
+import sqlite3
+import time
+from collections.abc import Callable
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any, Literal, cast
+
+from langchain.chat_models import init_chat_model
+from langchain_core.callbacks import BaseCallbackHandler
+from langchain_core.runnables import RunnableConfig
+from langgraph.graph.state import CompiledStateGraph
+from langgraph.types import Command
+
+os.environ.setdefault("LANGGRAPH_STRICT_MSGPACK", "true")
+
+from langgraph.checkpoint.sqlite import SqliteSaver  # noqa: E402
+
+from k0ntrol import __version__  # noqa: E402
+from k0ntrol.agents import ALLOWLISTS  # noqa: E402
+from k0ntrol.events import (  # noqa: E402
+    EventWriter,
+    EventWriteError,
+    ProgressRenderer,
+    events_path,
+    new_run_id,
+    run_cost,
+)
+from k0ntrol.memory.refresh import refresh_memory  # noqa: E402
+from k0ntrol.tools.tracker import latest_agent_brief_comment  # noqa: E402
+from k0ntrol.memory.scan import ScanError  # noqa: E402
+from k0ntrol.otel import build_run_trace, otel_callbacks  # noqa: E402
+from k0ntrol.providers import error_lines, free_checks, has_errors  # noqa: E402
+from k0ntrol.tracker import (  # noqa: E402
+    Comment,
+    TRUSTED_ASSOCIATIONS,
+    Tracker,
+    TrackerError,
+    WorkItem,
+    is_k0_work_item,
+    is_trusted_author,
+)
+from k0ntrol.tracker.github import GhTracker, subprocess_runner  # noqa: E402
+from k0ntrol.workflow.change import (  # noqa: E402
+    current_branch,
+    dirty_paths,
+    drop_worktree_snapshot,
+    existing_branch,
+    has_origin,
+    is_git_repo,
+    snapshot_worktree,
+    worktree_snapshot_dir,
+)
+from k0ntrol.workflow.context import RunContext  # noqa: E402
+from k0ntrol.workflow.implement import build_implement_graph  # noqa: E402
+from k0ntrol.workflow.plan import (  # noqa: E402
+    DEFAULT_MAX_ROUND_QUESTIONS,
+    build_plan_graph,
+)
+from k0ntrol.workflow.research import (  # noqa: E402
+    build_research_graph,
+    is_map,
+)
+from k0ntrol.workflow.routers import DEFAULT_MAX_QUESTIONS  # noqa: E402
+from k0ntrol.workflow.triage import build_triage_graph  # noqa: E402
+
+_BUILDERS = {
+    "implement": build_implement_graph,
+    "plan": build_plan_graph,
+    "research": build_research_graph,
+    "triage": build_triage_graph,
+}
+
+# The roster each run kind uses; the free doctor checks gate start on it.
+# Every agent gets the bulk_read tool, so the helper is part of each roster
+# (#61, same gate /ask already applies).
+_ROSTER = {
+    "implement": ("agents.implementer", "helpers.bulk_read"),
+    "plan": ("agents.planner", "helpers.bulk_read"),
+    "research": ("agents.planner", "helpers.bulk_read"),
+    "triage": ("agents.planner", "helpers.bulk_read"),
+}
+
+# Outer recursion limit: each loop iteration costs two super-steps at most.
+_OUTER_STEPS_PER_ATTEMPT = 4
+_OUTER_STEPS_SLACK = 8
+
+
+class RunRefused(Exception):
+    """The run never started (or a resume answer was rejected)."""
+
+    def __init__(self, lines: str | list[str]) -> None:
+        self.lines = tuple([lines] if isinstance(lines, str) else lines)
+        super().__init__("\n".join(self.lines))
+
+
+@dataclass(frozen=True)
+class Outcome:
+    """A finished run: ``done``, ``stuck`` or ``rejected``.
+
+    ``ms`` and the counts are what the ``run_end`` event recorded — the
+    one-line cost the session shows (#150); a run a broken log ended has
+    none.
+    """
+
+    run: str
+    outcome: str
+    reason: str | None = None
+    node: str | None = None
+    redone: bool = False
+    ms: int | None = None
+    agent_runs: dict[str, int] = field(default_factory=dict)
+    validator_reds: int = 0
+    model_calls: int = 0
+
+
+@dataclass(frozen=True)
+class Pending:
+    """A run waiting at a gate: the question and answers to show."""
+
+    run: str
+    gate: str
+    question: str
+    answers: tuple[str, ...]
+    detail: str = ""
+    diff: str = ""  # the change as a git diff, drawn file by file
+
+
+@dataclass(frozen=True)
+class Unfinished:
+    """A run is unfinished: resume it or abandon it."""
+
+    run: str
+    node: str
+
+
+Result = Outcome | Pending | Unfinished
+
+
+def checkpoints_path(root: Path) -> Path:
+    """The checkpoint DB for the project rooted at ``root``."""
+    return root / ".k0-mem" / "checkpoints.sqlite"
+
+
+def start(
+    kind: str,
+    input: str,
+    *,
+    root: Path,
+    cfg: dict,
+    write: Callable[[str], None] | None = None,
+    init: Callable = init_chat_model,
+    check: Callable = free_checks,
+    scan: Callable = refresh_memory,
+    tracker=None,
+    tracing: Callable = build_run_trace,
+    session: str | None = None,
+) -> Result:
+    """Start a run of ``kind`` for ``input``.
+
+    ``/implement <task>`` runs the working-tree path (#116) and
+    ``/implement #<n>`` the tracker path on a ready work item (#117);
+    ``/plan <idea>`` and ``/plan #<n>`` run the Q&A definition (#120);
+    ``/research <question>`` charts a Map of decision tickets (#124) and
+    ``/research #<n>`` works the map's next unblocked one (#125);
+    ``/triage #<n>`` runs the Q&A and the outcome gate (#128).
+    Refuses — ``RunRefused`` — on bad usage, a missing tracker or work
+    item, an untrusted issue body, a work item not ready for an agent, a
+    dirty tree (``.k0-mem/`` ignored), failed doctor checks, a failed
+    rescan or another open run.
+    ``#<n>`` answers an open run for item ``n`` with ``Unfinished``.
+    """
+    if kind not in _BUILDERS:
+        raise RunRefused(f"unknown run: {kind}")
+    kind = cast(Literal["implement", "plan", "research", "triage"], kind)  # _BUILDERS' keys
+    input_text = _checked_input(kind, input)
+    tracker = _tracker_for(
+        kind,
+        cfg,
+        root,
+        tracker,
+        required=_tracker_required(kind, input_text),
+    )
+    conn, saver = _open_checkpoints(root)
+    try:
+        ctx = RunContext(
+            root=root, cfg=cfg, kind=kind, init=init, tracker=tracker, scan=scan,
+            session=session,
+        )
+        busy = _busy_run(saver, ctx, input_text, tracker, root)
+        if busy is not None:
+            return busy
+        _doctor_gate(check, cfg, kind, root, input_text)
+        _rescan(scan, root)
+        item = _item_preflight(kind, input_text, tracker, root)
+        graph = _BUILDERS[kind](ctx, saver)
+        run_id = new_run_id()
+        _implement_preflight(kind, item, root, run_id)
+        _warn_local_only(kind, item, root, write)
+        _bind_events(ctx, root, run_id, write)
+        ctx.trace = tracing(run_id)
+        session_id = item.qualified_ref if item else _sitting_session(ctx)
+        config = _runnable(run_id, ctx, session_id)
+        try:
+            ctx.writer.run_start(
+                kind,
+                work_item=item.qualified_ref if item else None,
+                version=__version__,
+                session=session,
+                **_header(kind, item, input_text, root),
+            )
+            graph.invoke(
+                _initial_state(
+                    kind,
+                    input_text,
+                    cfg,
+                    item,
+                    tracker.trusted_authors if tracker else (),
+                ),
+                config=config,
+                durability="sync",
+            )
+            return _finish(ctx, graph, run_id, config)
+        except EventWriteError:
+            return _log_failed(ctx, graph, config, run_id, session_id)
+    finally:
+        conn.close()
+
+
+def resume(
+    run_id: str,
+    decision: str | None,
+    *,
+    root: Path,
+    cfg: dict,
+    write: Callable[[str], None] | None = None,
+    init: Callable = init_chat_model,
+    scan: Callable = refresh_memory,
+    tracker=None,
+    tracing: Callable = build_run_trace,
+    session: str | None = None,
+) -> Result:
+    """Continue run ``run_id`` with the human's ``decision``.
+
+    ``decision=None`` answers nothing: a run at a gate shows it again, a
+    run paused between nodes continues.
+
+    Rebuilds the graph and checkpoint connection from scratch — this is
+    also how a fresh process resumes a run after a crash or a ``/quit``
+    at a gate.
+    """
+    conn, saver = _open_checkpoints(root)
+    try:
+        kind = _run_kind(saver, run_id)
+        if kind is None or kind not in _BUILDERS:
+            raise RunRefused(f"no run {run_id} in this checkout")
+        tracker = _tracker_for(
+            kind,
+            cfg,
+            root,
+            tracker,
+            required=kind in ("research", "triage")
+            or _run_item_ref(saver, run_id) is not None,
+        )
+        ctx = RunContext(
+            root=root, cfg=cfg, kind=kind, init=init, tracker=tracker, scan=scan,
+            session=session,
+        )
+        graph = _BUILDERS[kind](ctx, saver)
+        state = graph.get_state(_thread(run_id))
+        _refuse_finished(state, run_id)
+        _refuse_revoked_app_authors(state.values, tracker)
+        _bind_events(ctx, root, run_id, write)
+        ctx.trace = tracing(run_id)
+        session_id = _session_id(ctx, state.values)
+        config = _runnable(run_id, ctx, session_id)
+        try:
+            ctx.writer.run_start(
+                kind,
+                resumed=True,
+                branch=current_branch(root),
+                version=__version__,
+                session=session,
+            )
+            _advance(ctx, graph, state, decision, config)
+            return _finish(ctx, graph, run_id, config)
+        except EventWriteError:
+            return _log_failed(ctx, graph, config, run_id, session_id)
+    finally:
+        conn.close()
+
+
+def abandon(run_id: str, *, root: Path) -> None:
+    """Drop run ``run_id``'s checkpoint thread: the run can no longer resume.
+
+    Refuses — ``RunRefused``, the dirty-tree refusal — and keeps
+    the checkpoint while the tree is dirty: the fresh run that follows
+    would be refused too, and a run paused at the test gate holds
+    uncommitted files only its own checkpoint can finish. Files are never
+    touched.
+    """
+    conn, saver = _open_checkpoints(root)
+    try:
+        kind = _run_kind(saver, run_id)
+        if kind not in ("plan", "research", "triage"):  # no uncommitted work
+            _refuse_dirty(root, f"/{kind}" if kind else "another run")
+        saver.delete_thread(run_id)
+        if kind == "implement":
+            drop_worktree_snapshot(root, worktree_snapshot_dir(root, run_id))
+    finally:
+        conn.close()
+
+
+def open_runs(saver: SqliteSaver, ctx: RunContext) -> list[tuple[str, str, dict]]:
+    """``[(run_id, pending_node, values)]`` for every unfinished checkpoint
+    thread, each read through its own kind's graph: another kind's graph
+    does not know the thread's nodes and would see it as finished."""
+    graphs = {kind: build(ctx, saver) for kind, build in _BUILDERS.items()}
+    threads = {
+        tuple_.config["configurable"]["thread_id"]
+        for tuple_ in saver.list(None)
+    }
+    return [
+        open_run
+        for thread_id in sorted(threads)
+        if (open_run := _open_run(graphs, saver, thread_id)) is not None
+    ]
+
+
+def _open_run(
+    graphs: dict[str, CompiledStateGraph], saver: SqliteSaver, thread_id: str
+) -> tuple[str, str, dict] | None:
+    """One checkpoint read through its own kind's graph — ``None`` for a
+    thread whose kind is gone (a retired workflow's checkpoint is dead
+    weight) or whose graph sees no pending node."""
+    graph = graphs.get(_run_kind(saver, thread_id) or "")
+    if graph is None:
+        return None
+    state = graph.get_state(_thread(thread_id))
+    if not state.next:
+        return None
+    return (thread_id, state.next[0], state.values)
+
+
+def _open_checkpoints(root: Path) -> tuple[sqlite3.Connection, SqliteSaver]:
+    path = checkpoints_path(root)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(str(path), check_same_thread=False)
+    return conn, SqliteSaver(conn)
+
+
+def _busy_run(
+    saver: SqliteSaver, ctx: RunContext, input_text: str, tracker, root: Path
+) -> Unfinished | None:
+    """An open run answers ``#<n>`` for its own work item, and a run of its
+    own kind when it has no work item (a ``<task>``, ``<idea>`` or
+    ``<question>`` run before it names a work item).
+
+    Anything else is refused. The refusals for an ended work item (closed
+    issue, merged or closed PR) come before the resume prompt.
+    """
+    busy = open_runs(saver, ctx)
+    if not busy:
+        return None
+    if ctx.kind in ("implement", "plan", "research", "triage"):
+        same = _same_item_run(busy, input_text)
+        if same is not None:
+            _work_item(input_text, tracker, root, ctx.kind)
+            return Unfinished(run=same[0], node=same[1])
+    itemless = _itemless_run(busy, ctx.kind, input_text)
+    if itemless is not None:
+        return Unfinished(run=itemless[0], node=itemless[1])
+    run_id, node, values = busy[0]
+    raise RunRefused(
+        f"a run is already open in this checkout: {run_id} at {node}\n"
+        f"resume it with {_resume_command(values)}, or run k0 from another "
+        "git worktree: git worktree add <path>"
+    )
+
+
+def _same_item_run(busy: list[tuple[str, str, dict]], input_text: str):
+    """The open ``(run, node)`` whose work item is the ``#<n>`` asked for."""
+    if not input_text.startswith("#"):
+        return None
+    ref = input_text[1:].strip()
+    for run_id, node, values in busy:
+        if values.get("item_ref") == ref:
+            return run_id, node
+    return None
+
+
+def _itemless_run(busy: list[tuple[str, str, dict]], kind: str, input_text: str):
+    """The open ``(run, node)`` of ``kind`` with no work item, if any:
+    the same command with free text is the only way back to it."""
+    if input_text.startswith("#"):
+        return None
+    for run_id, node, values in busy:
+        if values.get("kind") == kind and not values.get("item_ref"):
+            return run_id, node
+    return None
+
+
+def _resume_command(values: dict) -> str:
+    """The REPL command that offers an open run back."""
+    if values.get("item_ref"):
+        return f"/{values.get('kind', 'implement')} #{values['item_ref']}"
+    return f"/{values.get('kind')} <task>"
+
+
+def _doctor_gate(
+    check: Callable, cfg: dict, kind: str, root: Path, input_text: str
+) -> None:
+    roster = _roster_for(kind, input_text)
+    checks = check(
+        cfg,
+        names=roster,
+        root=root,
+        services=_services_for(kind, input_text, roster),
+    )
+    if has_errors(checks):
+        raise RunRefused(error_lines(checks))
+
+
+def _services_for(
+    kind: str, input_text: str, roster: tuple[str, ...]
+) -> tuple[str, ...]:
+    """The non-model services this run's path needs (#179).
+
+    ``"github"`` — ``gh`` auth and an ``origin`` remote — gates the same
+    paths that require a tracker: every ``/research`` and ``/triage`` run
+    and the ``#<n>`` forms of ``/implement`` and ``/plan``. ``"search"``
+    gates only when a rostered agent's allowlist carries ``web_search``,
+    so a missing optional search credential never blocks unaffected
+    agents.
+    """
+    services = []
+    if _tracker_required(kind, input_text):
+        services.append("github")
+    if _roster_searches(roster):
+        services.append("search")
+    return tuple(services)
+
+
+def _roster_searches(roster: tuple[str, ...]) -> bool:
+    """True when a rostered agent's allowlist carries ``web_search``."""
+    return any(
+        "web_search" in ALLOWLISTS.get(label.split(".", 1)[-1], ())
+        for label in roster
+    )
+
+
+def _tracker_required(kind: str, input_text: str) -> bool:
+    """The paths that cannot run trackerless — and so need GitHub auth and
+    an ``origin`` remote (#179): every ``/research`` and ``/triage`` run,
+    and the ``#<n>`` forms of ``/implement`` and ``/plan``."""
+    return kind in ("research", "triage") or (
+        kind in ("implement", "plan") and input_text.startswith("#")
+    )
+
+
+def _roster_for(kind: str, input_text: str) -> tuple[str, ...]:
+    """The roster the doctor gate checks on this run's path:
+    ``/implement #<n>`` also runs REVIEWER (#118); the working-tree path
+    never does, so it must not be refused for a reviewer's provider.
+    ``/research #<n>`` may run RESEARCHER on a decision ticket (#125)."""
+    if kind == "implement" and input_text.startswith("#"):
+        return ("agents.implementer", "agents.reviewer", "helpers.bulk_read")
+    if kind == "research" and input_text.startswith("#"):
+        return ("agents.planner", "agents.researcher", "helpers.bulk_read")
+    return _ROSTER[kind]
+
+
+def _rescan(scan: Callable, root: Path) -> None:
+    try:
+        scan(root)
+    except ScanError as error:
+        raise RunRefused(f"scan failed: {error}") from error
+
+
+def _snapshot_worktree(root: Path, run_id: str) -> None:
+    """``/implement <task>``'s diff-gate ``n`` restores this pre-run snapshot."""
+    try:
+        snapshot_worktree(root, worktree_snapshot_dir(root, run_id))
+    except OSError as error:
+        raise RunRefused(f"could not snapshot the working tree: {error}") from error
+
+
+def _bind_events(
+    ctx: RunContext, root: Path, run_id: str, write: Callable | None
+) -> None:
+    path = events_path(root)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    writer = EventWriter(
+        path,
+        run=run_id,
+        progress=ProgressRenderer(write) if write is not None else None,
+    )
+    ctx.bind(writer)
+
+
+def _checked_input(kind: str, input) -> str:
+    """Non-empty input in the kind's accepted forms, or a usage refusal."""
+    text = str(input).strip()
+    if not text or not _form_ok(kind, text):
+        raise RunRefused(_usage(kind))
+    return text
+
+
+def _form_ok(kind: str, text: str) -> bool:
+    """The input shape a kind takes: ``/triage`` always names a work item,
+    the work-item commands take text or ``#<n>``, the rest take anything."""
+    if kind == "triage":
+        return text.startswith("#") and _usage_ok(text)
+    if kind in ("implement", "plan", "research"):
+        return _usage_ok(text)
+    return True
+
+
+def _usage(kind: str) -> str:
+    if kind == "research":
+        return "usage: /research <question> | /research #<issue>"
+    if kind in ("implement", "plan"):
+        return f"usage: /{kind} <task> | /{kind} #<issue>"
+    if kind == "triage":
+        return "usage: /triage #<issue>"
+    return f"usage: /{kind} <task>"
+
+
+def _usage_ok(input_text: str) -> bool:
+    """The work-item commands' two forms: free text, or ``#`` plus a number."""
+    return not input_text.startswith("#") or input_text[1:].strip().isdigit()
+
+
+def _implement_preflight(kind: str, item, root: Path, run_id: str) -> None:
+    """The working-tree path snapshots the tree for its diff gate; the
+    tracker path works on a branch it cuts itself, so there is nothing to
+    restore to.
+    """
+    if kind != "implement":
+        return
+    if not is_git_repo(root):
+        raise RunRefused("/implement needs a git repository")
+    if item is None:
+        _snapshot_worktree(root, run_id)
+
+
+def _header(kind: str, item, input_text: str, root: Path) -> dict:
+    """What the run header names: a ``/research <question>`` its question,
+    every other run its branch (#205)."""
+    if kind == "research" and item is None:
+        return {"question": input_text}
+    return {"branch": current_branch(root)}
+
+
+_LOCAL_ONLY = (
+    "no 'origin' remote: the change stays on your local branch; nothing is pushed"
+)
+
+
+def _warn_local_only(kind: str, item, root: Path, write) -> None:
+    """A working-tree ``/implement`` runs without a remote, but says so
+    before any model call (#179, #204)."""
+    if kind == "implement" and item is None and write and not has_origin(root):
+        write(_LOCAL_ONLY)
+
+
+def _tracker_for(kind: str, cfg: dict, root: Path, tracker, *, required: bool):
+    """A work-item run cannot run trackerless: build the configured adapter.
+
+    ``/plan <idea>`` never requires one, but the question-limit hand off
+    publishes a Map (#127), so a configured tracker joins a plan run too.
+    """
+    if tracker is not None:
+        return tracker
+    if not required:
+        return _optional_tracker(kind, cfg, root)
+    return _required_tracker(kind, cfg, root)
+
+
+def _optional_tracker(kind: str, cfg: dict, root: Path):
+    """The tracker a run may use but needn't: a configured GitHub tracker
+    joins ``/plan`` runs so the hand off can publish (#127)."""
+    if kind == "plan" and cfg.get("tracker") == "github":
+        return GhTracker(
+            subprocess_runner(root), trusted_authors=_trusted_authors(cfg)
+        )
+    return None
+
+
+def _required_tracker(kind: str, cfg: dict, root: Path):
+    """The configured adapter or the refusal: only GitHub ships in 0.1.0."""
+    unshipped = next(
+        (cfg[key] for key in ("vcs", "tracker") if cfg.get(key, "github") != "github"), None
+    )
+    if unshipped:
+        raise RunRefused(f"/{kind} only works with GitHub in 0.1.0, not {unshipped}")
+    if cfg.get("tracker") is None:
+        raise RunRefused(f"/{kind} needs a tracker; run k0 init --tracker github")
+    return GhTracker(
+        subprocess_runner(root), trusted_authors=_trusted_authors(cfg)
+    )
+
+
+def _trusted_authors(cfg: dict) -> tuple[str, ...]:
+    """The config's expressly trusted author logins (#176, ADR 0016)."""
+    return tuple(cfg.get("trusted_authors") or ())
+
+
+def _log_failed(
+    ctx: RunContext, graph, config: RunnableConfig, run_id: str, session_id
+) -> Outcome:
+    """A broken event log ends the run stuck (events contract, #16).
+
+    There is no ``run_end`` — the log cannot take it. ``/implement``'s
+    checkpoint is left where the write failed: still resumable, so its
+    rollback snapshot stays until the graph actually ends.
+    """
+    state = graph.get_state(config)
+    _trace_finish(ctx, "stuck", session_id, state.values)
+    if ctx.kind == "implement" and not state.next:
+        drop_worktree_snapshot(ctx.root, worktree_snapshot_dir(ctx.root, run_id))
+    return Outcome(run=run_id, outcome="stuck")
+
+
+def _item_preflight(kind: str, input_text: str, tracker, root: Path):
+    """The work-item commands' last refusals: dirty tree, then the item read.
+
+    ``/implement`` goes through it only for ``#<n>``, whose
+    item must also be ready for an agent (#117). ``/plan`` and ``/research``
+    read the ``#<n>`` item but never touch the tree, so no dirt or label is
+    checked — planning is what readies work (#120), and the map a research
+    run works is the carrier it indexes onto (#125). ``/triage`` reads it
+    the same way (#128). A ``/research #<n>`` carrier must be a Map —
+    another parent's children are no decision tickets.
+    """
+    if kind in ("plan", "research", "triage"):
+        return _read_only_item(kind, input_text, tracker, root)
+    if kind != "implement" or not input_text.startswith("#"):
+        return None
+    _refuse_dirty(root, f"/{kind}")
+    item = _work_item(input_text, tracker, root, kind)
+    if kind == "implement" and item is not None:
+        _refuse_not_ready(item, tracker)
+    return item
+
+
+def _read_only_item(kind: str, input_text: str, tracker, root: Path):
+    """The ``#<n>`` read for the planning kinds — no tree, no label; but
+    a ``/research #<n>`` carrier must be a Map, and ``/plan #<n>`` on
+    a Map waits for its decision tickets to be all decided (#126)."""
+    item = _work_item(input_text, tracker, root, kind)
+    if kind == "research" and item is not None:
+        _refuse_not_map(item)
+    if kind == "plan" and item is not None and is_map(item):
+        _refuse_open_decisions(item, tracker)
+    return item
+
+
+def _refuse_open_decisions(item, tracker) -> None:
+    """``/plan #<n>`` on a Map drafts the spec from its decisions —
+    only once they are all decided; a map with decision tickets still
+    open is refused, naming how many (#126)."""
+    try:
+        children = tracker.list_children(item.ref)
+        pending = sum(
+            1 for child in children if _undecided(child, item, tracker)
+        )
+    except TrackerError as error:
+        raise RunRefused(str(error)) from error
+    if pending:
+        raise RunRefused(
+            f"map #{item.ref} still has {pending} open decision "
+            f"ticket{'s' if pending != 1 else ''} — work them "
+            f"with /research #{item.ref} first"
+        )
+
+
+def _undecided(child, item, tracker) -> bool:
+    """A decision ticket that still counts: open, or closed before its
+    decision was indexed on the map — a run that died between closing
+    the ticket and writing the map line must not be planned over (#126)."""
+    if child.state == "open":
+        return True
+    return tracker.read_work_item(child.ref).url not in item.body
+
+
+def _refuse_not_map(item) -> None:
+    """``/research #<n>`` works a Map's decision tickets — a work item
+    whose body carries no Map sections has none to pick."""
+    if is_map(item):
+        return
+    raise RunRefused(
+        f"work item #{item.ref} is not a Map — /research #<n> works a "
+        "Map's decision tickets; chart one with /research <question>"
+    )
+
+
+def _refuse_not_ready(item, tracker) -> None:
+    """``/implement #<n>`` runs ready work only: the label, or a ticket k0 created."""
+    if is_k0_work_item(item) or "ready-for-agent" in tracker.read_labels(item.ref):
+        return
+    raise RunRefused(
+        f"work item #{item.ref} is not ready for an agent "
+        f"(no ready-for-agent label) — run /triage #{item.ref} first"
+    )
+
+
+def _refuse_dirty(root: Path, what: str) -> None:
+    dirty = dirty_paths(root)
+    if dirty:
+        raise RunRefused(
+            [f"refusing to run {what} on a dirty working tree:", *dirty]
+        )
+
+
+def _work_item(input_text: str, tracker, root: Path, kind: str):
+    """The ``#<n>`` commands' issue: must exist and come from a trusted author."""
+    if not input_text.startswith("#"):
+        return None
+    ref = input_text[1:].strip()
+    try:
+        item = tracker.read_work_item(ref)
+        _refuse_ended_work(item, tracker, root)
+    except TrackerError as error:
+        raise RunRefused(str(error)) from error
+    if not is_trusted_author(
+        item.author, item.author_association, tracker.trusted_authors
+    ):
+        raise RunRefused(
+            f"work item #{ref} was written by {item.author} "
+            f"({item.author_association}), not a trusted author — "
+            f"{_untrusted_next_step(kind)}"
+        )
+    return item
+
+
+def _untrusted_next_step(kind: str) -> str:
+    """The refile step an untrusted refusal names: ``/triage`` takes only
+    ``#<n>``, so it routes through a new trusted-author issue (#180)."""
+    if kind == "triage":
+        return "restate the work yourself as a new issue, then /triage #<new-issue>"
+    return f"restate the work yourself: /{kind} <task>"
+
+
+def _refuse_ended_work(item, tracker, root: Path) -> None:
+    """A closed issue, or a merged or closed PR, is not worked on again."""
+    if item.state != "open":
+        raise TrackerError(f"work item #{item.ref} is {item.state}")
+    branch = existing_branch(root, item.ref)
+    change = tracker.read_change(branch) if branch else None
+    if change is not None and change.state != "open":
+        raise TrackerError(
+            f"pull request #{change.ref} for {branch} is {change.state}"
+        )
+
+
+def _initial_state(
+    kind: str,
+    input_text: str,
+    cfg: dict,
+    item: WorkItem | None = None,
+    trusted_authors: tuple[str, ...] = (),
+) -> dict:
+    brief = (
+        latest_agent_brief_comment(item, trusted_authors)
+        if kind == "implement" and item is not None
+        else None
+    )
+    state = {
+        "kind": kind,
+        "task": str(input_text).strip(),
+        "start_ms": _now_ms(),
+        "max_attempts": cfg.get("max_attempts", 2),
+        "validator_ok": False,
+        "limit": None,
+        "required_app_authors": _required_app_authors(item, brief),
+    }
+    state.update(_kind_state(kind, cfg, item, brief))
+    return state
+
+
+def _required_app_authors(*sources: WorkItem | Comment | None) -> list[str]:
+    """Authors of cached intake content admitted solely by the App allowlist."""
+    return sorted({
+        source.author
+        for source in sources
+        if source is not None and source.author_association not in TRUSTED_ASSOCIATIONS
+    })
+
+
+def _kind_state(
+    kind: str, cfg: dict, item: WorkItem | None, brief: Comment | None
+) -> dict:
+    """The per-kind fields layered over the shared run state."""
+    if kind == "implement":
+        return _implement_state(item, brief)
+    if kind == "plan":
+        return _plan_state(cfg, item)
+    if kind == "research":
+        return _research_state(cfg, item)
+    if kind == "triage":
+        return _triage_state(cfg, item)
+    return {}
+
+
+def _research_state(cfg: dict, item) -> dict:
+    """``/research``'s fields: the charted map's own, plus — for
+    ``/research #<n>`` — the decision-ticket path layered on top (#125)."""
+    state: dict = {"map": None, "decision_refs": [], "planner_attempts": 0}
+    if item is not None:
+        state.update(_research_item_state(cfg, item))
+    return state
+
+
+def _triage_state(cfg: dict, item) -> dict:
+    """The ``/triage`` fields layered over the shared run state (#128).
+
+    Triage always names a work item: its body is what PLANNER reads and
+    its title joins the briefs.
+    """
+    state = {
+        "rounds": [],
+        "questions": [],
+        "planner_attempts": 0,
+        "max_round_questions": cfg.get(
+            "max_round_questions", DEFAULT_MAX_ROUND_QUESTIONS
+        ),
+        "max_questions": cfg.get("max_questions", DEFAULT_MAX_QUESTIONS),
+        "triage_outcome": None,
+        "outcome_attempts": 0,
+        "triage_approved": False,
+        "triage_rejections": [],
+        "triage_feedback": None,
+    }
+    if item is not None:
+        state.update(
+            {"task": item.body, "item_ref": item.ref, "item_title": item.title}
+        )
+    return state
+
+
+def _research_item_state(cfg: dict, item) -> dict:
+    """The ``/research #<n>`` fields layered over the shared run state
+    (#125): the map's next unblocked decision ticket and the short Q&A a
+    Q&A ticket may take before its gate.
+    """
+    return {
+        "task": item.body,
+        "item_ref": item.ref,
+        "item_title": item.title,
+        "decision": None,
+        "finding": None,
+        "proposal": "",
+        "decided": "",
+        "researcher_attempts": 0,
+        "rounds": [],
+        "questions": [],
+        "max_round_questions": cfg.get(
+            "max_round_questions", DEFAULT_MAX_ROUND_QUESTIONS
+        ),
+        "max_questions": cfg.get("max_questions", DEFAULT_MAX_QUESTIONS),
+    }
+
+
+def _plan_state(cfg: dict, item) -> dict:
+    """The ``/plan`` fields layered over the shared run state (#120).
+
+    For ``/plan #<n>`` the idea is the work item's body; the title goes to
+    PLANNER's brief alongside it.
+    """
+    state = {
+        "rounds": [],
+        "questions": [],
+        "planner_attempts": 0,
+        "max_round_questions": cfg.get(
+            "max_round_questions", DEFAULT_MAX_ROUND_QUESTIONS
+        ),
+        "max_questions": cfg.get("max_questions", DEFAULT_MAX_QUESTIONS),
+        "spec": None,
+        "spec_attempts": 0,
+        "spec_approved": False,
+        "spec_rejections": [],
+        "spec_feedback": None,
+        "ticket_size": cfg.get("ticket_size", "small"),
+        "tickets": None,
+        "tickets_approved": False,
+        "tickets_attempts": 0,
+        "ticket_rejections": [],
+        "ticket_feedback": None,
+        "decided_map": False,
+    }
+    if item is not None:
+        state.update(
+            {"task": item.body, "item_ref": item.ref, "item_title": item.title}
+        )
+        state["decided_map"] = is_map(item)
+    return state
+
+
+def _implement_state(item: WorkItem | None, brief: Comment | None) -> dict:
+    """The ``/implement`` fields layered over the shared run state.
+
+    For ``/implement #<n>`` the run's task is the item's latest agent
+    brief, or its body when there is none (#117, ADR 0012).
+    """
+    state = {
+        "files": [],
+        "seam_attempts": 0,
+        "seam_proposal": "",
+        "seam_questions": "",
+        "seam_approved": False,
+        "seam_feedback": None,
+        "seam_answers": None,
+        "implementer_attempts": 0,
+    }
+    if item is not None:
+        state.update(
+            {
+                "task": brief.body if brief is not None else item.body,
+                "item_ref": item.ref,
+                "item_title": item.title,
+                "conventions_review_attempts": 0,
+                "contract_review_attempts": 0,
+                "conventions_review_round": 0,
+                "contract_review_round": 0,
+            }
+        )
+    return state
+
+
+def _runnable(run_id: str, ctx: RunContext, session_id=None) -> RunnableConfig:
+    config = _thread(run_id)
+    assert ctx.handler is not None
+    callbacks: list[BaseCallbackHandler] = [ctx.handler]
+    config["callbacks"] = callbacks
+    # Always explicit (langgraph's default is a safety net, not a budget):
+    # each loop-back costs at most two super-steps per agent node.
+    attempts = ctx.cfg.get("max_attempts", 2)
+    slack = 16 if ctx.kind == "implement" else _OUTER_STEPS_SLACK
+    config["recursion_limit"] = _OUTER_STEPS_PER_ATTEMPT * attempts + slack
+    if ctx.trace is not None and ctx.trace.handler is not None:
+        callbacks.append(ctx.trace.handler)
+        config["metadata"] = _langfuse_metadata(ctx.kind, session_id)
+    callbacks.extend(otel_callbacks(ctx.trace))
+    return config
+
+
+def _langfuse_metadata(kind: str, session_id) -> dict:
+    """Root-run metadata the Langfuse handler reads: session + kind tag."""
+    metadata = {"langfuse_tags": [kind]}
+    if session_id:
+        metadata["langfuse_session_id"] = session_id
+    return metadata
+
+
+def _session_id(ctx: RunContext, values: dict) -> str | None:
+    """The run's Langfuse session: its work item, resolved through the
+    tracker, else the REPL sitting."""
+    ref = values.get("item_ref")
+    if not ref or ctx.tracker is None:
+        return _sitting_session(ctx)
+    try:
+        return ctx.tracker.read_work_item(ref).qualified_ref
+    except TrackerError:
+        return _sitting_session(ctx)
+
+
+def _sitting_session(ctx: RunContext) -> str | None:
+    """``/implement <task>``, ``/plan <idea>`` and
+    ``/research <question>`` have no work item: their session is the
+    sitting. A ``#<n>`` run's is always the work item, which outlives any
+    one sitting."""
+    return ctx.session if ctx.kind in ("implement", "plan", "research") else None
+
+
+def _trace_metadata(ctx: RunContext, values: dict) -> dict:
+    """The trace's metadata (#49): branch, change URL and k0 version."""
+    metadata = {"k0_version": __version__}
+    branch = values.get("branch") or current_branch(ctx.root)
+    if branch:
+        metadata["branch"] = branch
+    if values.get("change_url"):
+        metadata["change_url"] = values["change_url"]
+    return metadata
+
+
+def _trace_finish(ctx: RunContext, outcome: str, session_id, values: dict) -> None:
+    """Close the run's trace — enabled-only, never raising (#49)."""
+    if ctx.trace is None:
+        return
+    ctx.trace.finish(
+        kind=ctx.kind,
+        outcome=outcome,
+        session_id=session_id,
+        metadata=_trace_metadata(ctx, values),
+    )
+
+
+def _thread(run_id: str) -> RunnableConfig:
+    return {"configurable": {"thread_id": run_id}}
+
+
+def _run_kind(
+    saver: SqliteSaver, run_id: str
+) -> Literal["implement", "plan", "research", "triage"] | None:
+    """The run's kind, read from the checkpoint before a graph is built."""
+    tuple_ = saver.get_tuple(_thread(run_id))
+    if tuple_ is None:
+        return None
+    return tuple_.checkpoint["channel_values"].get("kind")
+
+
+def _run_item_ref(saver: SqliteSaver, run_id: str) -> str | None:
+    """The checkpointed run's work item ref, if it carries one."""
+    tuple_ = saver.get_tuple(_thread(run_id))
+    if tuple_ is None:
+        return None
+    return tuple_.checkpoint["channel_values"].get("item_ref")
+
+
+def _refuse_finished(state, run_id: str) -> None:
+    if state.next or state.interrupts:
+        return
+    outcome = state.values.get("outcome", "finished")
+    raise RunRefused(f"run {run_id} already ended {outcome}")
+
+
+def _refuse_revoked_app_authors(values: dict, tracker: Tracker | None) -> None:
+    allowed = tracker.trusted_authors if tracker is not None else ()
+    missing = set(values.get("required_app_authors", ())).difference(allowed)
+    if missing:
+        raise RunRefused(
+            "cannot resume: checkpointed authors are no longer trusted: "
+            f"{', '.join(sorted(missing))}. Abandon the run and start it again."
+        )
+
+
+def _advance(
+    ctx: RunContext, graph, state, decision: str | None, config: RunnableConfig
+) -> None:
+    if state.interrupts and (decision is None or not str(decision).strip()):
+        return  # nothing answered: _finish shows the gate again
+    if state.interrupts:
+        payload = state.interrupts[0].value
+        assert decision is not None
+        _check_decision(payload, decision)
+        # A gate with no listed answers takes a free line (the Q&A round):
+        # the event records that it was answered, never the line itself.
+        verb = _decision_verb(decision) if payload.get("answers") else "answered"
+        ctx.writer.gate(payload["gate"], _DECISIONS.get(verb, verb))
+        graph.invoke(_gate_command(decision, verb), config=config, durability="sync")
+        return
+    # Paused between nodes (crash or kill): continue from the checkpoint.
+    graph.invoke(None, config=config, durability="sync")
+
+
+def _check_decision(payload: dict, decision: str) -> None:
+    """The decision's verb must be one of the payload's answers.
+
+    Matching is on the first word so ``retry [feedback]`` answers the
+    ``limit_hit`` pause with its feedback intact (#42).
+    """
+    answers = [str(a) for a in payload.get("answers", [])]
+    if answers and _decision_verb(decision) not in [a.lower() for a in answers]:
+        raise RunRefused(
+            f"answer {decision!r} is not one of: {', '.join(answers)}"
+        )
+
+
+def _decision_verb(decision: str) -> str:
+    parts = str(decision).strip().split(maxsplit=1)
+    return parts[0].lower() if parts else ""
+
+
+# The first word decides; the rest is feedback for the looping-back node.
+_DECISIONS = {
+    "y": "approve",
+    "yes": "approve",
+    "ok": "approve",
+    "n": "reject",
+    "no": "reject",
+    "redo": "reject",
+}
+
+
+def _gate_command(decision: str, verb: str) -> Command:
+    """Checkpoint a redo with the accepted gate answer, across sittings."""
+    update = {"redone": True} if verb == "redo" else None
+    return Command(resume=decision, update=update)
+
+
+def _finish(ctx: RunContext, graph, run_id: str, config: RunnableConfig) -> Result:
+    state = graph.get_state(config)
+    if state.interrupts:
+        if ctx.trace is not None:
+            ctx.trace.flush()
+        return _pending(run_id, state.interrupts[0].value)
+    if state.next:
+        raise RunRefused(
+            f"run {run_id} is paused outside a gate; resume it to continue"
+        )
+    values = state.values
+    outcome = values.get("outcome", "stuck")
+    ms = _now_ms() - values.get("start_ms", _now_ms())
+    cost = run_cost(events_path(ctx.root), run_id)
+    ctx.writer.run_end(
+        outcome,
+        ms,
+        reason=values.get("reason"),
+        node=values.get("node"),
+        agent_runs=cost["agent_runs"] or None,
+        validator_reds=cost["validator_reds"],
+        model_calls=cost["model_calls"],
+    )
+    _trace_finish(ctx, outcome, _session_id(ctx, values), values)
+    if ctx.kind == "implement":
+        drop_worktree_snapshot(ctx.root, worktree_snapshot_dir(ctx.root, run_id))
+    return Outcome(
+        run=run_id,
+        outcome=outcome,
+        reason=values.get("reason"),
+        node=values.get("node"),
+        redone=values.get("redone", False),
+        ms=ms,
+        agent_runs=cost["agent_runs"],
+        validator_reds=cost["validator_reds"],
+        model_calls=cost["model_calls"],
+    )
+
+
+def _pending(run_id: str, payload: dict) -> Pending:
+    return Pending(
+        run=run_id,
+        gate=str(payload.get("gate", "")),
+        question=str(payload.get("question", "")),
+        answers=tuple(str(a) for a in payload.get("answers", ())),
+        detail=str(payload.get("detail", "")),
+        diff=str(payload.get("diff", "")),
+    )
+
+
+def _now_ms() -> int:
+    return round(time.time() * 1000)

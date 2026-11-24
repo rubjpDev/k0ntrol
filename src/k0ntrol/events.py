@@ -1,0 +1,838 @@
+"""The always-on, content-free event log.
+
+One append-only file, `.k0-mem/events.jsonl`, one JSON line per event. The
+schema is the contract in spec #33 ("Events and Langfuse"): every line has
+`ts` (ISO UTC, ms), `kind`, and `run` — or `chat` for `/ask`. Fields that do
+not apply are omitted, never `null`. No prompts, completions, file contents
+or tool arguments other than `path` (file tools) and `host` (the hostname of
+a tool call's `url` argument, for the network tools) are ever written.
+
+Rotation: when an `EventWriter` is created and `events.jsonl` is over
+`EVENTS_MAX_BYTES`, the file is renamed to `events.1.jsonl`, the previous
+`events.1.jsonl` becomes `events.2.jsonl`, and so on up to `EVENTS_KEEP`
+(3); the oldest is deleted. So `events.1.jsonl` is the newest rotated file
+and `events.<EVENTS_KEEP>.jsonl` the oldest; all match `events.*.jsonl`.
+Rotation never happens on an append, and any error during it is ignored:
+the writer then keeps appending to the existing file. The first rotation in
+a repo also adds `events*.jsonl` to `.k0-mem/.gitignore` when that file
+exists and does not already cover it.
+
+`run_start` may also carry `session`: the id of the REPL sitting that started
+or resumed the run (the stem of its `.k0-mem/sessions/<id>.txt` file, also the
+Langfuse session of task runs and `/ask` chats), so the log can group runs
+by sitting. Omitted when no sitting is known.
+
+`EventWriter` appends lines for harness events (`run_start`, `agent`,
+`gate`, `run_end`). `K0EventHandler` — the one callback attached to every
+graph and helper model call — emits the `model` and `tool` events through
+the same writer.
+
+Shared contract for tool refusals (the `denied` field): a tool refuses a
+call by raising an exception that carries a `denied` attribute with value
+`"allowlist"`, `"path_guard"`, `"slice_guard"` or `"network_guard"`. The
+canonical class is
+`k0ntrol.tools.errors.ToolError` (raised with `denied="path_guard"` /
+`denied="allowlist"` / `denied="slice_guard"` / `denied="network_guard"`);
+the handler accepts any
+exception with a truthy `denied` attribute, so tool code never depends on
+this module.
+"""
+
+import json
+import os
+import threading
+import time
+from collections.abc import Callable, Iterable, Mapping
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any, Literal
+from urllib.parse import urlsplit
+from uuid import uuid4
+
+from langgraph.callbacks import GraphCallbackHandler, GraphInterruptEvent
+
+from k0ntrol.memory.layout import EVENTS_IGNORE
+from k0ntrol.providers import REGISTRY
+
+ERR_MAX_CHARS = 500
+EVENTS_MAX_BYTES = 10 * 1024 * 1024
+EVENTS_KEEP = 3
+MASKED = "***"
+# Values shorter than this are not masked: a short env value would mangle
+# ordinary words inside error text. Real credentials are much longer.
+MASK_MIN_LENGTH = 8
+
+# Env-var name suffixes whose *values* are treated as secrets for masking.
+# Same rule the command runner uses to scrub its environment.
+_SECRET_NAME_SUFFIXES = ("_KEY", "_TOKEN", "_SECRET")
+
+# Metadata keys the run module / agent builder put in config["metadata"] so
+# the handler can fill the event fields. `k0_agent` xor `k0_helper` decides
+# the `agent`/`helper` field; `langgraph_node` is the fallback for agents.
+META_AGENT = "k0_agent"
+META_HELPER = "k0_helper"
+META_ATTEMPT = "k0_attempt"
+META_EFFORT = "k0_effort"
+
+# The custom-event name middleware dispatches to emit a `warning` event
+# from inside a model call (#182).
+WARNING_EVENT = "warning"
+
+
+def events_path(root: Path) -> Path:
+    """The event log for the project rooted at `root`."""
+    return root / ".k0-mem" / "events.jsonl"
+
+
+_rotate_lock = threading.Lock()
+
+
+def _rotated(path: Path, generation: int) -> Path:
+    return path.with_name(f"{path.stem}.{generation}{path.suffix}")
+
+
+def _ignore_rotated_files(mem_dir: Path) -> None:
+    gitignore = mem_dir / ".gitignore"
+    text = gitignore.read_text(encoding="utf-8")
+    if EVENTS_IGNORE in text.splitlines() or "events.*.jsonl" in text.splitlines():
+        return
+    prefix = "" if text.endswith("\n") or not text else "\n"
+    with open(gitignore, "a", encoding="utf-8") as fh:
+        fh.write(f"{prefix}{EVENTS_IGNORE}\n")
+
+
+def _shift_rotated(path: Path, keep: int) -> None:
+    _rotated(path, keep).unlink(missing_ok=True)
+    for generation in range(keep - 1, 0, -1):
+        source = _rotated(path, generation)
+        if source.exists():
+            os.replace(source, _rotated(path, generation + 1))
+    os.replace(path, _rotated(path, 1))
+
+
+def rotate_events(
+    path: Path, *, max_bytes: int = EVENTS_MAX_BYTES, keep: int = EVENTS_KEEP
+) -> bool:
+    """Rotate `path` when it is over `max_bytes`; True when it rotated.
+
+    Never raises: a failure leaves the log as it is and writing carries on.
+    """
+    with _rotate_lock:
+        try:
+            if path.stat().st_size <= max_bytes:
+                return False
+            _shift_rotated(path, keep)
+        except OSError:
+            return False
+    try:
+        _ignore_rotated_files(path.parent)
+    except OSError:
+        pass
+    return True
+
+
+def new_run_id() -> str:
+    """A fresh run id: 32 lowercase hex, also the Langfuse trace id."""
+    return uuid4().hex
+
+
+def new_chat_id() -> str:
+    """A fresh `chat` id for a `/ask` exchange. Same format as a run id."""
+    return new_run_id()
+
+
+def secret_env_values(env: Mapping[str, str] | None = None) -> list[str]:
+    """Exact values of known secret env vars, used for `err` masking."""
+    source = os.environ if env is None else env
+    known_names = set().union(*(spec.credentials for spec in REGISTRY.values()))
+    values = [
+        value
+        for name, value in source.items()
+        if (name in known_names or name.endswith(_SECRET_NAME_SUFFIXES))
+        and len(value) >= MASK_MIN_LENGTH
+    ]
+    return values
+
+
+class EventWriteError(Exception):
+    """A JSONL write failed. The run treats this as `stuck`."""
+
+
+def _now_iso() -> str:
+    return datetime.now(UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+
+def _mask(text: str, secrets: Iterable[str]) -> str:
+    for secret in secrets:
+        text = text.replace(secret, MASKED)
+    return text[:ERR_MAX_CHARS]
+
+
+class EventWriter:
+    """Appends one JSON line per event to `path`.
+
+    Bound to exactly one scope: a `run` id, or a `chat` id for `/ask`.
+    `progress`, when given, is called with each written event (for the
+    REPL's progress lines); it may never break a write.
+    """
+
+    def __init__(
+        self,
+        path: Path,
+        *,
+        run: str | None = None,
+        chat: str | None = None,
+        mask: Iterable[str] | None = None,
+        progress: Callable[[dict], None] | None = None,
+        max_bytes: int = EVENTS_MAX_BYTES,
+    ) -> None:
+        if (run is None) == (chat is None):
+            raise ValueError("EventWriter needs exactly one of run= or chat=")
+        rotate_events(path, max_bytes=max_bytes)
+        self._path = path
+        self._run = run
+        self._chat = chat
+        self._mask = list(mask) if mask is not None else secret_env_values()
+        self._progress = progress
+        self._lock = threading.Lock()
+
+    @property
+    def run(self) -> str | None:
+        """The run id this writer is bound to (`None` for a chat writer)."""
+        return self._run
+
+    def emit(self, kind: str, **fields: Any) -> dict:
+        """Append one event. `None` fields are omitted; `err` is masked."""
+        event: dict[str, Any] = {"ts": _now_iso(), "kind": kind}
+        event["run" if self._run else "chat"] = self._run or self._chat
+        err = fields.pop("err", None)
+        for key, value in fields.items():
+            if value is not None:
+                event[key] = value
+        if err:
+            event["err"] = _mask(str(err), self._mask)
+        line = json.dumps(event, separators=(",", ":"))
+        with self._lock:
+            try:
+                with open(self._path, "a", encoding="utf-8") as fh:
+                    fh.write(line + "\n")
+            except OSError as exc:
+                raise EventWriteError(f"events.jsonl write failed: {exc}") from exc
+        self._notify(event)
+        return event
+
+    def working(self, **fields: Any) -> None:
+        """Tell the progress display a model or tool call just started.
+
+        Display only: nothing is written to `events.jsonl`, so the log keeps
+        exactly one line per finished model call.
+        """
+        event = {"kind": "working", **{k: v for k, v in fields.items() if v is not None}}
+        self._notify(event)
+
+    def _notify(self, event: dict) -> None:
+        if self._progress is None:
+            return
+        try:
+            self._progress(event)
+        except Exception:
+            pass
+
+    def run_start(
+        self,
+        run_kind: Literal[
+            "implement", "plan", "research", "triage"
+        ],
+        *,
+        work_item: str | None = None,
+        branch: str | None = None,
+        version: str | None = None,
+        resumed: bool | None = None,
+        session: str | None = None,
+        question: str | None = None,
+    ) -> dict:
+        """Emit `run_start`. `work_item`, `resumed` and `session` (the REPL
+        sitting's id) only when they apply."""
+        return self.emit(
+            "run_start",
+            run_kind=run_kind,
+            work_item=work_item,
+            branch=branch,
+            version=version,
+            resumed=resumed,
+            session=session,
+            question=question,
+        )
+
+    def gate(
+        self,
+        gate: str,
+        result: str,
+        *,
+        redo: list[str] | None = None,
+    ) -> dict:
+        """Emit `gate`: `pass`/`fail` for code gates, `waiting` then a
+        decision (`approve`/`reject`/`retry`/`stop`) for human gates."""
+        return self.emit("gate", gate=gate, result=result, redo=redo)
+
+    def run_end(
+        self,
+        outcome: Literal["done", "stuck", "rejected"],
+        ms: int,
+        *,
+        reason: str | None = None,
+        node: str | None = None,
+        agent_runs: dict[str, int] | None = None,
+        validator_reds: int | None = None,
+        model_calls: int | None = None,
+    ) -> dict:
+        """Emit `run_end`. `reason`/`node` only for `stuck` from a limit;
+        the rest is the run's cost: agent runs per node, VALIDATOR reds
+        and model calls (#150)."""
+        return self.emit(
+            "run_end",
+            outcome=outcome,
+            ms=ms,
+            reason=reason,
+            node=node,
+            agent_runs=agent_runs,
+            validator_reds=validator_reds,
+            model_calls=model_calls,
+        )
+
+
+class K0EventHandler(GraphCallbackHandler):
+    """The one callback handler attached to every graph and helper call.
+
+    Emits `model` events on chat-model end/error and `tool` events on tool
+    end/error through the bound `EventWriter` (which carries the `run` or
+    `chat` scope). Per-call context comes from `config["metadata"]`:
+    `k0_agent` xor `k0_helper`, `k0_attempt`, `k0_effort`; `langgraph_node`
+    is the fallback for `agent`.
+
+    `raise_error` is on so a failed JSONL write propagates and the run can
+    end `stuck`; `run_inline` keeps line order under async dispatch.
+
+    `on_interrupt` emits `gate`/`waiting` when a gate node's `interrupt()`
+    value is a mapping carrying a `"gate"` name — the convention gate
+    payloads follow. Decisions (`approve`/`reject`/`retry`/`stop`) are
+    harness events emitted through `EventWriter.gate`.
+    """
+
+    run_inline = True
+    raise_error = True
+
+    def __init__(self, writer: EventWriter) -> None:
+        self._writer = writer
+        self._llm_starts: dict[Any, dict] = {}
+        self._tool_starts: dict[Any, dict] = {}
+
+    # -- model events ------------------------------------------------------
+
+    def on_chat_model_start(
+        self,
+        serialized: dict,
+        messages: list,
+        *,
+        run_id: Any,
+        parent_run_id: Any = None,
+        tags: list | None = None,
+        metadata: dict | None = None,
+        **kwargs: Any,
+    ) -> None:
+        self._llm_starts[run_id] = self._started(metadata)
+
+    def on_llm_start(
+        self,
+        serialized: dict,
+        prompts: list,
+        *,
+        run_id: Any,
+        parent_run_id: Any = None,
+        tags: list | None = None,
+        metadata: dict | None = None,
+        **kwargs: Any,
+    ) -> None:
+        # k0 uses chat models, but a plain LLM call still gets its event.
+        self._llm_starts[run_id] = self._started(metadata)
+
+    def _started(self, metadata: Mapping | None) -> dict:
+        start = _call_start(metadata)
+        who = {"helper": start["helper"]} if start["helper"] else {"agent": start["agent"]}
+        self._writer.working(**who)
+        return start
+
+    def on_llm_end(
+        self,
+        response: Any,
+        *,
+        run_id: Any,
+        parent_run_id: Any = None,
+        tags: list | None = None,
+        **kwargs: Any,
+    ) -> None:
+        start = self._llm_starts.pop(run_id, {})
+        message = _llm_message(response)
+        usage = getattr(message, "usage_metadata", None) or {}
+        self._writer.emit(
+            "model",
+            agent=start.get("agent"),
+            helper=start.get("helper"),
+            provider=start.get("provider"),
+            model=start.get("model") or _response_model(response, message),
+            effort=start.get("effort"),
+            attempt=start.get("attempt"),
+            ms=_elapsed_ms(start),
+            tokens_in=usage.get("input_tokens"),
+            tokens_out=usage.get("output_tokens"),
+            cost_usd=_response_cost(message),
+            web_searches=_web_searches(message),
+            ok=True,
+        )
+
+    def on_llm_error(
+        self,
+        error: BaseException,
+        *,
+        run_id: Any,
+        parent_run_id: Any = None,
+        tags: list | None = None,
+        **kwargs: Any,
+    ) -> None:
+        start = self._llm_starts.pop(run_id, {})
+        self._writer.emit(
+            "model",
+            agent=start.get("agent"),
+            helper=start.get("helper"),
+            provider=start.get("provider"),
+            model=start.get("model"),
+            effort=start.get("effort"),
+            attempt=start.get("attempt"),
+            ms=_elapsed_ms(start),
+            ok=False,
+            **_failure(error),
+        )
+
+    # -- tool events --------------------------------------------------------
+
+    def on_tool_start(
+        self,
+        serialized: dict,
+        input_str: str,
+        *,
+        run_id: Any,
+        parent_run_id: Any = None,
+        tags: list | None = None,
+        metadata: dict | None = None,
+        inputs: dict | None = None,
+        **kwargs: Any,
+    ) -> None:
+        metadata = metadata or {}
+        path = inputs.get("path") if isinstance(inputs, dict) else None
+        self._tool_starts[run_id] = {
+            "t0": time.monotonic(),
+            "agent": _agent_name(metadata),
+            "tool": (serialized or {}).get("name"),
+            "path": str(path) if path else None,
+            "host": _input_host(inputs),
+        }
+        start = self._tool_starts[run_id]
+        self._writer.working(
+            agent=start["agent"],
+            tool=start["tool"],
+            path=start["path"],
+            host=start["host"],
+        )
+
+    def on_tool_end(
+        self,
+        output: Any,
+        *,
+        run_id: Any,
+        parent_run_id: Any = None,
+        **kwargs: Any,
+    ) -> None:
+        start = self._tool_starts.pop(run_id, {})
+        self._writer.emit(
+            "tool",
+            agent=start.get("agent"),
+            tool=start.get("tool"),
+            path=start.get("path"),
+            host=start.get("host"),
+            ms=_elapsed_ms(start),
+            ok=True,
+        )
+
+    def on_tool_error(
+        self,
+        error: BaseException,
+        *,
+        run_id: Any,
+        parent_run_id: Any = None,
+        **kwargs: Any,
+    ) -> None:
+        start = self._tool_starts.pop(run_id, {})
+        self._writer.emit(
+            "tool",
+            agent=start.get("agent"),
+            tool=start.get("tool"),
+            path=start.get("path"),
+            host=start.get("host"),
+            ms=_elapsed_ms(start),
+            ok=False,
+            err=str(error),
+            denied=getattr(error, "denied", None),
+        )
+
+    # -- custom events --------------------------------------------------------
+
+    def on_custom_event(
+        self,
+        name: str,
+        data: Any,
+        *,
+        run_id: Any = None,
+        tags: list | None = None,
+        metadata: dict | None = None,
+        **kwargs: Any,
+    ) -> None:
+        """A middleware's adhoc ``warning`` becomes one JSONL event."""
+        if name == WARNING_EVENT and isinstance(data, Mapping):
+            self._writer.emit(
+                WARNING_EVENT,
+                agent=data.get("agent"),
+                model=data.get("model"),
+                reason=data.get("reason"),
+            )
+
+    # -- gate events ---------------------------------------------------------
+
+    def on_interrupt(self, event: GraphInterruptEvent) -> None:
+        for interrupt in event.interrupts:
+            value = interrupt.value
+            if isinstance(value, Mapping) and value.get("gate"):
+                self._writer.gate(str(value["gate"]), "waiting")
+
+
+_HOST_MAX = 253
+
+
+def _input_host(inputs: Any) -> str | None:
+    """The hostname of a tool call's ``url`` argument — never the rest."""
+    if not isinstance(inputs, dict):
+        return None
+    url = inputs.get("url")
+    if not isinstance(url, str):
+        return None
+    try:
+        host = urlsplit(url).hostname
+    except ValueError:
+        return None
+    return host[:_HOST_MAX] if host else None
+
+
+def _call_start(metadata: Mapping | None) -> dict:
+    metadata = metadata or {}
+    return {
+        "t0": time.monotonic(),
+        "helper": metadata.get(META_HELPER),
+        "agent": _agent_name(metadata),
+        "provider": metadata.get("ls_provider"),
+        "model": metadata.get("ls_model_name"),
+        "effort": metadata.get(META_EFFORT),
+        "attempt": metadata.get(META_ATTEMPT),
+    }
+
+
+def _agent_name(metadata: Mapping) -> Any:
+    if metadata.get(META_HELPER):
+        return None
+    return metadata.get(META_AGENT) or metadata.get("langgraph_node")
+
+
+def _elapsed_ms(start: Mapping) -> int:
+    t0 = start.get("t0")
+    if t0 is None:
+        return 0
+    return round((time.monotonic() - t0) * 1000)
+
+
+def _llm_message(response: Any) -> Any | None:
+    try:
+        generation = response.generations[0][0]
+    except (IndexError, TypeError, AttributeError):
+        return None
+    return getattr(generation, "message", None)
+
+
+def _response_model(response: Any, message: Any | None) -> Any | None:
+    llm_output = getattr(response, "llm_output", None) or {}
+    if llm_output.get("model_name"):
+        return llm_output["model_name"]
+    meta = getattr(message, "response_metadata", None) or {}
+    return meta.get("model_name")
+
+
+def _response_cost(message: Any | None) -> Any | None:
+    meta = getattr(message, "response_metadata", None) or {}
+    return meta.get("cost")
+
+
+def _web_searches(message: Any | None) -> int | None:
+    """The provider searches the call ran, or ``None`` — the field is
+    left out of the ``model`` event when the call ran none (#182).
+    OpenAI's ``web_search_call`` items land in the content blocks; a
+    v0-formatted response keeps them in ``additional_kwargs.tool_outputs``.
+    Anthropic's are the billed ``usage.server_tool_use.web_search_requests``
+    (#209): a ``server_tool_use`` block can name a search that runs on a
+    later call, so its blocks are not counted. Streaming drops that usage,
+    so then each executed search counts by its ``web_search_tool_result``
+    block (#210 review)."""
+    if message is None:
+        return None
+    count = _search_calls(getattr(message, "content", None))
+    tool_outputs = (getattr(message, "additional_kwargs", None) or {}).get(
+        "tool_outputs"
+    )
+    count += _search_calls(tool_outputs)
+    count += _anthropic_searches(message)
+    return count or None
+
+
+def _search_calls(blocks: Any) -> int:
+    if not isinstance(blocks, list):
+        return 0
+    return sum(
+        1
+        for block in blocks
+        if isinstance(block, dict) and block.get("type") == "web_search_call"
+    )
+
+
+def _anthropic_searches(message: Any) -> int:
+    billed = _billed_searches(getattr(message, "response_metadata", None))
+    if billed is not None:
+        return billed
+    content = getattr(message, "content", None)
+    if not isinstance(content, list):
+        return 0
+    return sum(
+        1
+        for block in content
+        if isinstance(block, dict) and block.get("type") == "web_search_tool_result"
+    )
+
+
+def _billed_searches(metadata: Any) -> int | None:
+    usage = (metadata or {}).get("usage") if isinstance(metadata, dict) else None
+    server = usage.get("server_tool_use") if isinstance(usage, dict) else None
+    count = server.get("web_search_requests") if isinstance(server, dict) else None
+    return count if isinstance(count, int) else None
+
+
+# --- Progress renderer ----------------------------------------------------
+
+_ERR_SNIP = 80
+
+
+def render_event(event: dict) -> str | None:
+    """One progress line for an event, or `None` when there is nothing to
+    say (unknown or absent `kind`, e.g. old 0.0.x lines)."""
+    renderer = _RENDERERS.get(event.get("kind", ""))
+    if renderer is None:
+        return None
+    return renderer(event)
+
+
+class ProgressRenderer:
+    """Turns each event into at most one progress line via `write`.
+
+    A `write` with an `event` method is a rich output (the terminal UI):
+    it gets the event itself and renders it its own way.
+    """
+
+    def __init__(self, write: Callable[[str], None]) -> None:
+        self._write = write
+
+    def __call__(self, event: dict) -> None:
+        rich_output = getattr(self._write, "event", None)
+        if rich_output is not None:
+            rich_output(event)
+            return
+        line = render_event(event)
+        if line is not None:
+            self._write(line)
+
+
+def _snip(text: str) -> str:
+    return text[:_ERR_SNIP]
+
+
+def _render_run_start(e: dict) -> str:
+    parts = ["run", e.get("run_kind", "?")]
+    if e.get("work_item"):
+        parts.append(e["work_item"])
+    parts.append("started")
+    if e.get("branch"):
+        parts.append("on " + e["branch"])
+    if e.get("resumed"):
+        parts.append("(resumed)")
+    return " ".join(parts)
+
+
+def _render_model(e: dict) -> str:
+    who = e.get("agent") or e.get("helper") or "?"
+    desc = _model_desc(e)
+    if e.get("ok"):
+        return _render_model_ok(e, who, desc)
+    return f"model {who} {desc} failed: {_snip(e.get('err', ''))} ({e.get('ms', 0)}ms)"
+
+
+def _model_desc(e: dict) -> str:
+    desc = e.get("model") or "?"
+    if e.get("provider"):
+        return f"{e['provider']}/{desc}"
+    return desc
+
+
+def _render_model_ok(e: dict, who: str, desc: str) -> str:
+    usage = ""
+    if "tokens_in" in e or "tokens_out" in e:
+        usage = f" ({e.get('tokens_in', 0)} in, {e.get('tokens_out', 0)} out)"
+    return f"model {who} {desc} ok {e.get('ms', 0)}ms{usage}"
+
+
+def _render_tool(e: dict) -> str:
+    head = f"tool {e.get('agent', '?')} {e.get('tool', '?')}"
+    if e.get("path"):
+        head += f" {e['path']}"
+    if e.get("host"):
+        head += f" {e['host']}"
+    if e.get("denied"):
+        return f"{head} denied {e['denied']} ({e.get('ms', 0)}ms)"
+    if e.get("ok"):
+        return f"{head} ok {e.get('ms', 0)}ms"
+    return f"{head} failed: {_snip(e.get('err', ''))} ({e.get('ms', 0)}ms)"
+
+
+def _render_warning(e: dict) -> str:
+    return (
+        f"warning {e.get('agent', '?')} {e.get('model', '?')}: "
+        f"{e.get('reason', '?')}"
+    )
+
+
+def _render_gate(e: dict) -> str:
+    line = f"gate {e.get('gate', '?')} {e.get('result', '?')}"
+    if e.get("redo"):
+        line += " redo: " + ", ".join(e["redo"])
+    return line
+
+
+def cost_parts(
+    agent_runs: Mapping[str, int] | None,
+    validator_reds: int | None,
+    model_calls: int | None,
+) -> list[str]:
+    """The run's cost as summary parts — ``implementer ×2``,
+    ``validator red ×1``, ``37 model calls`` — for the one line a
+    finished run shows (#150)."""
+    parts = [
+        f"{name} ×{count}" for name, count in (agent_runs or {}).items()
+    ]
+    if validator_reds:
+        parts.append(f"validator red ×{validator_reds}")
+    if model_calls:
+        parts.append(f"{model_calls} model calls")
+    return parts
+
+
+def run_cost(path: Path, run: str) -> dict[str, Any]:
+    """The run's work counts off its event log (#150): agent runs per
+    label (the ``agent`` events — crashed runs count too), VALIDATOR
+    reds (its ``fail`` gate results) and model calls — helpers and
+    failed calls included."""
+    events = [e for e in _log_events(path) if e.get("run") == run]
+    return {
+        "agent_runs": _agent_runs(events),
+        "validator_reds": _validator_reds(events),
+        "model_calls": sum(1 for e in events if e.get("kind") == "model"),
+    }
+
+
+def _agent_runs(events: list[dict]) -> dict[str, int]:
+    runs: dict[str, int] = {}
+    for event in events:
+        if event.get("kind") == "agent" and event.get("agent"):
+            label = str(event["agent"])
+            runs[label] = runs.get(label, 0) + 1
+    return runs
+
+
+def _validator_reds(events: list[dict]) -> int:
+    """One red per VALIDATOR round: a configured gate itself named
+    ``validator`` logs its own ``fail`` right before the aggregate's —
+    adjacent duplicates collapse into the one red they came from."""
+    reds = 0
+    for index, event in enumerate(events):
+        if _is_red(event) and not (index and _is_red(events[index - 1])):
+            reds += 1
+    return reds
+
+
+def _is_red(event: dict) -> bool:
+    return (
+        event.get("kind") == "gate"
+        and event.get("gate") == "validator"
+        and event.get("result") == "fail"
+    )
+
+
+def _log_events(path: Path) -> Iterable[dict]:
+    for log in sorted(path.parent.glob(f"{path.stem}*.jsonl")):
+        yield from _log_lines(log)
+
+
+def _log_lines(log: Path) -> Iterable[dict]:
+    try:
+        lines = log.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return
+    for line in lines:
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(event, dict):
+            yield event
+
+
+def _render_run_end(e: dict) -> str:
+    line = f"run ended {e.get('outcome', '?')} ({e.get('ms', 0)}ms)"
+    if e.get("reason"):
+        line += f" {e['reason']}"
+        if e.get("node"):
+            line += f" at {e['node']}"
+    cost = cost_parts(
+        e.get("agent_runs"), e.get("validator_reds"), e.get("model_calls")
+    )
+    if cost:
+        line += " · " + " · ".join(cost)
+    return line
+
+
+_RENDERERS: dict[str, Callable[[dict], str]] = {
+    "run_start": _render_run_start,
+    "model": _render_model,
+    "tool": _render_tool,
+    "warning": _render_warning,
+    "gate": _render_gate,
+    "run_end": _render_run_end,
+}
+
+
+def _failure(error: BaseException) -> dict:
+    """A failed call's outcome: Ctrl-C is the user pausing the run (#204)."""
+    if isinstance(error, KeyboardInterrupt):
+        return {"paused": True}
+    return {"err": str(error)}

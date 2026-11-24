@@ -1,0 +1,19 @@
+# The tracker's work item carries the work, and k0 never merges
+
+> Partly superseded by [ADR 0012](0012-work-is-planned-on-the-tracker-as-a-spec-and-its-tickets.md): a Q&A definition publishes a spec and its tickets in place of SPEC's brief comment. The tracker still carries the work, and k0 still never merges.
+
+From 0.1.0, the work item in the repo's tracker carries what an agent is asked to do, in place of the `spec.md` and `review.md` files in the repo root. The original workflow below used the now-retired `/full`:
+
+- SPEC's output is posted on the issue as an agent brief comment, which is the contract; the issue body stays the human's request. The spec gate is recorded on the issue.
+- TESTER, CODER and VALIDATOR work on a branch.
+- REVIEWER's review is posted on the pull request.
+- The human merges. k0 never does.
+
+The retired `/fast` command ran with no work item. The tracker is picked at `k0 init`. 0.1.0 implements GitHub only, behind a tracker interface. We chose this because code, tests, memory and the tracker already tell the story of a change, so a second carrier in the working tree duplicated it and was lost when the run ended. Merging stays with the human because it is the one step that cannot be taken back.
+
+## Consequences
+
+- k0 needs tracker credentials for tracker-backed commands.
+- The tracker interface has no merge method.
+- GitLab, Linear and Jira adapters are later work.
+- How the harness writes to the tracker is in the tracker-access decision on the 0.1.0 map.

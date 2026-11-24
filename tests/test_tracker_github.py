@@ -1,0 +1,845 @@
+"""Contract tests for the gh adapter: recorded --json/gh api output, fake runner."""
+
+import json
+import sys
+
+import pytest
+
+from fakes import FakeRunner
+from k0ntrol.tracker import ChildWorkItem, TrackerError, comment_marker
+from k0ntrol.tracker.github import GhTracker, subprocess_runner
+
+ISSUE = {
+    "number": 42,
+    "title": "Add login",
+    "body": "Users must log in.",
+    "state": "open",
+    "html_url": "https://github.com/o/r/issues/42",
+    "user": {"login": "rubenjp"},
+    "author_association": "OWNER",
+    "labels": [],
+}
+
+COMMENTS = [
+    {
+        "body": "first take",
+        "user": {"login": "octo"},
+        "author_association": "MEMBER",
+    }
+]
+
+ISSUE_ENDPOINT = ["gh", "api", "repos/{owner}/{repo}/issues/42"]
+COMMENTS_ENDPOINT = ["gh", "api", "--paginate", "repos/{owner}/{repo}/issues/42/comments"]
+ALL_ISSUES_ENDPOINT = [
+    "gh", "api", "--paginate", "--slurp",
+    "repos/{owner}/{repo}/issues?state=all&per_page=100",
+]
+SUB_ISSUES_ENDPOINT = [
+    "gh", "api", "--paginate", "--slurp",
+    "repos/{owner}/{repo}/issues/1/sub_issues?per_page=100",
+]
+ATTACH_SUB_ISSUE = [
+    "gh", "api", "--method", "POST",
+    "repos/{owner}/{repo}/issues/1/sub_issues",
+]
+
+
+def _issue(overrides=None):
+    return {**ISSUE, **(overrides or {})}
+
+
+def _tracker(issue=ISSUE, comments=COMMENTS):
+    runner = FakeRunner()
+    runner.script(ISSUE_ENDPOINT, stdout=json.dumps(issue))
+    runner.script(COMMENTS_ENDPOINT, stdout=json.dumps(comments))
+    return runner, GhTracker(runner)
+
+
+def test_read_work_item_parses_issue_and_comments():
+    _, tracker = _tracker()
+
+    item = tracker.read_work_item("42")
+
+    assert item.ref == "42"
+    assert item.title == "Add login"
+    assert item.state == "open"
+    assert item.author_association == "OWNER"
+    assert item.qualified_ref == "o/r#42"
+    assert [c.author for c in item.comments] == ["octo"]
+
+
+@pytest.mark.parametrize("ref", ["42", "#42"])
+def test_read_work_item_accepts_a_bare_or_hash_number(ref):
+    runner, tracker = _tracker()
+
+    item = tracker.read_work_item(ref)
+
+    assert item.ref == "42"
+    assert ["gh", "api", "repos/{owner}/{repo}/issues/#42"] not in runner.calls
+    assert ISSUE_ENDPOINT in runner.calls
+    assert COMMENTS_ENDPOINT in runner.calls
+
+
+@pytest.mark.parametrize(
+    "ref", ["o/r#42", "https://github.com/o/r/issues/42", "four", "", "#", "4 2"]
+)
+def test_read_work_item_refuses_other_ref_forms(ref):
+    runner, tracker = _tracker()
+
+    with pytest.raises(TrackerError, match="expected a work item number like 42 or #42"):
+        tracker.read_work_item(ref)
+
+    assert runner.calls == []
+
+
+@pytest.mark.parametrize("ref", ["7", "#7"])
+def test_read_change_diff_accepts_a_bare_or_hash_number(ref):
+    runner = FakeRunner()
+    runner.script(["gh", "pr", "diff"], stdout="diff --git a/x b/x\n+1\n")
+
+    GhTracker(runner).read_change_diff(ref)
+
+    assert runner.calls == [["gh", "pr", "diff", "7"]]
+
+
+def test_read_change_diff_refuses_other_ref_forms():
+    runner = FakeRunner()
+
+    with pytest.raises(TrackerError, match="expected a change number like 42 or #42"):
+        GhTracker(runner).read_change_diff("o/r#7")
+
+    assert runner.calls == []
+
+
+@pytest.mark.parametrize("existing", [False, True])
+def test_ensure_work_item_uses_creation_marker(existing):
+    marker = comment_marker("r1", "create_issue")
+    runner, tracker = _tracker(issue=_issue({"body": f"request\n\n{marker}"}))
+    runner.script(
+        ALL_ISSUES_ENDPOINT,
+        stdout=json.dumps([[ISSUE], [_issue({"body": marker})]] if existing else [[]]),
+    )
+    runner.script(["gh", "api", "user"], stdout=json.dumps({"login": "rubenjp"}))
+    runner.script(["gh", "issue", "create"], stdout="https://github.com/o/r/issues/42")
+    item = tracker.ensure_work_item("Task", "request", run="r1", node="create_issue")
+    assert item.ref == "42"
+    creates = [c for c in runner.calls if c[:3] == ["gh", "issue", "create"]]
+    assert len(creates) == (0 if existing else 1)
+    if creates:
+        assert creates[0][-1] == f"request\n\n{marker}"
+
+
+def test_ensure_work_item_ignores_a_spoofed_marker():
+    """A third party can paste the marker into a body, not fake its author."""
+    marker = comment_marker("r1", "create_issue")
+    runner, tracker = _tracker(issue=_issue({"body": f"request\n\n{marker}"}))
+    spoofed = _issue({"number": 99, "body": marker, "user": {"login": "mallory"}})
+    runner.script(
+        ALL_ISSUES_ENDPOINT,
+        stdout=json.dumps([[spoofed]]),
+    )
+    runner.script(["gh", "api", "user"], stdout=json.dumps({"login": "rubenjp"}))
+    runner.script(
+        ["gh", "api", "repos/{owner}/{repo}/issues/99"],
+        stdout=json.dumps(spoofed),
+    )
+    runner.script(
+        ["gh", "api", "--paginate", "repos/{owner}/{repo}/issues/99/comments"],
+        stdout="[]",
+    )
+    runner.script(["gh", "issue", "create"], stdout="https://github.com/o/r/issues/42")
+
+    item = tracker.ensure_work_item("Task", "request", run="r1", node="create_issue")
+
+    assert item.ref == "42"
+    creates = [c for c in runner.calls if c[:3] == ["gh", "issue", "create"]]
+    assert len(creates) == 1
+
+
+def test_create_work_item_posts_and_reads_back():
+    runner = FakeRunner()
+    runner.script(["gh", "issue", "create"], stdout="https://github.com/o/r/issues/7\n")
+    runner.script(
+        ["gh", "api", "repos/{owner}/{repo}/issues/7"],
+        stdout=json.dumps(_issue({"number": 7})),
+    )
+    runner.script(
+        ["gh", "api", "--paginate", "repos/{owner}/{repo}/issues/7/comments"],
+        stdout="[]",
+    )
+    tracker = GhTracker(runner)
+
+    item = tracker.create_work_item("Add login", "Users must log in.")
+
+    assert item.ref == "7"
+    assert [
+        "gh",
+        "issue",
+        "create",
+        "--title",
+        "Add login",
+        "--body",
+        "Users must log in.",
+    ] in runner.calls
+
+
+def test_create_child_work_item_creates_the_issue_and_attaches_it():
+    marker = comment_marker("r1", "publish_ticket")
+    runner = FakeRunner()
+    runner.script(
+        SUB_ISSUES_ENDPOINT,
+        stdout="[[]]",
+    )
+    runner.script(ALL_ISSUES_ENDPOINT, stdout="[[]]")
+    runner.script(["gh", "issue", "create"], stdout="https://github.com/o/r/issues/7\n")
+    runner.script(
+        ["gh", "api", "repos/{owner}/{repo}/issues/7"],
+        stdout=json.dumps(_issue({"number": 7, "id": 7007, "body": f"do it\n\n{marker}"})),
+    )
+    runner.script(ATTACH_SUB_ISSUE)
+    runner.script(
+        ["gh", "api", "--paginate", "repos/{owner}/{repo}/issues/7/comments"],
+        stdout="[]",
+    )
+    tracker = GhTracker(runner)
+
+    item = tracker.create_child_work_item(
+        "1", "Ticket A", "do it", run="r1", node="publish_ticket"
+    )
+
+    assert item.ref == "7"
+    creates = [c for c in runner.calls if c[:3] == ["gh", "issue", "create"]]
+    assert len(creates) == 1
+    assert creates[0][-1] == f"do it\n\n{marker}"
+    posts = [c for c in runner.calls if c[:2] == ["gh", "api"] and "--method" in c]
+    assert posts == [ATTACH_SUB_ISSUE + ["-F", "sub_issue_id=7007"]]
+
+
+def test_create_child_work_item_returns_the_marked_child_without_duplicating():
+    marker = comment_marker("r1", "publish_ticket")
+    child = _issue(
+        {"number": 7, "id": 7007, "title": "Ticket A", "body": f"do it\n\n{marker}"}
+    )
+    runner = FakeRunner()
+    runner.script(
+        SUB_ISSUES_ENDPOINT,
+        stdout=json.dumps([[child]]),
+    )
+    runner.script(["gh", "api", "user"], stdout=json.dumps({"login": "rubenjp"}))
+    runner.script(
+        ["gh", "api", "--paginate", "repos/{owner}/{repo}/issues/7/comments"],
+        stdout="[]",
+    )
+    tracker = GhTracker(runner)
+
+    item = tracker.create_child_work_item(
+        "1", "Ticket A", "do it", run="r1", node="publish_ticket"
+    )
+
+    assert item.ref == "7"
+    assert runner.calls == [
+        SUB_ISSUES_ENDPOINT,
+        ["gh", "api", "user"],
+        ["gh", "api", "--paginate", "repos/{owner}/{repo}/issues/7/comments"],
+    ]
+
+
+def test_create_child_work_item_retries_the_attach_after_a_failed_post():
+    marker = comment_marker("r1", "publish_ticket")
+    runner = FakeRunner()
+    runner.script(SUB_ISSUES_ENDPOINT, stdout="[[]]")
+    runner.script(ALL_ISSUES_ENDPOINT, stdout="[[]]")
+    runner.script(["gh", "issue", "create"], stdout="https://github.com/o/r/issues/7\n")
+    runner.script(
+        ["gh", "api", "repos/{owner}/{repo}/issues/7"],
+        stdout=json.dumps(_issue({"number": 7, "id": 7007})),
+    )
+    runner.script(ATTACH_SUB_ISSUE, returncode=1, stderr="attach failed")
+    runner.script(
+        ["gh", "api", "--paginate", "repos/{owner}/{repo}/issues/7/comments"],
+        stdout="[]",
+    )
+    tracker = GhTracker(runner)
+
+    with pytest.raises(TrackerError, match="attach failed"):
+        tracker.create_child_work_item(
+            "1", "Ticket A", "do it", run="r1", node="publish_ticket"
+        )
+
+    orphan = _issue({"number": 7, "id": 7007, "body": f"do it\n\n{marker}"})
+    runner.script(ALL_ISSUES_ENDPOINT, stdout=json.dumps([[orphan]]))
+    runner.script(["gh", "api", "user"], stdout=json.dumps({"login": "rubenjp"}))
+    runner.script(ATTACH_SUB_ISSUE)
+
+    item = tracker.create_child_work_item(
+        "1", "Ticket A", "do it", run="r1", node="publish_ticket"
+    )
+
+    assert item.ref == "7"
+    creates = [c for c in runner.calls if c[:3] == ["gh", "issue", "create"]]
+    assert len(creates) == 1
+    posts = [c for c in runner.calls if c[:2] == ["gh", "api"] and "--method" in c]
+    assert len(posts) == 2
+
+
+@pytest.mark.parametrize(
+    "ref", ["o/r#1", "https://github.com/o/r/issues/1", "one", "", "#", "1 2"]
+)
+def test_create_child_work_item_refuses_other_ref_forms(ref):
+    runner = FakeRunner()
+    tracker = GhTracker(runner)
+
+    with pytest.raises(TrackerError, match="expected a work item number like 42 or #42"):
+        tracker.create_child_work_item(ref, "T", "b", run="r", node="n")
+
+    assert runner.calls == []
+
+
+@pytest.mark.parametrize("ref", ["o/r#1", "one", ""])
+def test_list_children_refuses_other_ref_forms(ref):
+    runner = FakeRunner()
+    tracker = GhTracker(runner)
+
+    with pytest.raises(TrackerError, match="expected a work item number like 42 or #42"):
+        tracker.list_children(ref)
+
+    assert runner.calls == []
+
+
+def test_list_children_returns_ref_title_state_and_labels_in_order():
+    runner = FakeRunner()
+    runner.script(
+        SUB_ISSUES_ENDPOINT,
+        stdout=json.dumps(
+            [
+                [
+                    _issue(
+                        {
+                            "number": 8,
+                            "title": "Ticket A",
+                            "state": "open",
+                            "labels": [{"name": "ready-for-agent"}],
+                        }
+                    )
+                ],
+                [
+                    _issue(
+                        {
+                            "number": 9,
+                            "title": "Ticket B",
+                            "state": "closed",
+                            "labels": [{"name": "bug"}, {"name": "k0:done"}],
+                        }
+                    )
+                ],
+            ]
+        ),
+    )
+    tracker = GhTracker(runner)
+
+    children = tracker.list_children("1")
+
+    assert children == (
+        ChildWorkItem(
+            ref="8", title="Ticket A", state="open", labels=("ready-for-agent",)
+        ),
+        ChildWorkItem(
+            ref="9", title="Ticket B", state="closed", labels=("bug", "k0:done")
+        ),
+    )
+
+    runner.script(
+        SUB_ISSUES_ENDPOINT,
+        stdout="[[]]",
+    )
+    assert tracker.list_children("1") == ()
+
+
+def test_comment_work_item_marks_and_skips_when_marker_present():
+    runner, tracker = _tracker()
+    runner.script(["gh", "issue", "comment"])
+    marker = comment_marker("r1", "spec_gate")
+
+    tracker.comment_work_item("42", "gate passed", run="r1", node="spec_gate")
+    posted = [c for c in runner.calls if c[:3] == ["gh", "issue", "comment"]]
+    assert posted == [
+        ["gh", "issue", "comment", "42", "--body", f"{marker}\n\ngate passed"]
+    ]
+
+    runner.script(
+        COMMENTS_ENDPOINT,
+        stdout=json.dumps(COMMENTS + [{"body": f"{marker}\n\ngate passed", "user": {"login": "k0"}, "author_association": "OWNER"}]),
+    )
+    tracker.comment_work_item("42", "gate passed", run="r1", node="spec_gate")
+    posted = [c for c in runner.calls if c[:3] == ["gh", "issue", "comment"]]
+    assert len(posted) == 1  # second call was a no-op
+
+
+def test_find_comment_returns_none_without_marker():
+    _, tracker = _tracker()
+    assert tracker.find_comment("42", comment_marker("r1", "n")) is None
+    assert (
+        tracker.find_comment("42", "first take") is not None
+    )
+
+
+def test_label_operations_use_gh_issue_edit_and_gh_label():
+    runner = FakeRunner()
+    runner.script(ISSUE_ENDPOINT, stdout=json.dumps(_issue({"labels": [{"name": "k0:stuck"}]})))
+    runner.script(["gh", "issue", "edit"])
+    runner.script(["gh", "label", "list", "--json", "name"], stdout='[{"name":"bug"}]')
+    runner.script(["gh", "label", "create"])
+    tracker = GhTracker(runner)
+
+    tracker.add_label("42", "k0:stuck")
+    assert ["gh", "issue", "edit", "42", "--add-label", "k0:stuck"] in runner.calls
+
+    tracker.remove_label("42", "k0:stuck")
+    assert ["gh", "issue", "edit", "42", "--remove-label", "k0:stuck"] in runner.calls
+
+    runner.script(ISSUE_ENDPOINT, stdout=json.dumps(_issue()))
+    tracker.remove_label("42", "k0:stuck")  # absent: no edit call this time
+
+    tracker.ensure_label("k0:stuck")
+    creates = [c for c in runner.calls if c[:3] == ["gh", "label", "create"]]
+    assert len(creates) == 1 and "k0:stuck" in creates[0]
+
+
+def test_create_branch_checks_out_a_remote_only_branch_from_its_tip():
+    runner = FakeRunner()
+    runner.script(["git", "fetch", "origin", "main"])
+    runner.script(["git", "rev-parse", "--verify", "--quiet", "refs/heads/k0/1-x"], returncode=1)
+    runner.script(["git", "rev-parse", "--verify", "--quiet", "refs/remotes/origin/k0/1-x"])
+    runner.script(["git", "checkout"])
+    tracker = GhTracker(runner)
+
+    tracker.create_branch("k0/1-x", "main")
+
+    assert ["git", "checkout", "-b", "k0/1-x", "origin/k0/1-x"] in runner.calls
+    assert ["git", "checkout", "-b", "k0/1-x", "origin/main"] not in runner.calls
+
+
+def test_create_branch_fetches_and_checks_out_new_branch():
+    runner = FakeRunner()
+    runner.script(["git", "fetch", "origin", "main"])
+    runner.script(["git", "rev-parse", "--verify", "--quiet", "refs/heads/k0/1-x"], returncode=1)
+    runner.script(
+        ["git", "rev-parse", "--verify", "--quiet", "refs/remotes/origin/k0/1-x"],
+        returncode=1,
+    )
+    runner.script(["git", "checkout"])
+    tracker = GhTracker(runner)
+
+    tracker.create_branch("k0/1-x", "main")
+
+    assert ["git", "fetch", "origin", "main"] in runner.calls
+    assert ["git", "checkout", "-b", "k0/1-x", "origin/main"] in runner.calls
+
+
+def test_create_branch_checks_out_existing_branch():
+    runner = FakeRunner()
+    runner.script(["git", "fetch", "origin", "main"])
+    runner.script(["git", "rev-parse", "--verify", "--quiet", "refs/heads/k0/1-x"])
+    runner.script(["git", "checkout", "k0/1-x"])
+    tracker = GhTracker(runner)
+
+    tracker.create_branch("k0/1-x", "main")
+
+    assert ["git", "checkout", "k0/1-x"] in runner.calls
+    assert not any("-b" in c for c in runner.calls)
+
+
+def test_commit_stages_all_and_returns_whether_it_committed():
+    runner = FakeRunner()
+    runner.script(["git", "status", "--porcelain"], stdout=" M x.py\n")
+    runner.script(["git", "ls-files", "-u"], stdout="")
+    runner.script(["git", "rev-parse", "--verify", "--quiet", "HEAD"])
+    runner.script(["git", "ls-tree"], stdout="")
+    runner.script(["git", "diff", "--cached", "--name-only"], stdout="")
+    runner.script(["git", "add", "-A"])
+    runner.script(["git", "diff", "--cached", "--quiet"], returncode=1)
+    runner.script(["git", "commit", "-m", "#42: add login"])
+    tracker = GhTracker(runner)
+
+    assert tracker.commit("#42: add login") is True
+
+    runner.script(["git", "status", "--porcelain"], stdout="")
+    assert tracker.commit("#42: again") is False
+    assert not any(c[:3] == ["git", "commit", "-m"] and "again" in c[-1] for c in runner.calls)
+
+
+def test_push_uses_upstream_tracking():
+    runner = FakeRunner()
+    runner.script(
+        ["git", "remote", "get-url"], stdout="git@example.com:o/r.git\n"
+    )
+    runner.script(["git", "ls-remote"], stdout="")
+    runner.script(["git", "rev-list"], stdout="")
+    runner.script(["git", "push"])
+    tracker = GhTracker(runner)
+
+    tracker.push("k0/1-x")
+
+    assert ["git", "push", "-u", "origin", "k0/1-x"] in runner.calls
+
+
+def test_read_change_returns_none_or_the_change():
+    runner = FakeRunner()
+    runner.script(
+        ["gh", "pr", "list", "--head", "b", "--state", "all", "--json"],
+        stdout="[]",
+    )
+    tracker = GhTracker(runner)
+    assert tracker.read_change("b") is None
+
+    runner.script(
+        ["gh", "pr", "list", "--head", "b", "--state", "all", "--json"],
+        stdout=json.dumps(
+            [
+                {
+                    "number": 7,
+                    "title": "Add login",
+                    "state": "MERGED",
+                    "isDraft": False,
+                    "url": "https://github.com/o/r/pull/7",
+                    "headRefOid": "deadbee",
+                }
+            ]
+        ),
+    )
+    change = tracker.read_change("b")
+    assert change.ref == "7" and change.state == "merged"
+    assert change.head_sha == "deadbee"
+
+
+def _pr(number, state):
+    return {
+        "number": number,
+        "title": f"PR {number}",
+        "state": state,
+        "isDraft": False,
+        "url": f"https://github.com/o/r/pull/{number}",
+    }
+
+
+@pytest.mark.parametrize(
+    "prs,ref,state",
+    [
+        # an open PR wins whatever the listing order is
+        ([_pr(9, "CLOSED"), _pr(7, "OPEN")], "7", "open"),
+        ([_pr(7, "OPEN"), _pr(9, "CLOSED")], "7", "open"),
+        # no open PR: the most recent one (highest number) speaks
+        ([_pr(7, "MERGED"), _pr(9, "CLOSED")], "9", "closed"),
+        ([_pr(9, "CLOSED"), _pr(7, "MERGED")], "9", "closed"),
+    ],
+)
+def test_read_change_does_not_depend_on_the_listing_order(prs, ref, state):
+    runner = FakeRunner()
+    runner.script(
+        ["gh", "pr", "list", "--head", "b", "--state", "all", "--json"],
+        stdout=json.dumps(prs),
+    )
+
+    change = GhTracker(runner).read_change("b")
+
+    assert (change.ref, change.state) == (ref, state)
+
+
+def test_open_change_reuses_open_pr_or_creates_a_draft():
+    runner = FakeRunner()
+    runner.script(
+        ["gh", "pr", "list", "--head", "b", "--state", "all", "--json"],
+        stdout="[]",
+    )
+    runner.script(
+        ["gh", "pr", "create"], stdout="https://github.com/o/r/pull/7\n"
+    )
+    runner.script(["git", "rev-parse", "b"], stdout="cafef00d\n")
+    tracker = GhTracker(runner)
+
+    change = tracker.open_change("b", "main", "Add login", "Closes #42")
+    assert change.ref == "7" and change.is_draft and change.state == "open"
+    assert change.head_sha == "cafef00d"
+    create_call = [c for c in runner.calls if c[:3] == ["gh", "pr", "create"]][0]
+    assert "--draft" in create_call and "--base" in create_call
+
+    runner.script(
+        ["gh", "pr", "list", "--head", "b", "--state", "all", "--json"],
+        stdout=json.dumps(
+            [
+                {
+                    "number": 7,
+                    "title": "Add login",
+                    "state": "OPEN",
+                    "isDraft": True,
+                    "url": "https://github.com/o/r/pull/7",
+                }
+            ]
+        ),
+    )
+    again = tracker.open_change("b", "main", "Add login", "Closes #42")
+    assert again.ref == "7"
+    creates = [c for c in runner.calls if c[:3] == ["gh", "pr", "create"]]
+    assert len(creates) == 1
+
+
+def test_mark_change_ready_posts_comment_review_and_reads_diff():
+    runner = FakeRunner()
+    runner.script(["gh", "pr", "ready"])
+    runner.script(
+        ["gh", "api", "repos/{owner}/{repo}/pulls/7/reviews"], stdout="[]"
+    )
+    runner.script(["gh", "pr", "review"])
+    runner.script(
+        ["gh", "api", "--paginate", "repos/{owner}/{repo}/issues/7/comments"],
+        stdout="[]",
+    )
+    runner.script(["gh", "pr", "comment"])
+    runner.script(["gh", "pr", "diff"], stdout="diff --git a/x b/x\n+1\n")
+    tracker = GhTracker(runner)
+    marker = comment_marker("r1", "review_gate")
+
+    tracker.mark_change_ready("7")
+    assert ["gh", "pr", "ready", "7"] in runner.calls
+
+    tracker.post_review("7", "looks good", run="r1", node="reviewer")
+    review = [c for c in runner.calls if c[:3] == ["gh", "pr", "review"]][0]
+    assert "--comment" in review
+    assert comment_marker("r1", "reviewer") in review[review.index("--body") + 1]
+
+    tracker.comment_change("7", "gate ok", run="r1", node="review_gate")
+    comment = [c for c in runner.calls if c[:3] == ["gh", "pr", "comment"]][0]
+    assert marker in comment[comment.index("--body") + 1]
+
+    assert tracker.read_change_diff("7") == "diff --git a/x b/x\n+1\n"
+
+
+def test_post_review_is_noop_when_marker_already_reviewed():
+    runner = FakeRunner()
+    runner.script(
+        ["gh", "api", "repos/{owner}/{repo}/pulls/7/reviews"],
+        stdout=json.dumps(
+            [{"body": f"{comment_marker('r1', 'reviewer')}\n\nlooks good"}]
+        ),
+    )
+    tracker = GhTracker(runner)
+
+    tracker.post_review("7", "looks good", run="r1", node="reviewer")
+
+    assert not any(c[:3] == ["gh", "pr", "review"] for c in runner.calls)
+
+
+def test_gh_failure_raises_tracker_error_without_body_in_message():
+    runner = FakeRunner()
+    runner.script(
+        ["gh", "issue", "comment"], returncode=4, stderr="not logged in"
+    )
+    runner.script(COMMENTS_ENDPOINT, stdout="[]")
+    tracker = GhTracker(runner)
+
+    with pytest.raises(TrackerError, match="not logged in"):
+        tracker.comment_work_item("42", "gate", run="r", node="n")
+
+
+def test_subprocess_runner_runs_real_commands(tmp_path):
+    run = subprocess_runner(tmp_path)
+    result = run([sys.executable, "-c", "print('hi')"])
+    assert result.stdout.strip() == "hi"
+    assert result.returncode == 0
+
+
+def test_ensure_label_is_noop_when_label_exists():
+    runner = FakeRunner()
+    runner.script(
+        ["gh", "label", "list", "--json", "name"], stdout='[{"name":"k0:stuck"}]'
+    )
+    tracker = GhTracker(runner)
+
+    tracker.ensure_label("k0:stuck")
+
+    assert not any(c[:3] == ["gh", "label", "create"] for c in runner.calls)
+
+
+def test_comment_change_is_noop_when_marker_present():
+    runner = FakeRunner()
+    marker = comment_marker("r1", "review_gate")
+    runner.script(
+        ["gh", "api", "--paginate", "repos/{owner}/{repo}/issues/7/comments"],
+        stdout=json.dumps(
+            [
+                {
+                    "body": f"{marker}\n\ngate ok",
+                    "user": {"login": "k0"},
+                    "author_association": "OWNER",
+                }
+            ]
+        ),
+    )
+    tracker = GhTracker(runner)
+
+    tracker.comment_change("7", "gate ok", run="r1", node="review_gate")
+
+    assert not any(c[:3] == ["gh", "pr", "comment"] for c in runner.calls)
+
+
+def test_link_blocked_by_adds_a_native_dependency_and_repeats_as_a_noop():
+    runner = FakeRunner()
+    runner.script(
+        ["gh", "api", "repos/{owner}/{repo}/issues/7"],
+        stdout=json.dumps(_issue({"number": 7, "id": 555000})),
+    )
+    deps = "repos/{owner}/{repo}/issues/42/dependencies/blocked_by"
+    runner.script(
+        ["gh", "api", "--paginate", "--slurp", deps],
+        stdout=json.dumps([[]]),
+    )
+    runner.script(["gh", "api", "-X", "POST", deps])
+    tracker = GhTracker(runner)
+
+    tracker.link_blocked_by("42", "7")
+
+    posts = [c for c in runner.calls if deps in c and "POST" in c]
+    assert posts == [
+        ["gh", "api", "-X", "POST", deps, "-F", "issue_id=555000"]
+    ]
+
+    runner.script(
+        ["gh", "api", "--paginate", "--slurp", deps],
+        stdout=json.dumps([[{"id": 555000, "number": 7}]]),
+    )
+    tracker.link_blocked_by("42", "7")
+
+    posts = [c for c in runner.calls if deps in c and "POST" in c]
+    assert len(posts) == 1
+
+
+def test_list_blockers_returns_ref_title_state_and_labels_in_order():
+    runner = FakeRunner()
+    deps = "repos/{owner}/{repo}/issues/42/dependencies/blocked_by"
+    runner.script(
+        ["gh", "api", "--paginate", "--slurp", deps],
+        stdout=json.dumps(
+            [
+                [_issue({"number": 7, "state": "closed"})],
+                [
+                    _issue(
+                        {
+                            "number": 9,
+                            "title": "Ticket B",
+                            "labels": [{"name": "bug"}],
+                        }
+                    )
+                ],
+            ]
+        ),
+    )
+    tracker = GhTracker(runner)
+
+    blockers = tracker.list_blockers("42")
+
+    assert blockers == (
+        ChildWorkItem(ref="7", title="Add login", state="closed", labels=()),
+        ChildWorkItem(ref="9", title="Ticket B", state="open", labels=("bug",)),
+    )
+
+    runner.script(["gh", "api", "--paginate", "--slurp", deps], stdout="[[]]")
+    assert tracker.list_blockers("42") == ()
+
+
+@pytest.mark.parametrize("ref", ["o/r#1", "one", ""])
+def test_list_blockers_refuses_other_ref_forms(ref):
+    runner = FakeRunner()
+    tracker = GhTracker(runner)
+
+    with pytest.raises(TrackerError, match="expected a work item number like 42 or #42"):
+        tracker.list_blockers(ref)
+
+    assert runner.calls == []
+
+
+def test_edit_work_item_body_replaces_the_body():
+    runner = FakeRunner()
+    runner.script(["gh", "issue", "edit"])
+    tracker = GhTracker(runner)
+
+    tracker.edit_work_item_body("42", "the new body")
+
+    assert runner.calls == [
+        ["gh", "issue", "edit", "42", "--body", "the new body"]
+    ]
+
+
+@pytest.mark.parametrize("ref", ["o/r#1", "one", ""])
+def test_edit_work_item_body_refuses_other_ref_forms(ref):
+    runner = FakeRunner()
+    tracker = GhTracker(runner)
+
+    with pytest.raises(TrackerError, match="expected a work item number like 42 or #42"):
+        tracker.edit_work_item_body(ref, "body")
+
+    assert runner.calls == []
+
+
+def test_close_work_item_comments_then_closes_and_retries_without_reposting():
+    runner = FakeRunner()
+    runner.script(COMMENTS_ENDPOINT, stdout="[]")
+    runner.script(["gh", "issue", "comment"])
+    runner.script(["gh", "issue", "close"], returncode=1, stderr="boom")
+    tracker = GhTracker(runner)
+    marker = comment_marker("r1", "triage")
+
+    with pytest.raises(TrackerError, match="boom"):
+        tracker.close_work_item("42", "wontfix: duplicate", run="r1", node="triage")
+
+    runner.script(
+        COMMENTS_ENDPOINT,
+        stdout=json.dumps(
+            [
+                {
+                    "body": f"{marker}\n\nwontfix: duplicate",
+                    "user": {"login": "k0"},
+                    "author_association": "OWNER",
+                }
+            ]
+        ),
+    )
+    runner.script(["gh", "issue", "close"])
+    tracker.close_work_item("42", "wontfix: duplicate", run="r1", node="triage")
+
+    comments = [c for c in runner.calls if c[:3] == ["gh", "issue", "comment"]]
+    closes = [c for c in runner.calls if c[:3] == ["gh", "issue", "close"]]
+    assert comments == [
+        ["gh", "issue", "comment", "42", "--body", f"{marker}\n\nwontfix: duplicate"]
+    ]
+    assert closes == [["gh", "issue", "close", "42"]] * 2
+
+
+def test_read_labels_returns_the_work_items_current_label_names():
+    runner = FakeRunner()
+    runner.script(
+        ISSUE_ENDPOINT,
+        stdout=json.dumps(
+            _issue({"labels": [{"name": "bug"}, {"name": "ready-for-agent"}]})
+        ),
+    )
+    tracker = GhTracker(runner)
+
+    assert tracker.read_labels("42") == {"bug", "ready-for-agent"}
+    assert tracker.read_labels("#42") == {"bug", "ready-for-agent"}
+
+
+@pytest.mark.parametrize("ref", ["o/r#42", "four", ""])
+def test_new_work_item_ops_refuse_other_ref_forms(ref):
+    runner = FakeRunner()
+    tracker = GhTracker(runner)
+
+    with pytest.raises(TrackerError, match="expected a work item number"):
+        tracker.read_labels(ref)
+    with pytest.raises(TrackerError, match="expected a work item number"):
+        tracker.close_work_item(ref, "b", run="r", node="n")
+    with pytest.raises(TrackerError, match="expected a work item number"):
+        tracker.link_blocked_by(ref, "7")
+    with pytest.raises(TrackerError, match="expected a work item number"):
+        tracker.link_blocked_by("42", ref)
+
+    assert runner.calls == []
