@@ -1,0 +1,49 @@
+name: Publish
+
+# Builds k0ntrol and uploads it to PyPI with Trusted Publishing, so no token
+# lives in the repo. Pushing a v* tag publishes that tag. Running it by hand
+# on main publishes main's version, which must already be tagged: that is how
+# v0.1.0, tagged before this workflow existed, reaches PyPI.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+      - name: Check the version matches a release tag
+        run: |
+          version="$(python3 -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')"
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            [ "$GITHUB_REF_NAME" = "v$version" ] || { echo "::error::tag $GITHUB_REF_NAME does not match version $version"; exit 1; }
+          else
+            git ls-remote --exit-code --tags origin "refs/tags/v$version" > /dev/null || { echo "::error::v$version is not tagged yet"; exit 1; }
+          fi
+      - name: Build the wheel and sdist
+        run: uv build
+      - name: Keep the build
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+      - name: Fetch the build
+        uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - name: Upload to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
