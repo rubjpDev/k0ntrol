@@ -154,10 +154,10 @@ def _ask_nonempty(prompt: Prompt, label: str) -> str:
 # --- provider setup -----------------------------------------------------------
 
 _PROVIDERS = [
-    ("ollama", "Ollama (local)"),
-    ("bedrock", "Amazon Bedrock"),
-    ("anthropic", "Anthropic API"),
     ("openai", "OpenAI API"),
+    ("anthropic", "Anthropic API"),
+    ("bedrock", "Amazon Bedrock"),
+    ("ollama", "Ollama (local)"),
     ("openrouter", "OpenRouter (untested)"),
     ("vertex", "Google Vertex (untested)"),
 ]

@@ -200,6 +200,11 @@ def test_without_a_remote_github_comes_first_and_nothing_is_detected(tmp_path):
     assert all("(detected)" not in label for _, label in options)
 
 
+def test_openai_is_the_first_provider_offered():
+    """OpenAI is k0's default provider: setup offers it first."""
+    assert screens._PROVIDERS[0] == ("openai", "OpenAI API")
+
+
 def test_a_detected_gitlab_comes_first_but_cannot_be_picked(tmp_path):
     console = make_console()
     git_repo(tmp_path, "https://gitlab.com/me/repo.git")

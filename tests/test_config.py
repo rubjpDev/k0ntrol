@@ -81,13 +81,13 @@ def test_home_config_overrides_each_new_agent(tmp_path):
         "model_calls": 25,
     }
     assert agents["researcher"] == {
-        "provider": "anthropic",
-        "model": "claude-opus-5-5",
+        "provider": "openai",
+        "model": "gpt-6.1-terra",
         "effort": "low",
         "model_calls": 12,
     }
     assert agents["implementer"] == {
-        "provider": "anthropic",
+        "provider": "openai",
         "model": "qwen-implementer",
         "effort": "medium",
         "model_calls": 200,
@@ -104,8 +104,8 @@ def test_project_config_overrides_each_new_agent(tmp_path):
     )
     agents = load_config(tmp_path, tmp_path / "home")["agents"]
     assert agents["planner"] == {
-        "provider": "anthropic",
-        "model": "claude-opus-5-5",
+        "provider": "openai",
+        "model": "gpt-6.1-terra",
         "effort": "high",
         "model_calls": 30,
     }
@@ -116,7 +116,7 @@ def test_project_config_overrides_each_new_agent(tmp_path):
         "model_calls": 40,
     }
     assert agents["implementer"] == {
-        "provider": "anthropic",
+        "provider": "openai",
         "model": "qwen-implementer",
         "effort": "medium",
         "model_calls": 100,
