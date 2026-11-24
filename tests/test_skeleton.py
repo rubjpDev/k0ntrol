@@ -63,4 +63,4 @@ def test_provider_langfuse_and_otel_extras():
         "opentelemetry-exporter-otlp-proto-http>=1.45.0,<2",
     ]
     # `all` adds no dependency: it only bundles the provider extras
-    assert extras["all"] == ["k0ntrol[ollama,openai,anthropic,openrouter,aws,google]"]
+    assert extras["all"] == ["k0ntrol-cli[ollama,openai,anthropic,openrouter,aws,google]"]

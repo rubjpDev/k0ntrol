@@ -1,12 +1,12 @@
 <p align="center">
-  <img src="docs/media/banner.png" alt="k0ntrol: agents write the code, code decides what runs next, you decide what ships" width="100%">
+  <img src="https://raw.githubusercontent.com/rubjpDev/k0ntrol/main/docs/media/banner.png" alt="k0ntrol: agents write the code, code decides what runs next, you decide what ships" width="100%">
 </p>
 
 <p align="center">
   <a href="https://github.com/rubjpDev/k0ntrol/actions/workflows/test.yml"><img src="https://github.com/rubjpDev/k0ntrol/actions/workflows/test.yml/badge.svg?event=pull_request" alt="CI"></a>
-  <img src="https://img.shields.io/badge/version-0.1.0-5eead4" alt="version 0.1.0">
+  <a href="https://pypi.org/project/k0ntrol-cli/"><img src="https://img.shields.io/pypi/v/k0ntrol-cli?color=5eead4" alt="PyPI"></a>
   <img src="https://img.shields.io/badge/python-3.11%2B-3776ab" alt="Python 3.11+">
-  <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue" alt="Apache-2.0"></a>
+  <a href="https://github.com/rubjpDev/k0ntrol/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue" alt="Apache-2.0"></a>
 </p>
 
 **k0ntrol** (`k0`) is a local harness for coding agents. You plan the work with an agent. k0 builds it one ticket at a time, test-first, and reviews it twice. You decide what merges.
@@ -24,9 +24,10 @@
 ## Quick start
 
 ```sh
-git clone https://github.com/rubjpDev/k0ntrol && cd k0ntrol
-uv tool install --editable ".[openai]"
+uv tool install "k0ntrol-cli[openai]"
 ```
+
+`pipx install "k0ntrol-cli[openai]"` works too.
 
 Then, inside the repository you want to work on:
 
@@ -75,15 +76,15 @@ OpenAI by default. Anthropic, Amazon Bedrock, Ollama, OpenRouter and Google Vert
 
 ## Proof
 
-The 0.1.0 release ran live end to end. k0 fixed a bug in its own repo and wrote 100% of [PR #198](https://github.com/rubjpDev/k0ntrol/pull/198). The whole check cost about €0.20 in model calls. See the [release evidence](docs/releases/0.1.0.md).
+The 0.1.0 release ran live end to end. k0 fixed a bug in its own repo and wrote 100% of [PR #198](https://github.com/rubjpDev/k0ntrol/pull/198). The whole check cost about €0.20 in model calls. See the [release evidence](https://github.com/rubjpDev/k0ntrol/blob/main/docs/releases/0.1.0.md).
 
 ## Learn more
 
-- [GLOSSARY.md](GLOSSARY.md): the workflow's terms
-- [docs/adr](docs/adr): every design decision and why it was made
-- [CHANGELOG.md](CHANGELOG.md): what changed in each release
+- [GLOSSARY.md](https://github.com/rubjpDev/k0ntrol/blob/main/GLOSSARY.md): the workflow's terms
+- [docs/adr](https://github.com/rubjpDev/k0ntrol/tree/main/docs/adr): every design decision and why it was made
+- [CHANGELOG.md](https://github.com/rubjpDev/k0ntrol/blob/main/CHANGELOG.md): what changed in each release
 
-Agent-written code runs on your machine, with no OS sandbox. k0 strips secrets from the test environment, guards file paths, and holds back any push that touches `.github/` ([ADR 0006](docs/adr/0006-tool-safety-is-process-hygiene-and-code-guards-not-a-sandbox.md)).
+Agent-written code runs on your machine, with no OS sandbox. k0 strips secrets from the test environment, guards file paths, and holds back any push that touches `.github/` ([ADR 0006](https://github.com/rubjpDev/k0ntrol/blob/main/docs/adr/0006-tool-safety-is-process-hygiene-and-code-guards-not-a-sandbox.md)).
 
 ## Make it yours
 
@@ -91,8 +92,13 @@ k0 is open source under Apache-2.0. Try it, fork it, make it your own, and exten
 
 ## Contributing
 
-Pull requests are welcome. Start from an issue and work test-first. A change is done when `./scripts/check` passes. The rules are in [AGENTS.md](AGENTS.md).
+Pull requests are welcome. Start from an issue and work test-first. A change is done when `./scripts/check` passes. The rules are in [AGENTS.md](https://github.com/rubjpDev/k0ntrol/blob/main/AGENTS.md). To work on k0 itself, install it from a clone:
+
+```sh
+git clone https://github.com/rubjpDev/k0ntrol && cd k0ntrol
+uv tool install --editable ".[openai]"
+```
 
 ## License
 
-[Apache-2.0](LICENSE)
+[Apache-2.0](https://github.com/rubjpDev/k0ntrol/blob/main/LICENSE)
