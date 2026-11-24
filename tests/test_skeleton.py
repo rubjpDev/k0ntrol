@@ -26,9 +26,9 @@ def _pyproject() -> dict:
     return tomllib.loads((REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
 
 
-def test_version_is_0_1_0_dev0():
-    assert __version__ == "0.1.0.dev0"
-    assert _pyproject()["project"]["version"] == "0.1.0.dev0"
+def test_version_is_the_0_1_0_release():
+    assert __version__ == "0.1.0"
+    assert _pyproject()["project"]["version"] == "0.1.0"
 
 
 def test_runtime_dependencies_are_the_approved_closed_list():
