@@ -6,6 +6,10 @@ Versioning: a stable release is `x.y.0`, and a patch release `x.y.z` with `z > 0
 
 ## [Unreleased]
 
+### Added
+
+- **PyPI package** `k0ntrol-cli`: `uv tool install "k0ntrol-cli[openai]"` installs k0 without cloning the repo. PyPI refuses the name `k0ntrol` as too close to `kontrol`. Pushing a release tag publishes it through PyPI Trusted Publishing ([#224](https://github.com/rubjpDev/k0ntrol/issues/224)).
+
 ## [0.1.0] - 2026-11-24
 
 The first stable release. k0 moves from a single-pass pipeline to a LangGraph workflow: plan with a human, build one ticket at a time test-first, review twice, and let the human merge. Release evidence: [docs/releases/0.1.0.md](docs/releases/0.1.0.md).
