@@ -21,6 +21,7 @@ from k0ntrol.agents import (
     ANTHROPIC_WEB_SEARCH,
     NATIVE_SEARCH_MAX_CALLS,
     OPENAI_WEB_SEARCH,
+    PAUSED_TURN_LIMIT,
     MissingStructuredOutput,
     QuestionRound,
     ResearchFinding,
@@ -30,6 +31,7 @@ from k0ntrol.agents import (
     allowlist_for,
     build_agent,
     is_transient,
+    paused_turn,
 )
 from k0ntrol.events import EventWriter, K0EventHandler
 from k0ntrol.search import uses_native_search
@@ -417,6 +419,54 @@ def test_an_anthropic_rejection_drops_the_tool_and_warns(tmp_path, rejection):
         event for event in _read_events(path) if event.get("kind") == "warning"
     ]
     assert warning["reason"] == "web search unsupported"
+
+
+def _paused(container_id="c1"):
+    """Anthropic's ``pause_turn``: an unfinished server-search turn."""
+    return AIMessage(
+        content=[
+            {"type": "server_tool_use", "id": "s1", "name": "web_search", "input": {"query": "q"}},
+            {"type": "text", "text": "partial"},
+        ],
+        response_metadata={"stop_reason": "pause_turn", "container": {"id": container_id}},
+    )
+
+
+def test_a_paused_search_turn_continues_with_the_same_tools(tmp_path):
+    """``pause_turn`` is unfinished, not final: the paused content goes back
+    unchanged, with the same tools and its container, until the model
+    answers (#210 review)."""
+    model = _scripted(_paused(), _planner_round())
+    agent = _native_agent(tmp_path, model, provider="anthropic")
+
+    agent.invoke([HumanMessage("plan")])
+
+    assert len(model.invocations) == 2
+    sent_back = model.invocations[1][-1]
+    assert sent_back.response_metadata["stop_reason"] == "pause_turn"
+    assert ANTHROPIC_WEB_SEARCH in model.bound_tools
+    assert model.bind_kwargs["container"] == "c1"
+
+
+def test_paused_search_turns_are_bounded(tmp_path):
+    model = _scripted(*[_paused() for _ in range(PAUSED_TURN_LIMIT + 1)])
+    agent = _native_agent(tmp_path, model, provider="anthropic")
+
+    with pytest.raises(RuntimeError, match="paused"):
+        agent.invoke([HumanMessage("plan")])
+
+    assert len(model.invocations) == PAUSED_TURN_LIMIT + 1
+
+
+def test_a_paused_turn_inside_a_structured_output_error_is_found():
+    """With provider-native structured output, LangChain parses the paused
+    turn and raises; the paused message rides on the error."""
+    from langchain.agents.structured_output import StructuredOutputValidationError
+
+    paused = _paused()
+    error = StructuredOutputValidationError("ResearchFinding", ValueError("x"), paused)
+    assert paused_turn(error) is paused
+    assert paused_turn(ValueError("x")) is None
 
 
 def test_other_bad_request_errors_still_fail_the_run(tmp_path):

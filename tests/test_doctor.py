@@ -136,6 +136,24 @@ def test_native_search_names_each_agents_provider():
     assert "RESEARCHER on Anthropic's web search" in check.detail
 
 
+def test_an_unused_search_provider_needs_no_credential():
+    """Both search agents on Anthropic's own search: a configured Brave
+    without its key is unused, so it neither errors nor blocks a run
+    (#210 review)."""
+    cfg = cfg_with(
+        agent_entries={
+            "planner": {"provider": "anthropic", "model": "claude-x"},
+            "researcher": {"provider": "anthropic", "model": "claude-y"},
+        }
+    )
+    cfg["search"] = {"native": True, "provider": "brave"}
+    checks = free_checks(cfg, environ={"ANTHROPIC_API_KEY": "x"})
+    (check,) = [c for c in checks if c.name == "web search"]
+    assert check.status == "ok"
+    assert "Anthropic" in check.detail and "brave" not in check.detail
+    assert errors(checks) == []
+
+
 def test_native_search_covers_only_the_agents_on_a_wired_provider():
     """RESEARCHER on a provider without native search still needs
     ``search.provider``; the warning names only that agent (#182)."""
@@ -157,7 +175,7 @@ def test_native_search_alongside_a_search_provider():
     cfg = cfg_with(
         agent_entries={
             "planner": {"provider": "openai", "model": "gpt-x"},
-            "researcher": {"provider": "anthropic", "model": "claude-x"},
+            "researcher": {"provider": "bedrock", "model": "qwen-x"},
         }
     )
     cfg["search"] = {"native": True, "provider": "brave"}

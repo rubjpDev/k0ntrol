@@ -484,7 +484,11 @@ def test_first_run_openai_shows_only_shipped_labels_and_one_effort_order(tmp_pat
     run_provider_setup(home, Spy(), make_console(), root=tmp_path, read_secret=no_secret)
 
     labels = [label for _, options in seen for _, label in options]
-    assert not [label for label in labels if "(untested)" in label and "OpenAI" in label]
+    assert not [
+        label
+        for label in labels
+        if "(untested)" in label and ("OpenAI" in label or "Anthropic" in label)
+    ]
     assert not [label for label in labels if "LM Studio" in label or "(placeholder)" in label]
     efforts = [options for question, options in seen if question.startswith("Effort")]
     assert len(efforts) == 3

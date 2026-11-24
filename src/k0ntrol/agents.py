@@ -626,7 +626,7 @@ class NativeSearchMiddleware(AgentMiddleware):
         if self._search_dropped:
             request = request.override(tools=_without_search(request.tools))
         try:
-            return handler(request)
+            return _resume_paused(request, handler)
         except Exception as error:
             if not _unsupported_search(error):
                 raise
@@ -644,6 +644,83 @@ class NativeSearchMiddleware(AgentMiddleware):
 
 def _without_search(tools: Sequence[Any]) -> list[Any]:
     return [tool for tool in tools if tool not in NATIVE_SEARCH_TOOLS.values()]
+
+
+# Anthropic may pause a long server-search turn (``pause_turn``): the turn
+# is unfinished, not final. k0 sends the paused content back unchanged,
+# with the same tools and container, at most this many times per model
+# call; one more pause fails the call (#210 review). Every continuation is
+# its own model invocation, so each still emits one ``model`` event.
+PAUSED_TURN_LIMIT = 3
+
+
+def _resume_paused(
+    request: ModelRequest, handler: Callable[[ModelRequest], ModelResponse]
+) -> ModelResponse:
+    paused: list[AIMessage] = []
+    for _ in range(PAUSED_TURN_LIMIT + 1):
+        outcome = _call_once(request, handler)
+        if isinstance(outcome, ModelResponse):
+            return _with_paused(outcome, paused)
+        paused.append(outcome)
+        request = _continuation(request, outcome)
+    raise RuntimeError(
+        f"the provider paused the search turn {PAUSED_TURN_LIMIT + 1} times; "
+        "stopping this model call"
+    )
+
+
+def _call_once(
+    request: ModelRequest, handler: Callable[[ModelRequest], ModelResponse]
+) -> ModelResponse | AIMessage:
+    """The response, or the paused message when the turn paused — also
+    when LangChain's provider structured output failed to parse it."""
+    try:
+        response = handler(request)
+    except Exception as error:
+        message = paused_turn(error)
+        if message is None:
+            raise
+        return message
+    return paused_turn(response) or response
+
+
+def paused_turn(source: Any) -> AIMessage | None:
+    """The paused assistant message in a model response, or in the
+    structured-output error LangChain raises when it parses one."""
+    message = getattr(source, "ai_message", None)
+    if isinstance(source, ModelResponse):
+        message = source.result[-1] if source.result else None
+    return message if _is_paused(message) else None
+
+
+def _is_paused(message: Any) -> bool:
+    return (
+        isinstance(message, AIMessage)
+        and message.response_metadata.get("stop_reason") == "pause_turn"
+    )
+
+
+def _continuation(request: ModelRequest, message: AIMessage) -> ModelRequest:
+    """The same request with the paused turn appended unchanged, in the
+    container Anthropic ran it in."""
+    settings = dict(request.model_settings)
+    container = message.response_metadata.get("container")
+    if isinstance(container, dict) and container.get("id"):
+        settings["container"] = container["id"]
+    return request.override(
+        messages=[*request.messages, message], model_settings=settings
+    )
+
+
+def _with_paused(response: ModelResponse, paused: list[AIMessage]) -> ModelResponse:
+    """Keep the paused turns in the agent's history before the answer."""
+    if not paused:
+        return response
+    return ModelResponse(
+        result=[*paused, *response.result],
+        structured_response=response.structured_response,
+    )
 
 
 _WEB_SEARCH = re.compile(r"web[ _]search", re.IGNORECASE)
