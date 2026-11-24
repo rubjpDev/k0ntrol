@@ -439,13 +439,43 @@ def test_a_paused_search_turn_continues_with_the_same_tools(tmp_path):
     model = _scripted(_paused(), _planner_round())
     agent = _native_agent(tmp_path, model, provider="anthropic")
 
-    agent.invoke([HumanMessage("plan")])
+    result = agent.invoke([HumanMessage("plan")])
 
     assert len(model.invocations) == 2
     sent_back = model.invocations[1][-1]
     assert sent_back.response_metadata["stop_reason"] == "pause_turn"
     assert ANTHROPIC_WEB_SEARCH in model.bound_tools
-    assert model.bind_kwargs["container"] == "c1"
+    # One model node, one assistant message: the paused content is merged
+    # ahead of the answer, so the history still counts one call (#210 review).
+    (answer,) = [m for m in result.messages if isinstance(m, AIMessage)]
+    assert answer.content[0]["type"] == "server_tool_use"
+    assert any(block.get("text") == "partial" for block in answer.content)
+    assert answer.tool_calls
+
+
+def test_a_pause_on_the_last_allowed_call_is_not_a_limit_hit(tmp_path):
+    """``model_calls: 1``: the turn pauses, then completes — the finding is
+    kept, not sent to the limit gate (#210 review)."""
+    model = _scripted(_paused(), _planner_round())
+    cfg = _native_cfg(provider="anthropic")
+    cfg["agents"]["planner"]["model_calls"] = 1
+    tools = agent_tools(
+        "planner", root=tmp_path, cfg=cfg, tracker=_tracker(), init=_init(model)
+    )
+    agent = build_agent("planner", cfg, tools, root=tmp_path, init=_init(model))
+
+    result = agent.invoke([HumanMessage("plan")])
+
+    assert result.limit_hit is False
+    assert result.structured_response is not None
+
+
+def test_anthropic_searches_run_directly():
+    """The basic web search runs each search directly — no code-execution
+    caller and no container — so a paused turn replays intact through
+    langchain-anthropic, which drops ``caller`` (#210 review)."""
+    assert ANTHROPIC_WEB_SEARCH["type"] == "web_search_20250305"
+    assert "allowed_callers" not in ANTHROPIC_WEB_SEARCH
 
 
 def test_paused_search_turns_are_bounded(tmp_path):

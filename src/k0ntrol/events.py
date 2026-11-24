@@ -585,7 +585,9 @@ def _web_searches(message: Any | None) -> int | None:
     v0-formatted response keeps them in ``additional_kwargs.tool_outputs``.
     Anthropic's are the billed ``usage.server_tool_use.web_search_requests``
     (#209): a ``server_tool_use`` block can name a search that runs on a
-    later call, so its blocks are not counted."""
+    later call, so its blocks are not counted. Streaming drops that usage,
+    so then each executed search counts by its ``web_search_tool_result``
+    block (#210 review)."""
     if message is None:
         return None
     count = _search_calls(getattr(message, "content", None))
@@ -593,7 +595,7 @@ def _web_searches(message: Any | None) -> int | None:
         "tool_outputs"
     )
     count += _search_calls(tool_outputs)
-    count += _billed_searches(getattr(message, "response_metadata", None))
+    count += _anthropic_searches(message)
     return count or None
 
 
@@ -607,11 +609,25 @@ def _search_calls(blocks: Any) -> int:
     )
 
 
-def _billed_searches(metadata: Any) -> int:
+def _anthropic_searches(message: Any) -> int:
+    billed = _billed_searches(getattr(message, "response_metadata", None))
+    if billed is not None:
+        return billed
+    content = getattr(message, "content", None)
+    if not isinstance(content, list):
+        return 0
+    return sum(
+        1
+        for block in content
+        if isinstance(block, dict) and block.get("type") == "web_search_tool_result"
+    )
+
+
+def _billed_searches(metadata: Any) -> int | None:
     usage = (metadata or {}).get("usage") if isinstance(metadata, dict) else None
     server = usage.get("server_tool_use") if isinstance(usage, dict) else None
     count = server.get("web_search_requests") if isinstance(server, dict) else None
-    return count if isinstance(count, int) else 0
+    return count if isinstance(count, int) else None
 
 
 # --- Progress renderer ----------------------------------------------------

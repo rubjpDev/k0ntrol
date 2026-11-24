@@ -86,9 +86,14 @@ NATIVE_SEARCH_MAX_CALLS = 5
 # k0 owns, the one exception to "tools are only ``BaseTool`` instances".
 # Binding OpenAI's routes ``ChatOpenAI`` through the Responses API (#182);
 # Anthropic's carries its own cap (#209).
+# ponytail: Anthropic's basic web search runs each search directly — no
+# code-execution caller, no container — so a paused turn replays intact
+# through langchain-anthropic, which drops a search block's ``caller``.
+# Dynamic filtering (``web_search_20260209``) needs that kept; switch once
+# the adapter preserves ``caller`` and the continuation passes the container.
 OPENAI_WEB_SEARCH: dict[str, Any] = {"type": "web_search"}
 ANTHROPIC_WEB_SEARCH: dict[str, Any] = {
-    "type": "web_search_20260209",
+    "type": "web_search_20250305",
     "name": "web_search",
     "max_uses": NATIVE_SEARCH_MAX_CALLS,
 }
@@ -648,9 +653,10 @@ def _without_search(tools: Sequence[Any]) -> list[Any]:
 
 # Anthropic may pause a long server-search turn (``pause_turn``): the turn
 # is unfinished, not final. k0 sends the paused content back unchanged,
-# with the same tools and container, at most this many times per model
-# call; one more pause fails the call (#210 review). Every continuation is
-# its own model invocation, so each still emits one ``model`` event.
+# with the same tools, at most this many times per model call; one more
+# pause fails the call (#210 review). Every continuation is its own model
+# invocation with its own ``model`` event; the continuations of one model
+# call are bounded by this limit, not by the agent's ``model_calls``.
 PAUSED_TURN_LIMIT = 3
 
 
@@ -702,25 +708,29 @@ def _is_paused(message: Any) -> bool:
 
 
 def _continuation(request: ModelRequest, message: AIMessage) -> ModelRequest:
-    """The same request with the paused turn appended unchanged, in the
-    container Anthropic ran it in."""
-    settings = dict(request.model_settings)
-    container = message.response_metadata.get("container")
-    if isinstance(container, dict) and container.get("id"):
-        settings["container"] = container["id"]
-    return request.override(
-        messages=[*request.messages, message], model_settings=settings
-    )
+    """The same request, tools included, with the paused turn appended
+    unchanged."""
+    return request.override(messages=[*request.messages, message])
 
 
 def _with_paused(response: ModelResponse, paused: list[AIMessage]) -> ModelResponse:
-    """Keep the paused turns in the agent's history before the answer."""
+    """Merge the paused turns' content ahead of the answer's, in order, in
+    one assistant message: the history keeps every search block, and one
+    model node still leaves one assistant message for the call count."""
     if not paused:
         return response
+    answer, *rest = response.result
+    content = [block for message in [*paused, answer] for block in _blocks(message)]
+    merged = answer.model_copy(update={"content": content})
     return ModelResponse(
-        result=[*paused, *response.result],
-        structured_response=response.structured_response,
+        result=[merged, *rest], structured_response=response.structured_response
     )
+
+
+def _blocks(message: BaseMessage) -> list[Any]:
+    if isinstance(message.content, list):
+        return list(message.content)
+    return [{"type": "text", "text": message.content}] if message.content else []
 
 
 _WEB_SEARCH = re.compile(r"web[ _]search", re.IGNORECASE)
