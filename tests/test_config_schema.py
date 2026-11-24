@@ -21,18 +21,18 @@ def test_default_gates_are_empty(cfg):
 
 def test_shipped_agent_defaults_match_the_spec(cfg):
     assert cfg["agents"] == {
-        "planner": {"provider": "anthropic", "model": "claude-opus-5-5", "effort": "high", "model_calls": 25},
-        "researcher": {"provider": "anthropic", "model": "claude-opus-5-5", "effort": "high", "model_calls": 40},
-        "implementer": {"provider": "anthropic", "model": "claude-sonnet-5-5", "effort": "medium", "model_calls": 100},
-        "reviewer": {"provider": "anthropic", "model": "claude-opus-5-5", "effort": "high", "model_calls": 25},
-        "chatty": {"provider": "anthropic", "model": "claude-haiku-5-5", "model_calls": 15},
+        "planner": {"provider": "openai", "model": "gpt-6.1-terra", "effort": "high", "model_calls": 25},
+        "researcher": {"provider": "openai", "model": "gpt-6.1-terra", "effort": "high", "model_calls": 40},
+        "implementer": {"provider": "openai", "model": "gpt-6-luna", "effort": "medium", "model_calls": 100},
+        "reviewer": {"provider": "openai", "model": "gpt-6.1-terra", "effort": "high", "model_calls": 25},
+        "chatty": {"provider": "openai", "model": "gpt-6-luna", "model_calls": 15},
     }
 
 
 def test_shipped_helper_defaults_carry_no_effort_or_model_calls(cfg):
     assert cfg["helpers"] == {
-        "bulk_read": {"provider": "anthropic", "model": "claude-haiku-5-5"},
-        "reflect": {"provider": "anthropic", "model": "claude-haiku-5-5"},
+        "bulk_read": {"provider": "openai", "model": "gpt-6-luna"},
+        "reflect": {"provider": "openai", "model": "gpt-6-luna"},
     }
 
 
