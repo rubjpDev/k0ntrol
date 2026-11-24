@@ -4,7 +4,7 @@
 
 <p align="center">
   <a href="https://github.com/rubjpDev/k0ntrol/actions/workflows/test.yml"><img src="https://github.com/rubjpDev/k0ntrol/actions/workflows/test.yml/badge.svg?event=pull_request" alt="CI"></a>
-  <a href="https://pypi.org/project/k0ntrol/"><img src="https://img.shields.io/pypi/v/k0ntrol?color=5eead4" alt="PyPI"></a>
+  <a href="https://pypi.org/project/k0ntrol-cli/"><img src="https://img.shields.io/pypi/v/k0ntrol-cli?color=5eead4" alt="PyPI"></a>
   <img src="https://img.shields.io/badge/python-3.11%2B-3776ab" alt="Python 3.11+">
   <a href="https://github.com/rubjpDev/k0ntrol/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue" alt="Apache-2.0"></a>
 </p>
@@ -24,10 +24,10 @@
 ## Quick start
 
 ```sh
-uv tool install "k0ntrol[openai]"
+uv tool install "k0ntrol-cli[openai]"
 ```
 
-`pipx install "k0ntrol[openai]"` works too.
+`pipx install "k0ntrol-cli[openai]"` works too.
 
 Then, inside the repository you want to work on:
 

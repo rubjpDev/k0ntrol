@@ -1,5 +1,5 @@
 [project]
-name = "k0ntrol"
+name = "k0ntrol-cli"
 version = "0.1.0"
 description = "Local harness for coding agents: deterministic routing, TDD loop, human gates."
 readme = "README.md"
@@ -38,8 +38,8 @@ otel = [
     "opentelemetry-sdk>=1.45.0,<2",
     "opentelemetry-exporter-otlp-proto-http>=1.45.0,<2",
 ]
-# Every provider at once: `uv tool install "k0ntrol[all]"` gives a global `k0`.
-all = ["k0ntrol[ollama,openai,anthropic,openrouter,aws,google]"]
+# Every provider at once: `uv tool install "k0ntrol-cli[all]"` gives a global `k0`.
+all = ["k0ntrol-cli[ollama,openai,anthropic,openrouter,aws,google]"]
 
 [project.scripts]
 k0 = "k0ntrol.cli:main"
@@ -62,6 +62,11 @@ dev = [
 [build-system]
 requires = ["hatchling>=1.27"]
 build-backend = "hatchling.build"
+
+# PyPI refuses `k0ntrol` as too close to the existing `kontrol`, so the distribution
+# is `k0ntrol-cli` while the import package stays `k0ntrol` and the command `k0`.
+[tool.hatch.build.targets.wheel]
+packages = ["src/k0ntrol"]
 
 # The sdist carries what a user or packager needs: source, tests and docs.
 # The contributor agent setup and brand images stay in the repo.

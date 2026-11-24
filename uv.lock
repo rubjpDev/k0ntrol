@@ -1020,7 +1020,7 @@ wheels = [
 ]
 
 [[package]]
-name = "k0ntrol"
+name = "k0ntrol-cli"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
@@ -1079,7 +1079,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "k0ntrol", extras = ["ollama", "openai", "anthropic", "openrouter", "aws", "google"], marker = "extra == 'all'" },
+    { name = "k0ntrol-cli", extras = ["ollama", "openai", "anthropic", "openrouter", "aws", "google"], marker = "extra == 'all'" },
     { name = "langchain", specifier = ">=1.4.7,<1.5" },
     { name = "langchain-anthropic", marker = "extra == 'anthropic'", specifier = ">=1.7.6,<2" },
     { name = "langchain-aws", marker = "extra == 'aws'", specifier = ">=1.9.0,<2" },

@@ -8,7 +8,7 @@ Versioning: a stable release is `x.y.0`, and a patch release `x.y.z` with `z > 0
 
 ### Added
 
-- **PyPI package.** `uv tool install "k0ntrol[openai]"` installs k0 without cloning the repo. Pushing a release tag publishes it through PyPI Trusted Publishing ([#224](https://github.com/rubjpDev/k0ntrol/issues/224)).
+- **PyPI package** `k0ntrol-cli`: `uv tool install "k0ntrol-cli[openai]"` installs k0 without cloning the repo. PyPI refuses the name `k0ntrol` as too close to `kontrol`. Pushing a release tag publishes it through PyPI Trusted Publishing ([#224](https://github.com/rubjpDev/k0ntrol/issues/224)).
 
 ## [0.1.0] - 2026-11-24
 
