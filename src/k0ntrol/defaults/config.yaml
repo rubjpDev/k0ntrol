@@ -9,7 +9,7 @@ max_round_questions: 7
 ticket_size: small
 # search:                     # web search for PLANNER and RESEARCHER
 #   provider: brave           # k0's web_search backend (BRAVE_SEARCH_API_KEY)
-#   native: false             # true: agents on the openai provider use OpenAI's own
+#   native: false             # true: agents on openai or anthropic use that provider's own
 #                             # web search instead, billed per search on top of tokens
 agents:
   planner:     {provider: anthropic, model: claude-opus-5-5,   effort: high,   model_calls: 25}

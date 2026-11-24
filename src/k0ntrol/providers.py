@@ -32,6 +32,7 @@ from k0ntrol.search import (
     NATIVE_SEARCH_AGENTS,
     SEARCH_PROVIDERS,
     SearchProvider,
+    native_search_provider,
     search_provider_name,
     uses_native_search,
 )
@@ -298,18 +299,28 @@ def _search_check(cfg: dict, environ: Mapping[str, str]) -> Check:
     search, and the rest through ``search.provider`` (#182, ADR 0017)."""
     name = search_provider_name(cfg)
     provider = SEARCH_PROVIDERS.get(name) if name is not None else None
-    error = _search_provider_error(name, provider, environ)
-    if error is not None:
-        return error
     native = _native_agents(cfg)
     uncovered = [a for a in NATIVE_SEARCH_AGENTS if a not in native]
+    used = _used_provider(provider, uncovered)
+    error = _search_provider_error(name, provider, used, environ)
+    if error is not None:
+        return error
     if provider is None and uncovered:
         return Check(
             "web search", "warning",
             f"{_agent_names(uncovered)} will have no web search. "
             "Set search.provider to enable it.",
         )
-    return Check("web search", "ok", _search_detail(name, provider, native))
+    return Check("web search", "ok", _search_detail(cfg, name, used, native))
+
+
+def _used_provider(
+    provider: SearchProvider | None, uncovered: list[str]
+) -> SearchProvider | None:
+    """``search.provider`` when a search agent still uses it. One no
+    agent uses needs no credential: it must not block a run whose agents
+    all search natively (#210 review)."""
+    return provider if uncovered else None
 
 
 def _native_agents(cfg: dict) -> list[str]:
@@ -319,6 +330,7 @@ def _native_agents(cfg: dict) -> list[str]:
 def _search_provider_error(
     name: str | None,
     provider: SearchProvider | None,
+    used: SearchProvider | None,
     environ: Mapping[str, str],
 ) -> Check | None:
     if name is not None and provider is None:
@@ -327,15 +339,16 @@ def _search_provider_error(
             "web search", "error",
             f"unknown search.provider {name!r}; choose {known}",
         )
-    if provider is not None and not environ.get(provider.key_env):
+    if used is not None and not environ.get(used.key_env):
         return Check(
             "web search", "error",
-            f"{name} needs a credential; set {provider.key_env}",
+            f"{name} needs a credential; set {used.key_env}",
         )
     return None
 
 
 def _search_detail(
+    cfg: dict,
     name: str | None,
     provider: SearchProvider | None,
     native: list[str],
@@ -343,9 +356,19 @@ def _search_detail(
     parts = []
     if provider is not None:
         parts.append(f"{name} credential {provider.key_env} set")
-    if native:
-        parts.append(f"{_agent_names(native)} on OpenAI's web search")
+    parts.extend(_native_detail(cfg, native))
     return "; ".join(parts)
+
+
+def _native_detail(cfg: dict, native: list[str]) -> list[str]:
+    """``PLANNER on OpenAI's web search``, one part per provider (#209)."""
+    by_provider: dict[str, list[str]] = {}
+    for agent in native:
+        by_provider.setdefault(native_search_provider(cfg, agent), []).append(agent)
+    return [
+        f"{_agent_names(agents)} on {_KEY_OWNERS.get(owner, owner)}'s web search"
+        for owner, agents in by_provider.items()
+    ]
 
 
 def _agent_names(agents: list[str]) -> str:

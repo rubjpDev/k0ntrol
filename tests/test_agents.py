@@ -18,8 +18,10 @@ from pydantic import ValidationError
 from fakes import BadRequestError, FakeChatModel, FakeTracker, cfg_with
 from k0ntrol.agents import (
     ALLOWLISTS,
+    ANTHROPIC_WEB_SEARCH,
     NATIVE_SEARCH_MAX_CALLS,
     OPENAI_WEB_SEARCH,
+    PAUSED_TURN_LIMIT,
     MissingStructuredOutput,
     QuestionRound,
     ResearchFinding,
@@ -29,6 +31,7 @@ from k0ntrol.agents import (
     allowlist_for,
     build_agent,
     is_transient,
+    paused_turn,
 )
 from k0ntrol.events import EventWriter, K0EventHandler
 from k0ntrol.search import uses_native_search
@@ -161,13 +164,16 @@ def _native_cfg(agent="planner", provider="openai", **search):
     return cfg
 
 
+@pytest.mark.parametrize("provider", ["openai", "anthropic"])
 @pytest.mark.parametrize("agent", ["planner", "researcher"])
-def test_native_search_keys_on_the_k0_provider(agent):
-    cfg = _native_cfg(agent)
+def test_native_search_keys_on_the_k0_provider(agent, provider):
+    cfg = _native_cfg(agent, provider)
     assert uses_native_search(cfg, agent) is True
 
 
-@pytest.mark.parametrize("provider", ["lmstudio", "openai_compatible", "anthropic"])
+@pytest.mark.parametrize(
+    "provider", ["lmstudio", "openai_compatible", "bedrock", "openrouter"]
+)
 def test_native_search_follows_the_k0_provider_name(provider):
     # lmstudio and openai_compatible share LangChain's "openai"
     # model_provider — they still use search.provider (ADR 0017).
@@ -223,6 +229,24 @@ def test_native_search_binds_the_tool_and_the_call_cap(tmp_path):
 
     assert OPENAI_WEB_SEARCH in model.bound_tools
     assert model.bind_kwargs["max_tool_calls"] == NATIVE_SEARCH_MAX_CALLS
+
+
+def test_anthropic_native_search_binds_its_own_capped_tool(tmp_path):
+    """On ``anthropic`` the slot carries Anthropic's web search, capped by
+    its own ``max_uses``; ``max_tool_calls`` is OpenAI's and never sent (#209)."""
+    model = _scripted(_planner_round())
+    cfg = _native_cfg(provider="anthropic")
+    tools = agent_tools(
+        "planner", root=tmp_path, cfg=cfg, tracker=_tracker(), init=_init(model)
+    )
+    agent = build_agent("planner", cfg, tools, root=tmp_path, init=_init(model))
+
+    agent.invoke([HumanMessage("plan")])
+
+    assert ANTHROPIC_WEB_SEARCH in model.bound_tools
+    assert OPENAI_WEB_SEARCH not in model.bound_tools
+    assert ANTHROPIC_WEB_SEARCH["max_uses"] == NATIVE_SEARCH_MAX_CALLS
+    assert "max_tool_calls" not in model.bind_kwargs
 
 
 def test_native_search_never_binds_both_search_tools(tmp_path):
@@ -310,8 +334,8 @@ def _planner_round(questions=None):
     )
 
 
-def _native_agent(tmp_path, model, **tool_kwargs):
-    cfg = _native_cfg()
+def _native_agent(tmp_path, model, provider="openai", **tool_kwargs):
+    cfg = _native_cfg(provider=provider)
     tools = agent_tools(
         "planner",
         root=tmp_path,
@@ -373,6 +397,106 @@ def test_an_unsupported_model_retries_without_the_tool(tmp_path):
         event for event in _read_events(path) if event.get("kind") == "warning"
     ]
     assert len(warnings) == 1
+
+
+@pytest.mark.parametrize(
+    "rejection",
+    [
+        "400 tools.0: 'web_search_20260209' is not supported on this model",
+        "400 Web search is not enabled for this organization",
+    ],
+)
+def test_an_anthropic_rejection_drops_the_tool_and_warns(tmp_path, rejection):
+    model = _scripted(BadRequestError(rejection), _planner_round())
+    agent = _native_agent(tmp_path, model, provider="anthropic")
+    handler, path = _event_log(tmp_path)
+
+    agent.invoke([HumanMessage("plan")], config={"callbacks": [handler]})
+
+    assert len(model.invocations) == 2
+    assert ANTHROPIC_WEB_SEARCH not in model.bound_tools
+    (warning,) = [
+        event for event in _read_events(path) if event.get("kind") == "warning"
+    ]
+    assert warning["reason"] == "web search unsupported"
+
+
+def _paused(container_id="c1"):
+    """Anthropic's ``pause_turn``: an unfinished server-search turn."""
+    return AIMessage(
+        content=[
+            {"type": "server_tool_use", "id": "s1", "name": "web_search", "input": {"query": "q"}},
+            {"type": "text", "text": "partial"},
+        ],
+        response_metadata={"stop_reason": "pause_turn", "container": {"id": container_id}},
+    )
+
+
+def test_a_paused_search_turn_continues_with_the_same_tools(tmp_path):
+    """``pause_turn`` is unfinished, not final: the paused content goes back
+    unchanged, with the same tools and its container, until the model
+    answers (#210 review)."""
+    model = _scripted(_paused(), _planner_round())
+    agent = _native_agent(tmp_path, model, provider="anthropic")
+
+    result = agent.invoke([HumanMessage("plan")])
+
+    assert len(model.invocations) == 2
+    sent_back = model.invocations[1][-1]
+    assert sent_back.response_metadata["stop_reason"] == "pause_turn"
+    assert ANTHROPIC_WEB_SEARCH in model.bound_tools
+    # One model node, one assistant message: the paused content is merged
+    # ahead of the answer, so the history still counts one call (#210 review).
+    (answer,) = [m for m in result.messages if isinstance(m, AIMessage)]
+    assert answer.content[0]["type"] == "server_tool_use"
+    assert any(block.get("text") == "partial" for block in answer.content)
+    assert answer.tool_calls
+
+
+def test_a_pause_on_the_last_allowed_call_is_not_a_limit_hit(tmp_path):
+    """``model_calls: 1``: the turn pauses, then completes — the finding is
+    kept, not sent to the limit gate (#210 review)."""
+    model = _scripted(_paused(), _planner_round())
+    cfg = _native_cfg(provider="anthropic")
+    cfg["agents"]["planner"]["model_calls"] = 1
+    tools = agent_tools(
+        "planner", root=tmp_path, cfg=cfg, tracker=_tracker(), init=_init(model)
+    )
+    agent = build_agent("planner", cfg, tools, root=tmp_path, init=_init(model))
+
+    result = agent.invoke([HumanMessage("plan")])
+
+    assert result.limit_hit is False
+    assert result.structured_response is not None
+
+
+def test_anthropic_searches_run_directly():
+    """The basic web search runs each search directly — no code-execution
+    caller and no container — so a paused turn replays intact through
+    langchain-anthropic, which drops ``caller`` (#210 review)."""
+    assert ANTHROPIC_WEB_SEARCH["type"] == "web_search_20250305"
+    assert "allowed_callers" not in ANTHROPIC_WEB_SEARCH
+
+
+def test_paused_search_turns_are_bounded(tmp_path):
+    model = _scripted(*[_paused() for _ in range(PAUSED_TURN_LIMIT + 1)])
+    agent = _native_agent(tmp_path, model, provider="anthropic")
+
+    with pytest.raises(RuntimeError, match="paused"):
+        agent.invoke([HumanMessage("plan")])
+
+    assert len(model.invocations) == PAUSED_TURN_LIMIT + 1
+
+
+def test_a_paused_turn_inside_a_structured_output_error_is_found():
+    """With provider-native structured output, LangChain parses the paused
+    turn and raises; the paused message rides on the error."""
+    from langchain.agents.structured_output import StructuredOutputValidationError
+
+    paused = _paused()
+    error = StructuredOutputValidationError("ResearchFinding", ValueError("x"), paused)
+    assert paused_turn(error) is paused
+    assert paused_turn(ValueError("x")) is None
 
 
 def test_other_bad_request_errors_still_fail_the_run(tmp_path):

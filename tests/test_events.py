@@ -598,6 +598,87 @@ def test_model_event_counts_the_calls_web_searches(tmp_path):
     assert "example.com" not in json.dumps(event)
 
 
+def test_model_event_counts_anthropic_web_searches(tmp_path):
+    """Anthropic's billed searches: ``usage.server_tool_use.web_search_requests``,
+    which langchain-anthropic merges into ``response_metadata`` (#209). A
+    ``server_tool_use`` block can name a search that runs on a later call,
+    so the blocks are not counted (#210 review)."""
+    from uuid import uuid4
+
+    from langchain_core.outputs import LLMResult
+
+    handler, path = make_handler(tmp_path)
+    run_id = uuid4()
+    handler.on_chat_model_start({}, [], run_id=run_id, metadata={"k0_agent": "planner"})
+    message = AIMessage(
+        content=[
+            {"type": "server_tool_use", "id": "s1", "name": "web_search", "input": {"query": "q"}},
+            {"type": "web_search_tool_result", "tool_use_id": "s1", "content": []},
+            {"type": "server_tool_use", "id": "s2", "name": "web_search", "input": {"query": "q2"}},
+            {"type": "server_tool_use", "id": "s3", "name": "web_fetch", "input": {"url": "u"}},
+            {"type": "text", "text": "answer"},
+        ],
+        response_metadata={
+            "usage": {"server_tool_use": {"web_search_requests": 2, "web_fetch_requests": 0}}
+        },
+    )
+    handler.on_llm_end(
+        LLMResult(generations=[[ChatGeneration(message=message)]]),
+        run_id=run_id,
+    )
+    (event,) = read_events(path)
+    assert event["web_searches"] == 2
+    assert "q2" not in json.dumps(event)
+
+
+def test_streamed_anthropic_searches_count_their_result_blocks(tmp_path):
+    """Streaming drops ``server_tool_use`` usage, so each executed search is
+    counted from its ``web_search_tool_result`` block (#210 review)."""
+    from uuid import uuid4
+
+    from langchain_core.outputs import LLMResult
+
+    handler, path = make_handler(tmp_path)
+    run_id = uuid4()
+    handler.on_chat_model_start({}, [], run_id=run_id, metadata={"k0_agent": "planner"})
+    message = AIMessage(
+        content=[
+            {"type": "server_tool_use", "id": "s1", "name": "web_search", "input": {}},
+            {"type": "web_search_tool_result", "tool_use_id": "s1", "content": []},
+            {"type": "server_tool_use", "id": "s2", "name": "web_search", "input": {}},
+            {"type": "web_search_tool_result", "tool_use_id": "s2", "content": []},
+            {"type": "text", "text": "answer"},
+        ],
+        response_metadata={"usage": {"input_tokens": 3}},
+    )
+    handler.on_llm_end(
+        LLMResult(generations=[[ChatGeneration(message=message)]]),
+        run_id=run_id,
+    )
+    (event,) = read_events(path)
+    assert event["web_searches"] == 2
+
+
+def test_anthropic_search_blocks_without_billed_searches_count_none(tmp_path):
+    from uuid import uuid4
+
+    from langchain_core.outputs import LLMResult
+
+    handler, path = make_handler(tmp_path)
+    run_id = uuid4()
+    handler.on_chat_model_start({}, [], run_id=run_id, metadata={"k0_agent": "planner"})
+    message = AIMessage(
+        content=[{"type": "server_tool_use", "id": "s1", "name": "web_search", "input": {}}],
+        response_metadata={"usage": {"server_tool_use": {"web_search_requests": 0}}},
+    )
+    handler.on_llm_end(
+        LLMResult(generations=[[ChatGeneration(message=message)]]),
+        run_id=run_id,
+    )
+    (event,) = read_events(path)
+    assert "web_searches" not in event
+
+
 def test_model_event_omits_web_searches_when_the_call_ran_none(tmp_path):
     from uuid import uuid4
 
